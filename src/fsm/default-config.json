@@ -1,0 +1,81 @@
+{
+  "initial": "triage",
+  "escalationState": "needs_human",
+  "forwardOrder": [
+    "triage",
+    "plan",
+    "plan_review",
+    "interface_design",
+    "tdd",
+    "frontend",
+    "backend",
+    "code_review",
+    "done"
+  ],
+  "guards": {
+    "plan_review": 3,
+    "code_review": 3,
+    "interface_revision": 3
+  },
+  "budget": {
+    "maxAgentRuns": 60
+  },
+  "states": {
+    "triage": {
+      "transitions": {
+        "proceed": { "to": "FORWARD" },
+        "escalate": { "to": "needs_human" }
+      }
+    },
+    "plan": {
+      "transitions": {
+        "proceed": { "to": "FORWARD" },
+        "escalate": { "to": "needs_human" }
+      }
+    },
+    "plan_review": {
+      "transitions": {
+        "approve": { "to": "FORWARD" },
+        "request_changes": { "to": "plan", "backEdge": true, "counter": "plan_review" },
+        "escalate": { "to": "needs_human" }
+      }
+    },
+    "interface_design": {
+      "transitions": {
+        "proceed": { "to": "FORWARD" },
+        "escalate": { "to": "needs_human" }
+      }
+    },
+    "tdd": {
+      "transitions": {
+        "proceed": { "to": "FORWARD" },
+        "escalate": { "to": "needs_human" }
+      }
+    },
+    "frontend": {
+      "optionalFlag": "needs_frontend",
+      "transitions": {
+        "proceed": { "to": "FORWARD" },
+        "interfaces_inadequate": { "to": "interface_design", "backEdge": true, "counter": "interface_revision" },
+        "escalate": { "to": "needs_human" }
+      }
+    },
+    "backend": {
+      "optionalFlag": "needs_backend",
+      "transitions": {
+        "proceed": { "to": "FORWARD" },
+        "interfaces_inadequate": { "to": "interface_design", "backEdge": true, "counter": "interface_revision" },
+        "escalate": { "to": "needs_human" }
+      }
+    },
+    "code_review": {
+      "transitions": {
+        "approve": { "to": "FORWARD" },
+        "request_changes": { "toOneOf": ["frontend", "backend"], "backEdge": true, "counter": "code_review" },
+        "escalate": { "to": "needs_human" }
+      }
+    },
+    "done": { "terminal": true },
+    "needs_human": { "terminal": true }
+  }
+}

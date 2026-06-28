@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+*.log
+
+# Local SQLite databases
+*.db
+*.db-shm
+*.db-wal
+
+# Environment / secrets (see README §3.3 Layer 5)
+.env
+.env.*
+!.env.example
