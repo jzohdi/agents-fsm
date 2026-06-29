@@ -40,6 +40,12 @@ interface CommitEntry {
 export interface FakeGitHubOptions {
   /** Root the synthetic working-tree paths hang off (purely a string; nothing touches disk). */
   workingRoot?: string;
+  /**
+   * When true, `readIssue` returns a synthetic issue for any unseeded ref instead of rejecting.
+   * A convenience for pipeline tests that drive many runs and don't care about issue content;
+   * the strict default (reject unknown, like the real API) stays the norm.
+   */
+  autoSeedIssues?: boolean;
 }
 
 /**
@@ -57,12 +63,14 @@ export class FakeGitHub implements GitHub {
   /** Working trees by run id, so repeated preparation is idempotent. */
   private readonly workingTrees = new Map<number, WorkingTree>();
   private readonly workingRoot: string;
+  private readonly autoSeedIssues: boolean;
   private prCounter = 0;
   private commentCounter = 0;
   private commitCounter = 0;
 
   constructor(options: FakeGitHubOptions = {}) {
     this.workingRoot = options.workingRoot ?? '/tmp/agent-fleet-fake';
+    this.autoSeedIssues = options.autoSeedIssues ?? false;
   }
 
   // --- test seeding -----------------------------------------------------------
@@ -94,6 +102,11 @@ export class FakeGitHub implements GitHub {
     return this.comments.map((c) => ({ ...c }));
   }
 
+  /** Total commits recorded so far (test introspection, e.g. to assert a review stage made none). */
+  commitCount(): number {
+    return this.commitCounter;
+  }
+
   /** Force a PR's state, e.g. to simulate a human merging a dependency (README §3.5). */
   setPrState(prNumber: number, state: PullRequest['state']): void {
     this.requirePr(prNumber).state = state;
@@ -106,8 +119,18 @@ export class FakeGitHub implements GitHub {
 
   async readIssue(issueRef: string): Promise<Issue> {
     const issue = this.issues.get(issueRef);
-    if (!issue) throw new GitHubNotFoundError(`issue not found: ${issueRef}`);
-    return { ...issue };
+    if (issue) return { ...issue };
+    if (this.autoSeedIssues) {
+      const m = /#(\d+)/.exec(issueRef);
+      const number = m ? Number(m[1]) : 1;
+      return { ref: issueRef, number, title: `Issue ${number}`, body: '' };
+    }
+    throw new GitHubNotFoundError(`issue not found: ${issueRef}`);
+  }
+
+  async findOpenPrForBranch(branch: string): Promise<PullRequest | null> {
+    const pr = this.prs.find((p) => p.branch === branch && p.state === 'open');
+    return pr ? { ...pr } : null;
   }
 
   async openPr(input: OpenPrInput): Promise<PullRequest> {

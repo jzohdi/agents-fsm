@@ -112,6 +112,24 @@ describe('GitHubCli — gh-backed API (injected exec)', () => {
     expect(calls[0]!.args).toEqual(['api', 'repos/o/r/issues/5/comments', '-f', 'body=fix naming']);
   });
 
+  it('findOpenPrForBranch returns an open PR, or null when none / closed', async () => {
+    const openPr = JSON.stringify({
+      number: 5, headRefName: 'feature', baseRefName: 'main', title: 't', body: '', state: 'OPEN', url: 'u',
+    });
+    const ghOpen = new GitHubCli({ repo: 'o/r', workingRoot: '/w', exec: stubExec({ 'gh pr': ok(openPr) }).exec });
+    expect(await ghOpen.findOpenPrForBranch('feature')).toMatchObject({ number: 5, state: 'open' });
+
+    // A closed PR does not block opening a new one → treated as null.
+    const closedPr = JSON.stringify({ ...JSON.parse(openPr), state: 'CLOSED' });
+    const ghClosed = new GitHubCli({ repo: 'o/r', workingRoot: '/w', exec: stubExec({ 'gh pr': ok(closedPr) }).exec });
+    expect(await ghClosed.findOpenPrForBranch('feature')).toBeNull();
+
+    // No PR for the branch → gh exits non-zero "no pull requests found" → null, not a throw.
+    const noPr: ExecFn = () => Promise.resolve({ code: 1, stdout: '', stderr: 'no pull requests found for branch' });
+    const ghNone = new GitHubCli({ repo: 'o/r', workingRoot: '/w', exec: noPr });
+    expect(await ghNone.findOpenPrForBranch('feature')).toBeNull();
+  });
+
   it('maps a gh "not found" failure to GitHubNotFoundError', async () => {
     const exec: ExecFn = () => Promise.resolve({ code: 1, stdout: '', stderr: 'GraphQL: Could not resolve to an Issue (404)' });
     const gh = new GitHubCli({ repo: 'o/r', workingRoot: '/w', exec });

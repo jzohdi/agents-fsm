@@ -39,6 +39,11 @@ describe('parseEnvelope', () => {
     expect(parseEnvelope({ requestedTransition: 'proceed', flags: { needs_frontend: 'yes' } }).ok).toBe(false);
   });
 
+  it('accepts a string array of review comments, and rejects non-strings', () => {
+    expect(parseEnvelope({ requestedTransition: 'approve', comments: ['nit', 'fix'] }).ok).toBe(true);
+    expect(parseEnvelope({ requestedTransition: 'approve', comments: [{ body: 'x' }] }).ok).toBe(false);
+  });
+
   it('rejects an artifact without a kind', () => {
     expect(parseEnvelope({ requestedTransition: 'proceed', artifacts: [{ locator: {} }] }).ok).toBe(false);
   });

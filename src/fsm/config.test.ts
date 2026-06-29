@@ -43,6 +43,15 @@ describe('default config', () => {
     expect(recipeFor('plan', agents).reviewCap).toBe(2);
   });
 
+  it('declares the per-stage io for the default pipeline', () => {
+    const { agents } = loadDefaultConfig();
+    expect(recipeFor('triage', agents).io).toEqual({ kind: 'triage' });
+    expect(recipeFor('tdd', agents).io).toEqual({ kind: 'produce', opensPr: true });
+    expect(recipeFor('plan_review', agents).io).toEqual({ kind: 'review' });
+    expect(recipeFor('code_review', agents).io).toEqual({ kind: 'review' });
+    expect(recipeFor('plan', agents).io).toEqual({ kind: 'produce' }); // default for producing stages
+  });
+
   it('hashes deterministically and is order-independent', () => {
     const { fsm } = loadDefaultConfig();
     expect(hashConfig(fsm)).toBe(hashConfig(fsm));
@@ -110,6 +119,22 @@ describe('parseConfigFile — agent recipe', () => {
     const { agents } = parseConfigFile(baseRaw());
     expect(agents).toEqual({});
     expect(recipeFor('a', agents).phases).toEqual(['produce', 'self_review', 'simplify']);
+  });
+
+  it('allows a recipe with no phases (defaults apply) and an allow-list', () => {
+    const { agents } = parseConfigFile(withAgents({ a: { allowedTools: ['Read', 'Bash'] } }));
+    expect(recipeFor('a', agents)).toMatchObject({ phases: ['produce', 'self_review', 'simplify'], allowedTools: ['Read', 'Bash'] });
+  });
+
+  it('reads the per-stage io descriptor, defaulting to a produce stage', () => {
+    const { agents } = parseConfigFile(withAgents({ a: { io: { kind: 'review' } } }));
+    expect(recipeFor('a', agents).io).toEqual({ kind: 'review' });
+    expect(recipeFor('missing', agents).io).toEqual({ kind: 'produce' }); // default
+  });
+
+  it('rejects opensPr on a non-produce stage', () => {
+    expect(() => parseConfigFile(withAgents({ a: { io: { kind: 'review', opensPr: true } } }))).toThrow(/opensPr/);
+    expect(() => parseConfigFile(withAgents({ a: { io: { kind: 'produce', opensPr: true } } }))).not.toThrow();
   });
 });
 

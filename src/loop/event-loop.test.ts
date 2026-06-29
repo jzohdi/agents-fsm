@@ -12,15 +12,17 @@ import { openDb } from '../store/db';
 import { Repository } from '../store/repository';
 import { AgentRunner } from '../agent/runner';
 import { StubExecutor, goldenPathHandler, type StubHandler } from '../agent/executor';
+import { FakeGitHub } from '../integration/github-fake';
 import { EVENT_ADVANCE, EventLoop, type EventLoopOptions } from './event-loop';
 
 function setup(handler: StubHandler, opts: EventLoopOptions = {}, fsmOverride?: (fsm: FsmConfig) => FsmConfig) {
   const loaded = loadDefaultConfig();
   const fsm = fsmOverride ? fsmOverride(loaded.fsm) : loaded.fsm;
   const repo = new Repository(openDb(':memory:'));
-  const runner = new AgentRunner(repo, new StubExecutor(handler), loaded.agents);
+  const github = new FakeGitHub({ autoSeedIssues: true });
+  const runner = new AgentRunner(repo, new StubExecutor(handler), loaded.agents, github);
   const loop = new EventLoop(repo, fsm, loaded.version, runner, opts);
-  return { repo, loop, fsm };
+  return { repo, loop, fsm, github };
 }
 
 function sequence(repo: Repository, runId: number): Array<[string, string, string]> {
@@ -53,6 +55,10 @@ describe('golden path (start → done on stubs)', () => {
     expect(finalRun.status).toBe('done');
     expect(sequence(repo, run.id)).toEqual(GOLDEN_PATH);
 
+    // The working-tree lifecycle ran: the branch was created (at plan) and the PR opened (at tdd).
+    expect(finalRun.branch).toBe(`agent/run-${run.id}`);
+    expect(finalRun.prNumber).not.toBeNull();
+
     // The onTransition stream saw every transition in order.
     expect(transitions).toEqual(GOLDEN_PATH.map(([, , to]) => to));
 
@@ -83,9 +89,14 @@ describe('golden path (start → done on stubs)', () => {
     const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
     await loop.runUntilIdle();
 
-    const kinds = repo.listArtifacts(run.id).map((a) => a.kind);
+    const artifacts = repo.listArtifacts(run.id);
     // plan, interface, and the PR (from tdd) are all recorded from their envelopes.
-    expect(kinds).toEqual(['plan', 'interface', 'pr']);
+    expect(artifacts.map((a) => a.kind)).toEqual(['plan', 'interface', 'pr']);
+    // Locators carry the runner's real branch/sha enrichment and the opened PR number.
+    const plan = artifacts.find((a) => a.kind === 'plan')!;
+    expect(plan.locator).toMatchObject({ branch: `agent/run-${run.id}` });
+    expect(plan.locator).toHaveProperty('sha');
+    expect(artifacts.find((a) => a.kind === 'pr')!.locator).toHaveProperty('number');
   });
 
   it('drives multiple runs to done in a single drain (serial multi-run)', async () => {
@@ -265,6 +276,20 @@ describe('loop-owned guards escalate', () => {
     expect(last.trigger).toBe('executor_error');
   });
 
+  it('parks a run with a git_error trigger when a stage side effect fails', async () => {
+    const { repo, loop, github } = setup(goldenPathHandler);
+    github.commitAndPush = () => Promise.reject(new Error('push rejected'));
+
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.runUntilIdle(); // must not throw
+
+    const finalRun = repo.getRun(run.id)!;
+    expect(finalRun.status).toBe('needs_human');
+    const last = repo.listTransitions(run.id).at(-1)!;
+    expect(last.trigger).toBe('git_error'); // labeled cause, not a generic escalation
+    expect(last.fromState).toBe('plan'); // the first produce stage that commits
+  });
+
   it('escalates a run pinned to a different config version (fail safe, never mis-process)', async () => {
     const { repo, loop } = setup(goldenPathHandler);
     // A run started under a stale config version — simulates config edited + daemon restarted.
@@ -281,6 +306,67 @@ describe('loop-owned guards escalate', () => {
     expect(finalRun.status).toBe('needs_human');
     expect(repo.listAgentRuns(run.id)).toHaveLength(0); // no stage ran
     expect(repo.listTransitions(run.id).at(-1)!.trigger).toBe('config_version_mismatch');
+  });
+
+  it('resumes a parked run from where it escalated and drives it to done', async () => {
+    let failed = false;
+    const handler: StubHandler = (req) => {
+      if (req.stage === 'plan' && req.phase === 'produce' && !failed) {
+        failed = true;
+        throw new Error('transient harness failure');
+      }
+      return goldenPathHandler(req);
+    };
+    const { repo, loop } = setup(handler);
+
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.runUntilIdle();
+
+    // It parked in needs_human, having escalated from plan.
+    expect(repo.getRun(run.id)!.status).toBe('needs_human');
+    expect(repo.listTransitions(run.id).at(-1)!.fromState).toBe('plan');
+
+    // Resume: plan now succeeds, and the run completes.
+    loop.resumeRun(run.id);
+    await loop.runUntilIdle();
+
+    const finalRun = repo.getRun(run.id)!;
+    expect(finalRun.currentState).toBe('done');
+    expect(finalRun.status).toBe('done');
+    // The resume is recorded as a manual transition (needs_human → plan) with no event id.
+    const resumeT = repo.listTransitions(run.id).find((t) => t.trigger === 'resume')!;
+    expect(resumeT).toMatchObject({ fromState: 'needs_human', toState: 'plan', eventId: null, isReset: true });
+  });
+
+  it('restores a fresh round budget when resuming after a round-limit escalation', async () => {
+    const handler: StubHandler = (req) =>
+      req.stage === 'code_review'
+        ? { output: { requestedTransition: 'request_changes', target: 'backend', reason: { note: 'again' } } }
+        : goldenPathHandler(req);
+    const { repo, loop, fsm } = setup(handler);
+    const limit = fsm.guards.code_review!;
+
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.runUntilIdle();
+
+    const countBackEdges = () =>
+      repo.listTransitions(run.id).filter((t) => t.backEdge && t.counterKey === 'code_review').length;
+    expect(repo.getRun(run.id)!.status).toBe('needs_human');
+    expect(countBackEdges()).toBe(limit);
+
+    // Resume: the counter reset gives code_review another full `limit` rounds before re-escalating.
+    loop.resumeRun(run.id);
+    await loop.runUntilIdle();
+
+    expect(repo.getRun(run.id)!.status).toBe('needs_human');
+    expect(countBackEdges()).toBe(2 * limit);
+  });
+
+  it('refuses to resume a run that is not needs_human', () => {
+    const { repo, loop } = setup(goldenPathHandler);
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    expect(() => loop.resumeRun(run.id)).toThrowError(/not needs_human/);
+    expect(repo.getRun(run.id)!.currentState).toBe('triage'); // unchanged
   });
 
   it('keeps draining when an onTransition subscriber throws (best-effort notification)', async () => {

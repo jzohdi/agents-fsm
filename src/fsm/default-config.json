@@ -79,7 +79,13 @@
     "needs_human": { "terminal": true }
   },
   "agents": {
-    "plan_review": { "phases": ["produce"] },
-    "code_review": { "phases": ["produce"] }
+    "triage": { "phases": ["produce"], "io": { "kind": "triage" }, "allowedTools": ["Read", "Grep", "Glob"] },
+    "plan": { "allowedTools": ["Read", "Grep", "Glob", "Edit", "Write"] },
+    "interface_design": { "allowedTools": ["Read", "Grep", "Glob", "Edit", "Write"] },
+    "tdd": { "io": { "kind": "produce", "opensPr": true }, "allowedTools": ["Read", "Grep", "Glob", "Edit", "Write", "Bash"] },
+    "frontend": { "allowedTools": ["Read", "Grep", "Glob", "Edit", "Write", "Bash"] },
+    "backend": { "allowedTools": ["Read", "Grep", "Glob", "Edit", "Write", "Bash"] },
+    "plan_review": { "phases": ["produce"], "io": { "kind": "review" }, "allowedTools": ["Read", "Grep", "Glob"] },
+    "code_review": { "phases": ["produce"], "io": { "kind": "review" }, "allowedTools": ["Read", "Grep", "Glob"] }
   }
 }

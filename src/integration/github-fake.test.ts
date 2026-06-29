@@ -21,6 +21,28 @@ describe('FakeGitHub — issues', () => {
     const gh = new FakeGitHub();
     await expect(gh.readIssue('o/r#1')).rejects.toBeInstanceOf(GitHubNotFoundError);
   });
+
+  it('auto-seeds a synthetic issue (number from the ref) when configured', async () => {
+    const gh = new FakeGitHub({ autoSeedIssues: true });
+    expect(await gh.readIssue('o/r#42')).toMatchObject({ ref: 'o/r#42', number: 42 });
+    expect(await gh.readIssue('bare-ref')).toMatchObject({ number: 1 }); // fallback when no #n
+  });
+});
+
+describe('FakeGitHub — findOpenPrForBranch', () => {
+  it('returns the open PR for a branch, or null', async () => {
+    const gh = new FakeGitHub();
+    expect(await gh.findOpenPrForBranch('feature')).toBeNull();
+    const pr = await gh.openPr({ branch: 'feature', base: 'main', title: 't', body: '' });
+    expect(await gh.findOpenPrForBranch('feature')).toMatchObject({ number: pr.number });
+  });
+
+  it('does not return a merged/closed PR (a new one can be opened)', async () => {
+    const gh = new FakeGitHub();
+    const pr = await gh.openPr({ branch: 'feature', base: 'main', title: 't', body: '' });
+    gh.setPrState(pr.number, 'merged');
+    expect(await gh.findOpenPrForBranch('feature')).toBeNull();
+  });
 });
 
 describe('FakeGitHub — working tree', () => {

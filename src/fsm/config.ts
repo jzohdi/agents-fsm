@@ -180,10 +180,28 @@ function canonicalize(value: unknown): unknown {
 // recipe + model-per-phase live in the *same* config file under an `agents` key, but
 // are split out here so the engine stays pure and never sees them (README §3.3 Layer 4).
 
+/**
+ * What git/GitHub work brackets a stage's agent run (Milestone 4, plans/milestone-4.md §3.2).
+ * Declared per stage so the Agent Runner reads it instead of hardcoding stage names.
+ */
+export interface StageIo {
+  /**
+   * - `triage`: read the issue only; no working tree, no commit.
+   * - `produce`: ensure the tree (create the branch first time), commit/push after the agent runs.
+   * - `review`: ensure the tree (read-only); post comments; no commit.
+   */
+  kind: 'triage' | 'produce' | 'review';
+  /** Open the PR after this stage if the run has none yet (only `tdd`). Only valid on `produce`. */
+  opensPr?: boolean;
+}
+
+/** The default I/O for a stage absent from config, or with no `io` set: a producing stage. */
+export const DEFAULT_IO: StageIo = { kind: 'produce' };
+
 /** Per-stage agent recipe: which phases to run, which model per phase, the internal-loop cap. */
 export interface StageAgentConfig {
-  /** Ordered phases the Agent Runner executes for this stage (e.g. `[produce, self_review, simplify]`). */
-  phases: AgentPhase[];
+  /** Ordered phases the Agent Runner executes for this stage. Absent → {@link DEFAULT_PHASES}. */
+  phases?: AgentPhase[];
   /** Logical model name per phase (resolved to a real model by the Layer 5 Stage Executor). */
   models?: Partial<Record<AgentPhase, string>>;
   /** Cap on the internal self-review → fix loop before escalating (README §2 internal review rounds). */
@@ -193,6 +211,8 @@ export interface StageAgentConfig {
    * review stages get read-only tools. Absent means the harness's default policy applies.
    */
   allowedTools?: string[];
+  /** Git/GitHub effects that bracket this stage. Absent → {@link DEFAULT_IO} (a producing stage). */
+  io?: StageIo;
 }
 
 /** Agent config keyed by stage name. Stages absent here use {@link DEFAULT_PHASES}. */
@@ -222,13 +242,19 @@ const stageAgentSchema = z
       .nonempty()
       .refine(isCanonicalPrefix, {
         message: 'phases must be a prefix of [produce, self_review, simplify] (produce first; simplify requires self_review)',
-      }),
+      })
+      .optional(),
     models: z
       .object({ produce: z.string().optional(), self_review: z.string().optional(), simplify: z.string().optional() })
       .strict()
       .optional(),
     reviewCap: z.number().int().positive().optional(),
     allowedTools: z.array(z.string()).optional(),
+    io: z
+      .object({ kind: z.enum(['triage', 'produce', 'review']), opensPr: z.boolean().optional() })
+      .strict()
+      .refine((io) => !io.opensPr || io.kind === 'produce', { message: 'opensPr is only valid on a produce stage' })
+      .optional(),
   })
   .strict();
 
@@ -248,13 +274,20 @@ export function parseAgentsConfig(raw: unknown): AgentsConfig {
 export function recipeFor(
   stage: string,
   agents: AgentsConfig,
-): { phases: AgentPhase[]; models: Partial<Record<AgentPhase, string>>; reviewCap: number; allowedTools?: string[] } {
+): {
+  phases: AgentPhase[];
+  models: Partial<Record<AgentPhase, string>>;
+  reviewCap: number;
+  allowedTools?: string[];
+  io: StageIo;
+} {
   const c = agents[stage];
   return {
     phases: c?.phases ?? [...DEFAULT_PHASES],
     models: c?.models ?? {},
     reviewCap: c?.reviewCap ?? DEFAULT_REVIEW_CAP,
     allowedTools: c?.allowedTools,
+    io: c?.io ?? DEFAULT_IO,
   };
 }
 

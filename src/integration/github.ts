@@ -122,8 +122,13 @@ export interface GitHub {
    */
   readDiff(input: ReadDiffInput): Promise<string>;
 
+  /** The open PR for a branch, or `null` if none. Lets `tdd` be find-or-create rather than
+   * only `pr_number`-guarded, closing the crash/resume window between `openPr` and persisting
+   * the number (so recovery never opens a duplicate PR). */
+  findOpenPrForBranch(branch: string): Promise<PullRequest | null>;
+
   /** Open a PR for the run's branch. Callers ensure idempotency by checking the run's
-   * recorded `pr_number` first (README §2 "stage actions are idempotent"). */
+   * recorded `pr_number` (and `findOpenPrForBranch`) first (README §2 "stage actions are idempotent"). */
   openPr(input: OpenPrInput): Promise<PullRequest>;
 
   /** Update an existing PR (the idempotent path when the run already has a PR). */

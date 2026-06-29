@@ -59,6 +59,38 @@ export class EventLoop {
     return this.repo.recoverProcessingEvents();
   }
 
+  /**
+   * Resume a `needs_human` run from where it escalated (plans/milestone-4.md §3.10). The operator
+   * fixes the cause, then calls this: it moves the run back to the stage it escalated from, resets
+   * the round counters (a fresh budget, per README §3.3 Layer 6), and enqueues an advance event so
+   * the loop re-dispatches that stage — safely, because every stage side effect is idempotent.
+   *
+   * The full pause/stop/revert control surface arrives with the API (M5); this is the minimal
+   * recover-and-continue, sharing the repo logic the API will reuse.
+   */
+  resumeRun(runId: number): void {
+    const run = this.repo.getRun(runId);
+    if (!run) throw new Error(`resumeRun: run ${runId} not found`);
+    if (run.status !== 'needs_human') throw new Error(`resumeRun: run ${runId} is "${run.status}", not needs_human`);
+
+    const escalation = [...this.repo.listTransitions(runId)].reverse().find((t) => t.toState === this.fsm.escalationState);
+    if (!escalation) throw new Error(`resumeRun: run ${runId} has no escalation transition to resume from`);
+    const target = escalation.fromState;
+
+    this.repo.transaction(() => {
+      this.repo.commitTransition({
+        runId,
+        fromState: this.fsm.escalationState,
+        toState: target,
+        trigger: 'resume',
+        isReset: true, // reset round counters → a fresh budget of rounds for the resumed loop
+        status: 'running',
+        eventId: null, // a manual operator transition, not driven by an event
+      });
+      this.repo.enqueueEvent({ runId, type: EVENT_ADVANCE });
+    });
+  }
+
   /** Process one event if any is dispatchable. Returns false when the queue is idle. */
   async tick(): Promise<boolean> {
     const event = this.repo.claimNextEvent();
@@ -134,7 +166,9 @@ export class EventLoop {
       return;
     }
     if (outcome.kind === 'escalate') {
-      this.escalate(run, event, 'internal_escalation', outcome.reason);
+      // The runner labels *why* it escalated (malformed_output, internal_review_cap, git_error),
+      // so the cause is a first-class trigger in the log, not buried in the reason payload.
+      this.escalate(run, event, outcome.trigger, outcome.reason);
       return;
     }
 

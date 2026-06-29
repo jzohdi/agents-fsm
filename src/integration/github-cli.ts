@@ -98,6 +98,16 @@ export class GitHubCli implements GitHub {
     return { ref: issueRef, number: parsed.number, title: parsed.title, body: parsed.body ?? '' };
   }
 
+  async findOpenPrForBranch(branch: string): Promise<PullRequest | null> {
+    try {
+      const pr = await this.viewPrByBranch(branch);
+      return pr.state === 'open' ? pr : null; // a closed/merged PR does not block opening a new one
+    } catch (err) {
+      if (err instanceof GitHubNotFoundError) return null;
+      throw err;
+    }
+  }
+
   async openPr(input: OpenPrInput): Promise<PullRequest> {
     await this.gh([
       'pr', 'create', '--repo', this.repo,

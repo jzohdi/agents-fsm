@@ -121,7 +121,9 @@ function producedEnvelopeFor(stage: string): unknown {
         artifacts: [{ kind: 'interface', locator: { branch: 'agent/run', path: '.agent/interface.md' } }],
       };
     case 'tdd':
-      return { requestedTransition: 'proceed', artifacts: [{ kind: 'pr', locator: { pr: 1 } }] };
+      // The runner opens the PR and records the `pr` artifact (Milestone 4); the agent only
+      // commits the failing tests here.
+      return { requestedTransition: 'proceed' };
     case 'plan_review':
     case 'code_review':
       return { requestedTransition: 'approve' };

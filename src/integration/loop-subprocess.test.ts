@@ -19,6 +19,7 @@ import { loadDefaultConfig } from '../fsm/config';
 import { EventLoop } from '../loop/event-loop';
 import { openDb } from '../store/db';
 import { Repository } from '../store/repository';
+import { FakeGitHub } from './github-fake';
 
 /**
  * A fake harness: it decodes the structured input the Agent Runner JSON-encoded into the `-p`
@@ -45,7 +46,7 @@ describe('EventLoop + SubprocessStageExecutor (fake harness)', () => {
     const { fsm, agents, version } = loadDefaultConfig();
     const repo = new Repository(openDb(':memory:'));
     const executor = new SubprocessStageExecutor({ spawnProcess: goldenPathSpawn });
-    const runner = new AgentRunner(repo, executor, agents);
+    const runner = new AgentRunner(repo, executor, agents, new FakeGitHub({ autoSeedIssues: true }));
 
     const transitions: string[] = [];
     const loop = new EventLoop(repo, fsm, version, runner, {

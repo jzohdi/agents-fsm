@@ -30,6 +30,9 @@ export interface AgentEnvelope {
   artifacts?: ArtifactRef[];
   /** Stage-specific flags the engine reads, e.g. `plan` returns `needs_frontend`/`needs_backend`. */
   flags?: Record<string, boolean>;
+  /** Review comments to post on the PR (review stages). The runner posts them; agents never
+   * touch GitHub directly (README §3.3 Layer 5). */
+  comments?: string[];
 }
 
 /** The verdict a self-review phase returns. */
@@ -49,6 +52,7 @@ const envelopeSchema = z
     reason: z.unknown().optional(),
     artifacts: z.array(artifactRefSchema).optional(),
     flags: z.record(z.string(), z.boolean()).optional(),
+    comments: z.array(z.string()).optional(),
   })
   .strict();
 
