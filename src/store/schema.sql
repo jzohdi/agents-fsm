@@ -18,8 +18,23 @@ CREATE TABLE IF NOT EXISTS runs (
   tokens_used        INTEGER NOT NULL DEFAULT 0,       -- cumulative, for the run-budget guard
   cost_used          REAL    NOT NULL DEFAULT 0,
   agent_runs_count   INTEGER NOT NULL DEFAULT 0,
+  flags              TEXT    NOT NULL DEFAULT '{}',     -- JSON skip flags (needs_frontend/…), set by `plan`, read on every FORWARD
   created_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- The event queue/log that drives handoffs. `status` + a unique id make
+-- at-least-once processing idempotent (README §3.3 Layer 3). Defined before
+-- `transitions` because that table's `event_id` foreign key references it.
+CREATE TABLE IF NOT EXISTS events (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id       INTEGER NOT NULL REFERENCES runs(id),
+  type         TEXT    NOT NULL,
+  payload      TEXT,                                   -- JSON
+  status       TEXT    NOT NULL DEFAULT 'pending'
+                 CHECK (status IN ('pending', 'processing', 'done')),
+  created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  processed_at TEXT
 );
 
 -- Append-only audit trail. Round counters are DERIVED from this log, not stored
@@ -35,21 +50,14 @@ CREATE TABLE IF NOT EXISTS transitions (
   back_edge   INTEGER NOT NULL DEFAULT 0,
   counter_key TEXT,                                    -- which round counter this advanced, if any
   is_reset    INTEGER NOT NULL DEFAULT 0,              -- a counter reset marker (resume from needs_human)
+  event_id    INTEGER REFERENCES events(id),          -- the event that caused this; NULL for manual transitions/resets
   created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
--- The event queue/log that drives handoffs. `status` + a unique id make
--- at-least-once processing idempotent (README §3.3 Layer 3).
-CREATE TABLE IF NOT EXISTS events (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id       INTEGER NOT NULL REFERENCES runs(id),
-  type         TEXT    NOT NULL,
-  payload      TEXT,                                   -- JSON
-  status       TEXT    NOT NULL DEFAULT 'pending'
-                 CHECK (status IN ('pending', 'processing', 'done')),
-  created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-  processed_at TEXT
-);
+-- One transition per event: makes transition application idempotent under
+-- at-least-once delivery (README §3.3 Layer 3). NULL event_ids are unconstrained
+-- (SQLite treats NULLs as distinct), so manual transitions and resets are exempt.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_transitions_event ON transitions(event_id) WHERE event_id IS NOT NULL;
 
 -- One row per agent invocation. A single stage produces several rows (one per
 -- phase/loop iteration), enabling per-phase telemetry (README §3.3 Layer 4).

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import fc from 'fast-check';
 
-import { loadDefaultFsmConfig } from './config';
+import { loadDefaultConfig } from './config';
 import {
   budgetExceeded,
   decideNext,
@@ -11,7 +11,7 @@ import {
 } from './engine';
 import { FORWARD, type DecisionContext, type FsmConfig, type StageResult } from './types';
 
-const { config } = loadDefaultFsmConfig();
+const { fsm: config } = loadDefaultConfig();
 
 const BOTH = { needs_frontend: true, needs_backend: true };
 

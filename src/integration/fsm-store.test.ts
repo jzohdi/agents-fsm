@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { loadDefaultFsmConfig } from '../fsm/config';
+import { loadDefaultConfig } from '../fsm/config';
 import { decideNext } from '../fsm/engine';
 import type { StageResult } from '../fsm/types';
 import { openDb } from '../store/db';
@@ -16,7 +16,7 @@ import { Repository } from '../store/repository';
 
 describe('plan_review ⇄ plan loop escalates after the guard limit', () => {
   it('records exactly `guards.plan_review` back-edges, then escalates', () => {
-    const { config, version } = loadDefaultFsmConfig();
+    const { fsm: config, version } = loadDefaultConfig();
     const limit = config.guards.plan_review!;
     const db = openDb(':memory:');
     const repo = new Repository(db);

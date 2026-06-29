@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { ConfigValidationError, hashConfig, loadDefaultFsmConfig, parseFsmConfig } from './config';
+import {
+  ConfigValidationError,
+  hashConfig,
+  loadDefaultConfig,
+  parseConfigFile,
+  parseFsmConfig,
+  recipeFor,
+} from './config';
 import type { FsmConfig } from './types';
 
 /** A minimal valid config used as a base for negative tests. */
@@ -20,30 +27,89 @@ function baseRaw(): Record<string, unknown> {
 
 describe('default config', () => {
   it('loads, validates, and produces a 16-char version', () => {
-    const { config, version } = loadDefaultFsmConfig();
-    expect(config.initial).toBe('triage');
+    const { fsm, version } = loadDefaultConfig();
+    expect(fsm.initial).toBe('triage');
     expect(version).toMatch(/^[0-9a-f]{16}$/);
   });
 
+  it('splits the agent recipe out of the FSM rules', () => {
+    const { fsm, agents } = loadDefaultConfig();
+    // The agents section is parsed separately and never leaks into the FSM config.
+    expect('agents' in fsm).toBe(false);
+    // Pure review stages are configured to produce-only.
+    expect(recipeFor('code_review', agents).phases).toEqual(['produce']);
+    // Producing stages fall back to the full default recipe.
+    expect(recipeFor('plan', agents).phases).toEqual(['produce', 'self_review', 'simplify']);
+    expect(recipeFor('plan', agents).reviewCap).toBe(2);
+  });
+
   it('hashes deterministically and is order-independent', () => {
-    const { config } = loadDefaultFsmConfig();
-    expect(hashConfig(config)).toBe(hashConfig(config));
+    const { fsm } = loadDefaultConfig();
+    expect(hashConfig(fsm)).toBe(hashConfig(fsm));
     // Reordering top-level keys must not change the hash.
     const reordered: FsmConfig = {
-      states: config.states,
-      guards: config.guards,
-      forwardOrder: config.forwardOrder,
-      escalationState: config.escalationState,
-      initial: config.initial,
-      ...(config.budget ? { budget: config.budget } : {}),
+      states: fsm.states,
+      guards: fsm.guards,
+      forwardOrder: fsm.forwardOrder,
+      escalationState: fsm.escalationState,
+      initial: fsm.initial,
+      ...(fsm.budget ? { budget: fsm.budget } : {}),
     };
-    expect(hashConfig(reordered)).toBe(hashConfig(config));
+    expect(hashConfig(reordered)).toBe(hashConfig(fsm));
   });
 
   it('changes the hash when the config changes', () => {
-    const { config } = loadDefaultFsmConfig();
-    const changed: FsmConfig = { ...config, guards: { ...config.guards, code_review: 99 } };
-    expect(hashConfig(changed)).not.toBe(hashConfig(config));
+    const { fsm } = loadDefaultConfig();
+    const changed: FsmConfig = { ...fsm, guards: { ...fsm.guards, code_review: 99 } };
+    expect(hashConfig(changed)).not.toBe(hashConfig(fsm));
+  });
+});
+
+describe('parseConfigFile — agent recipe', () => {
+  function withAgents(agents: unknown): Record<string, unknown> {
+    return { ...baseRaw(), agents };
+  }
+
+  it('parses a valid per-stage recipe', () => {
+    const { agents } = parseConfigFile(withAgents({ a: { phases: ['produce'], reviewCap: 3 } }));
+    expect(recipeFor('a', agents)).toMatchObject({ phases: ['produce'], reviewCap: 3 });
+  });
+
+  it('rejects an agent recipe for an unknown state', () => {
+    expect(() => parseConfigFile(withAgents({ ghost: { phases: ['produce'] } }))).toThrow(/unknown state/);
+  });
+
+  it('rejects an agent recipe for a terminal state', () => {
+    expect(() => parseConfigFile(withAgents({ stop: { phases: ['produce'] } }))).toThrow(/terminal state/);
+  });
+
+  it('rejects an empty phase list', () => {
+    expect(() => parseConfigFile(withAgents({ a: { phases: [] } }))).toThrow(ConfigValidationError);
+  });
+
+  it('rejects an unknown phase name', () => {
+    expect(() => parseConfigFile(withAgents({ a: { phases: ['compile'] } }))).toThrow(ConfigValidationError);
+  });
+
+  it('accepts the canonical prefixes the runner understands', () => {
+    expect(() => parseConfigFile(withAgents({ a: { phases: ['produce'] } }))).not.toThrow();
+    expect(() => parseConfigFile(withAgents({ a: { phases: ['produce', 'self_review'] } }))).not.toThrow();
+    expect(() => parseConfigFile(withAgents({ a: { phases: ['produce', 'self_review', 'simplify'] } }))).not.toThrow();
+  });
+
+  it('rejects non-canonical recipes the runner would silently misinterpret', () => {
+    // simplify without self_review (the runner only simplifies inside the review loop).
+    expect(() => parseConfigFile(withAgents({ a: { phases: ['produce', 'simplify'] } }))).toThrow(/prefix/);
+    // self_review without a preceding produce.
+    expect(() => parseConfigFile(withAgents({ a: { phases: ['self_review'] } }))).toThrow(/prefix/);
+    // out of order.
+    expect(() => parseConfigFile(withAgents({ a: { phases: ['self_review', 'produce'] } }))).toThrow(/prefix/);
+  });
+
+  it('treats an absent agents section as no overrides', () => {
+    const { agents } = parseConfigFile(baseRaw());
+    expect(agents).toEqual({});
+    expect(recipeFor('a', agents).phases).toEqual(['produce', 'self_review', 'simplify']);
   });
 });
 

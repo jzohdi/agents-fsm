@@ -27,6 +27,8 @@ export interface Run {
   tokensUsed: number;
   costUsed: number;
   agentRunsCount: number;
+  /** Skip flags (`needs_frontend`/`needs_backend`, …) emitted by `plan`, read on every FORWARD. */
+  flags: Record<string, boolean>;
   createdAt: string;
   updatedAt: string;
 }
@@ -41,6 +43,8 @@ export interface Transition {
   backEdge: boolean;
   counterKey: string | null;
   isReset: boolean;
+  /** The event that caused this transition; null for manual transitions / counter resets. */
+  eventId: number | null;
   createdAt: string;
 }
 
@@ -78,6 +82,8 @@ export interface AppendTransitionInput {
   backEdge?: boolean;
   counterKey?: string | null;
   isReset?: boolean;
+  /** The source event id, so a replayed event cannot write a second transition. */
+  eventId?: number | null;
 }
 
 export interface CommitTransitionInput extends AppendTransitionInput {
@@ -97,6 +103,18 @@ export interface RecordAgentRunInput {
   success?: boolean;
 }
 
+export interface AgentRunRecord {
+  id: number;
+  runId: number;
+  stage: string;
+  phase: AgentPhase;
+  model: string | null;
+  tokens: number;
+  durationMs: number | null;
+  success: boolean;
+  createdAt: string;
+}
+
 // --- raw row shapes (snake_case, as stored) ------------------------------------
 
 interface RunRow {
@@ -111,6 +129,7 @@ interface RunRow {
   tokens_used: number;
   cost_used: number;
   agent_runs_count: number;
+  flags: string;
   created_at: string;
   updated_at: string;
 }
@@ -125,6 +144,7 @@ interface TransitionRow {
   back_edge: number;
   counter_key: string | null;
   is_reset: number;
+  event_id: number | null;
   created_at: string;
 }
 
@@ -167,6 +187,7 @@ function mapRun(r: RunRow): Run {
     tokensUsed: r.tokens_used,
     costUsed: r.cost_used,
     agentRunsCount: r.agent_runs_count,
+    flags: JSON.parse(r.flags) as Record<string, boolean>,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -183,6 +204,7 @@ function mapTransition(r: TransitionRow): Transition {
     backEdge: r.back_edge !== 0,
     counterKey: r.counter_key,
     isReset: r.is_reset !== 0,
+    eventId: r.event_id,
     createdAt: r.created_at,
   };
 }
@@ -233,6 +255,18 @@ export class Repository {
     return row ? mapRun(row) : undefined;
   }
 
+  /**
+   * All runs, newest first. The event loop is driven by the `events` queue, not by
+   * scanning runs; this exists for the CLI/dashboard (list runs) and for operational
+   * queries. Pass `status` to filter (e.g. list `needs_human` runs awaiting an operator).
+   */
+  listRuns(status?: RunStatus): Run[] {
+    const rows = status
+      ? (this.db.prepare('SELECT * FROM runs WHERE status = ? ORDER BY id DESC').all(status) as RunRow[])
+      : (this.db.prepare('SELECT * FROM runs ORDER BY id DESC').all() as RunRow[]);
+    return rows.map(mapRun);
+  }
+
   setRunState(id: number, state: string): void {
     this.db.prepare(`UPDATE runs SET current_state = ?, updated_at = ${NOW} WHERE id = ?`).run(state, id);
   }
@@ -241,10 +275,27 @@ export class Repository {
     this.db.prepare(`UPDATE runs SET status = ?, updated_at = ${NOW} WHERE id = ?`).run(status, id);
   }
 
-  setRunPr(id: number, prNumber: number, branch: string): void {
-    this.db
-      .prepare(`UPDATE runs SET pr_number = ?, branch = ?, updated_at = ${NOW} WHERE id = ?`)
-      .run(prNumber, branch, id);
+  /** Record the run's working branch, created when `plan` begins (README §3.1). */
+  setRunBranch(id: number, branch: string): void {
+    this.db.prepare(`UPDATE runs SET branch = ?, updated_at = ${NOW} WHERE id = ?`).run(branch, id);
+  }
+
+  /** Record the PR number, set when `tdd` opens the PR — separate from the branch, which exists earlier. */
+  setRunPr(id: number, prNumber: number): void {
+    this.db.prepare(`UPDATE runs SET pr_number = ?, updated_at = ${NOW} WHERE id = ?`).run(prNumber, id);
+  }
+
+  /**
+   * Merge skip flags into the run (last write wins per key). `plan` emits
+   * `needs_frontend`/`needs_backend`; persisting them on the run is what lets the
+   * engine honor a skip at later FORWARD decisions, not just at the stage that set it.
+   */
+  mergeRunFlags(id: number, flags: Record<string, boolean>): Run {
+    const run = this.getRun(id);
+    if (!run) throw new Error(`mergeRunFlags: run ${id} not found`);
+    const merged = { ...run.flags, ...flags };
+    this.db.prepare(`UPDATE runs SET flags = ?, updated_at = ${NOW} WHERE id = ?`).run(JSON.stringify(merged), id);
+    return { ...run, flags: merged };
   }
 
   /** Increment cumulative usage counters (for the run-budget guard). */
@@ -266,8 +317,8 @@ export class Repository {
   appendTransition(input: AppendTransitionInput): Transition {
     const info = this.db
       .prepare(
-        `INSERT INTO transitions (run_id, from_state, to_state, trigger, reason, back_edge, counter_key, is_reset)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO transitions (run_id, from_state, to_state, trigger, reason, back_edge, counter_key, is_reset, event_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.runId,
@@ -278,6 +329,7 @@ export class Repository {
         input.backEdge ? 1 : 0,
         input.counterKey ?? null,
         input.isReset ? 1 : 0,
+        input.eventId ?? null,
       );
     const row = this.db.prepare('SELECT * FROM transitions WHERE id = ?').get(Number(info.lastInsertRowid)) as
       | TransitionRow
@@ -305,6 +357,18 @@ export class Repository {
       .prepare('SELECT * FROM transitions WHERE run_id = ? ORDER BY id ASC')
       .all(runId) as TransitionRow[];
     return rows.map(mapTransition);
+  }
+
+  /**
+   * The transition already recorded for an event, if any. The event loop calls
+   * this before acting so a replayed event (at-least-once delivery) is a no-op
+   * rather than a duplicate state change (README §3.3 Layer 3).
+   */
+  getTransitionByEventId(eventId: number): Transition | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM transitions WHERE event_id = ?')
+      .get(eventId) as TransitionRow | undefined;
+    return row ? mapTransition(row) : undefined;
   }
 
   /**
@@ -341,15 +405,28 @@ export class Repository {
   }
 
   /**
-   * Atomically claim the oldest pending event (pending -> processing) and return
-   * it, or undefined if none. Single statement so two concurrent claimers can
-   * never grab the same row (README §3.3 Layer 3 / Milestone 8 Phase B).
+   * Atomically claim the oldest pending event whose run is dispatchable, marking it
+   * `processing`, or return undefined if none. Single statement so two concurrent
+   * claimers can never grab the same row (README §3.3 Layer 3 / Milestone 8 Phase B).
+   *
+   * Dispatch is gated on `runs.status = 'running'`: a `paused`, `blocked`, `done`,
+   * or `needs_human` run "holds no executor" (README §3.3 Layer 3), so its events
+   * wait — pending — until the run is `running` again. This is the MVP dispatch gate,
+   * enforced at pickup time; the richer deterministic Scheduler (Milestone 9) slots
+   * in at this same point. Without the gate the loop would dispatch a stage for an
+   * escalated or paused run, and processing a stray event for a terminal run would
+   * call the engine on a terminal state and throw.
    */
   claimNextEvent(): EventRow | undefined {
     const row = this.db
       .prepare(
         `UPDATE events SET status = 'processing'
-         WHERE id = (SELECT id FROM events WHERE status = 'pending' ORDER BY id ASC LIMIT 1)
+         WHERE id = (
+           SELECT events.id FROM events
+           JOIN runs ON runs.id = events.run_id
+           WHERE events.status = 'pending' AND runs.status = 'running'
+           ORDER BY events.id ASC LIMIT 1
+         )
          RETURNING *`,
       )
       .get() as EventRowRaw | undefined;
@@ -358,6 +435,19 @@ export class Repository {
 
   markEventDone(id: number): void {
     this.db.prepare(`UPDATE events SET status = 'done', processed_at = ${NOW} WHERE id = ?`).run(id);
+  }
+
+  /**
+   * Reclaim events stranded in `processing` by a crash, resetting them to `pending`
+   * so they are re-picked-up. The event loop calls this once on startup; without it
+   * `claimNextEvent` (which only selects `pending`) would never see them again,
+   * silently violating at-least-once delivery (README §3.3 Layer 3). Returns the
+   * number reclaimed. Idempotent transition application (see `getTransitionByEventId`)
+   * keeps the re-processing safe even if the agent had already acted.
+   */
+  recoverProcessingEvents(): number {
+    const info = this.db.prepare("UPDATE events SET status = 'pending' WHERE status = 'processing'").run();
+    return info.changes;
   }
 
   // --- agent runs --------------------------------------------------------------
@@ -380,6 +470,37 @@ export class Repository {
         input.success === false ? 0 : 1,
       );
     return Number(info.lastInsertRowid);
+  }
+
+  /** All agent-run records for a run, oldest first — one row per phase/iteration (telemetry). */
+  listAgentRuns(runId: number): AgentRunRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, run_id, stage, phase, model, tokens, duration_ms, success, created_at
+         FROM agent_runs WHERE run_id = ? ORDER BY id ASC`,
+      )
+      .all(runId) as Array<{
+      id: number;
+      run_id: number;
+      stage: string;
+      phase: AgentPhase;
+      model: string | null;
+      tokens: number;
+      duration_ms: number | null;
+      success: number;
+      created_at: string;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      runId: r.run_id,
+      stage: r.stage,
+      phase: r.phase,
+      model: r.model,
+      tokens: r.tokens,
+      durationMs: r.duration_ms,
+      success: r.success !== 0,
+      createdAt: r.created_at,
+    }));
   }
 
   // --- artifacts ---------------------------------------------------------------
