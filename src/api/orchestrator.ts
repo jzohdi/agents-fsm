@@ -28,6 +28,7 @@ import type {
   Transition,
 } from '../store/repository';
 import type { GitHub, IssueSuggestion } from '../integration/github';
+import { parseIssueRef, type ParsedIssueRef } from '../integration/refs';
 import { Broadcaster, type StreamListener } from './stream';
 
 /** A failure with a client-facing HTTP status. The server maps `status` straight onto the response. */
@@ -111,8 +112,15 @@ export class Orchestrator {
    *  runs in the background; watch the stream for progress). */
   start(input: { issueRef: string; repoRef?: string }): Run {
     if (!input.issueRef) throw new ApiError(400, 'issueRef is required');
-    const repoRef = input.repoRef ?? input.issueRef.split('#')[0] ?? input.issueRef;
-    const run = this.loop.startRun({ issueRef: input.issueRef, repoRef });
+    // Accept any form the operator pastes (owner/repo#N, a browser issue URL, …) and normalize to the
+    // canonical ref the adapter expects (see integration/refs); a malformed ref is a 400, not a run.
+    let parsed: ParsedIssueRef;
+    try {
+      parsed = parseIssueRef(input.issueRef);
+    } catch (err) {
+      throw new ApiError(400, err instanceof Error ? err.message : String(err));
+    }
+    const run = this.loop.startRun({ issueRef: parsed.ref, repoRef: input.repoRef ?? parsed.repo });
     this.kick();
     return run;
   }

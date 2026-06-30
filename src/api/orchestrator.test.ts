@@ -78,6 +78,19 @@ describe('Orchestrator — start + drain', () => {
     expect(repo.getRun(run.id)!.repoRef).toBe('acme/widgets');
     expect(() => orchestrator.start({ issueRef: '' })).toThrow(ApiError);
   });
+
+  it('normalizes a pasted issue URL to the canonical owner/repo#N ref and repo', () => {
+    const { orchestrator, repo } = setup();
+    const run = orchestrator.start({ issueRef: 'https://github.com/jzohdi/tmux-speedrun/issues/31' });
+    const stored = repo.getRun(run.id)!;
+    expect(stored.issueRef).toBe('jzohdi/tmux-speedrun#31');
+    expect(stored.repoRef).toBe('jzohdi/tmux-speedrun');
+  });
+
+  it('rejects an unparseable issue reference with a 400', () => {
+    const { orchestrator } = setup();
+    expect(() => orchestrator.start({ issueRef: 'not a ref' })).toThrow(ApiError);
+  });
 });
 
 describe('Orchestrator — queries', () => {

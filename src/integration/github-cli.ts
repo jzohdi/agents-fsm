@@ -39,6 +39,7 @@ import {
   type UpdatePrInput,
   type WorkingTree,
 } from './github';
+import { parseRepoRef } from './refs';
 
 export interface ExecResult {
   code: number;
@@ -92,9 +93,11 @@ export class GitHubCli implements GitHub {
   private readonly exec: ExecFn;
 
   constructor(options: GitHubCliOptions) {
-    this.repo = options.repo;
+    // Normalize to canonical `owner/repo` so the `gh api repos/<repo>/…` paths are well-formed even when
+    // the operator passed a URL or clone string (`--repo https://github.com/owner/repo`). See ./refs.
+    this.repo = parseRepoRef(options.repo);
     this.workingRoot = options.workingRoot;
-    this.cloneUrl = options.cloneUrl ?? `https://github.com/${options.repo}.git`;
+    this.cloneUrl = options.cloneUrl ?? `https://github.com/${this.repo}.git`;
     this.localRepo = options.localRepo;
     this.ghCommand = options.ghCommand ?? 'gh';
     this.gitCommand = options.gitCommand ?? 'git';

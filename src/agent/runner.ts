@@ -32,6 +32,7 @@ import {
   type Parsed,
   type TriageOutput,
 } from './envelope';
+import { AmbiguousSideEffectError, SideEffectLedger } from './side-effects';
 
 /** Default logical model per phase (README §3.3: frontier to produce/critique, cheaper to simplify). */
 export const DEFAULT_MODELS: Record<AgentPhase, string> = {
@@ -155,8 +156,19 @@ export class AgentRunner {
       const envelope = await this.applyStageEffects(run, recipe.io, prep, phaseOutcome.envelope);
       return { kind: 'handoff', envelope };
     } catch (err) {
-      return gitError(run, 'effects', err);
+      return effectsError(run, err);
     }
+  }
+
+  /**
+   * A per-stage {@link SideEffectLedger} (the transactional outbox, README Milestone 7) keyed at this
+   * run's current state and visit index. The prefix `${state}#${visit}` makes the slot keys stable
+   * across a crash/replay of the same visit (so completed calls are reused, not repeated) yet fresh on
+   * a legitimate re-entry (a back-edge or operator resume bumps the visit → side effects run anew).
+   */
+  private ledgerFor(run: Run): SideEffectLedger {
+    const visit = this.repo.stateVisitCount(run.id, run.currentState);
+    return new SideEffectLedger(this.repo, run.id, `${run.currentState}#${visit}`);
   }
 
   // --- triage (router / issue editor) -----------------------------------------
@@ -188,7 +200,7 @@ export class AgentRunner {
     try {
       return await this.applyTriageDecision(run, issue, parsed.value);
     } catch (err) {
-      return gitError(run, 'effects', err);
+      return effectsError(run, err);
     }
   }
 
@@ -196,13 +208,14 @@ export class AgentRunner {
    * Carry out one triage decision's GitHub side effects and turn it into a {@link StageOutcome}.
    *
    * Idempotency note: editing the issue is idempotent, but posting comments and creating sub-issues
-   * are not. As with the review stages' PR comments, a crash in the narrow window *after* these calls
-   * but *before* the transition commits would re-run the stage and repeat them (a duplicate comment,
-   * or — worse — duplicate sub-issues). This matches the existing review-comment behavior and the
-   * MVP's accepted limits; a transactional outbox is the real fix (README Milestone 7). It does NOT
-   * affect normal operation: a clarify→reply→proceed sequence posts distinct comments by design.
+   * are not. The non-idempotent calls go through the {@link SideEffectLedger} (the transactional
+   * outbox, README Milestone 7): on a crash/replay a completed call is reused rather than repeated
+   * (no duplicate comment or sub-issues), and a call left in-flight by a crash escalates instead of
+   * blindly retrying. Editing the issue stays a direct call (re-writing the same text is harmless).
    */
   private async applyTriageDecision(run: Run, issue: Issue, output: TriageOutput): Promise<StageOutcome> {
+    const ledger = this.ledgerFor(run);
+
     // Improve the issue first, if the agent rewrote it, so every downstream stage reads the scoped
     // spec. Editing to the same text is harmless, which keeps a back-edge re-run idempotent.
     let current = issue;
@@ -218,13 +231,13 @@ export class AgentRunner {
       case 'proceed': {
         // Sign off with a human-visible audit comment, then hand to plan. The FSM transition is the
         // machine sign-off later stages key off; this comment is for people reading the issue.
-        await this.github.postIssueComment({ issueNumber: current.number, body: signoffComment(output.message) });
+        await ledger.once('signoff', () => this.github.postIssueComment({ issueNumber: current.number, body: signoffComment(output.message) }));
         return { kind: 'handoff', envelope: { requestedTransition: 'proceed', reason: { kind: 'triage_signoff' } } };
       }
 
       case 'clarify': {
         const questions = output.questions ?? [];
-        const comment = await this.github.postIssueComment({ issueNumber: current.number, body: clarifyComment(questions, output.message) });
+        const comment = await ledger.once('clarify', () => this.github.postIssueComment({ issueNumber: current.number, body: clarifyComment(questions, output.message) }));
         // The await_input reason carries everything the Reply Poller needs to detect the human's
         // answer — the issue, the question comment to measure replies against, and the bot login that
         // distinguishes the agent's own comment from a human reply. The loop records it in the
@@ -238,8 +251,12 @@ export class AgentRunner {
       case 'split': {
         const subIssues = output.subIssues ?? [];
         const created: Issue[] = [];
-        for (const sub of subIssues) created.push(await this.github.createIssue(sub));
-        await this.github.postIssueComment({ issueNumber: current.number, body: splitComment(created, output.message) });
+        // Each child gets its own ledger slot, so a crash partway through never re-creates the ones
+        // already made (the duplicate-sub-issues case the outbox exists to prevent — README M7).
+        for (let i = 0; i < subIssues.length; i++) {
+          created.push(await ledger.once(`subissue:${i}`, () => this.github.createIssue(subIssues[i]!)));
+        }
+        await ledger.once('split', () => this.github.postIssueComment({ issueNumber: current.number, body: splitComment(created, output.message) }));
 
         if (output.handoff === undefined) {
           // No handoff: the operator starts runs for the children; this run stops with them recorded.
@@ -422,8 +439,14 @@ export class AgentRunner {
       // back to `plan` via the envelope's `reason`, handled by the normal back-edge mechanism.
       const comments = envelope.comments ?? [];
       if (run.prNumber === null || comments.length === 0) return envelope;
-      for (const body of comments) await this.github.postComment({ prNumber: run.prNumber, body });
-      return appendArtifact(envelope, { kind: 'review', locator: { prNumber: run.prNumber, comments: comments.length } });
+      const prNumber = run.prNumber;
+      // Each comment gets its own ledger slot, so a crash mid-post never double-posts on replay (M7).
+      const ledger = this.ledgerFor(run);
+      for (let i = 0; i < comments.length; i++) {
+        const body = comments[i]!;
+        await ledger.once(`comment:${i}`, () => this.github.postComment({ prNumber, body }));
+      }
+      return appendArtifact(envelope, { kind: 'review', locator: { prNumber, comments: comments.length } });
     }
 
     // produce: commit the agent's work, enrich its artifacts with the real branch + sha, and
@@ -543,4 +566,27 @@ function gitError(run: Run, op: 'prepare' | 'effects', err: unknown): StageOutco
   // A git/GitHub failure (rejected push, auth, conflict) — escalate with a labeled reason rather
   // than crash, so the run parks in needs_human with the cause in the log (plans/milestone-4.md §3.10).
   return { kind: 'escalate', trigger: 'git_error', reason: { kind: 'git_error', op, stage: run.currentState, detail: String(err) } };
+}
+
+/**
+ * Map an error thrown while applying a stage's side effects to an escalation. A
+ * {@link AmbiguousSideEffectError} (the outbox found a 'pending' slot on replay) means a
+ * non-idempotent call may have partly applied; we must NOT retry it, so we escalate
+ * `partial_side_effect` for a human to verify GitHub state (README Milestone 7). Anything else is a
+ * plain `git_error`.
+ */
+function effectsError(run: Run, err: unknown): StageOutcome {
+  if (err instanceof AmbiguousSideEffectError) {
+    return {
+      kind: 'escalate',
+      trigger: 'partial_side_effect',
+      reason: {
+        kind: 'partial_side_effect',
+        key: err.key,
+        stage: run.currentState,
+        note: 'a comment or sub-issue may have been partly created before a crash — verify on GitHub and remove any partial artifact before resuming',
+      },
+    };
+  }
+  return gitError(run, 'effects', err);
 }

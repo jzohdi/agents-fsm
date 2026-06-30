@@ -4,7 +4,7 @@
  * guard escalation, crash recovery (idempotency), and the loop-owned guards.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { loadDefaultConfig } from '../fsm/config';
 import type { FsmConfig } from '../fsm/types';
@@ -22,7 +22,7 @@ function setup(handler: StubHandler, opts: EventLoopOptions = {}, fsmOverride?: 
   const github = new FakeGitHub({ autoSeedIssues: true });
   const runner = new AgentRunner(repo, new StubExecutor(handler), loaded.agents, github);
   const loop = new EventLoop(repo, fsm, loaded.version, runner, opts);
-  return { repo, loop, fsm, github };
+  return { repo, loop, fsm, github, runner };
 }
 
 function sequence(repo: Repository, runId: number): Array<[string, string, string]> {
@@ -216,6 +216,42 @@ describe('crash recovery (idempotent processing)', () => {
     expect(triageProduces).toBe(1); // not re-asked
     expect(repo.listTransitions(run.id).filter((t) => t.trigger === 'await_input')).toHaveLength(1);
     expect((await github.listIssueComments(1)).length).toBe(1); // exactly one question comment
+  });
+
+  it('recovering a PRE-commit crash on a triage split does not duplicate sub-issues or the comment', async () => {
+    // The transactional outbox (README Milestone 7) regression test: triage split posts a comment and
+    // creates sub-issues — both non-idempotent. A crash *after* those calls but *before* the loop
+    // commits the transition leaves the event to be replayed, re-running the whole stage.
+    const { repo, loop, github, runner } = setup((req) =>
+      req.stage === 'triage'
+        ? { output: { decision: 'split', subIssues: [{ title: 'A', body: 'a' }, { title: 'B', body: 'b' }] } }
+        : goldenPathHandler(req),
+    );
+    const createIssue = vi.spyOn(github, 'createIssue');
+    const postIssueComment = vi.spyOn(github, 'postIssueComment');
+
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+
+    // Crash window: the loop claims the event and the stage performs its GitHub side effects (recorded
+    // in the outbox), then the daemon dies before committing the transition — the event stays
+    // `processing`, the transition log is empty.
+    const event = repo.claimNextEvent()!;
+    await runner.runStage(repo.getRun(run.id)!);
+    expect(createIssue).toHaveBeenCalledTimes(2);
+    expect(postIssueComment).toHaveBeenCalledTimes(1);
+    expect(repo.getTransitionByEventId(event.id)).toBeUndefined(); // nothing committed
+
+    // Restart: reclaim the stranded event and drain. triage re-runs, but every non-idempotent call
+    // replays from the outbox — so NO duplicate sub-issues and NO duplicate comment.
+    expect(loop.recover()).toBe(1);
+    await loop.runUntilIdle();
+
+    expect(createIssue).toHaveBeenCalledTimes(2); // not 4
+    expect(postIssueComment).toHaveBeenCalledTimes(1); // not 2
+    // A no-handoff split escalates `should_split`, exactly once.
+    const finalRun = repo.getRun(run.id)!;
+    expect(finalRun.status).toBe('needs_human');
+    expect(repo.listTransitions(run.id).filter((t) => t.trigger === 'should_split')).toHaveLength(1);
   });
 });
 
@@ -560,6 +596,20 @@ describe('M5 control methods (pause / resume-paused / stop / revert)', () => {
     // plan re-pauses (the handler still fires), so the run parks again — proving the single clean event.
     expect(repo.getRun(run.id)!.status).toBe('paused');
     expect(repo.getRun(run.id)!.currentState).toBe('plan_review');
+  });
+
+  it('revert resets the round counters (a fresh budget for the reverted-to loop)', () => {
+    const { repo, loop } = setup(goldenPathHandler);
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    // Seed a round counter; the run is `running` with only a pending (not processing) event, so revert
+    // is allowed. This isolates the reset effect on the derived counters (README M7 needs_human UX).
+    repo.appendTransition({ runId: run.id, fromState: 'code_review', toState: 'backend', trigger: 'request_changes', backEdge: true, counterKey: 'code_review' });
+    expect(repo.computeCounters(run.id)).toEqual({ code_review: 1 });
+
+    loop.revertRun(run.id, 'plan', { note: 'redo the plan' });
+
+    // The reset transition zeroes the derived counter immediately — the next loop starts fresh.
+    expect(repo.computeCounters(run.id)).toEqual({ code_review: 0 });
   });
 
   it('refuses to revert while a stage is in flight (would race the committing stage)', () => {

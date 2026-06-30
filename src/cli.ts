@@ -33,6 +33,7 @@ import { Repository } from './store/repository';
 import type { PhaseActivity } from './agent/runner';
 import { FatalExecutorError } from './agent/executor';
 import type { GitHub } from './integration/github';
+import { parseIssueRef } from './integration/refs';
 import { EventLoop } from './loop/event-loop';
 import { ReplyPoller } from './loop/reply-poller';
 import { parseCliArgs, type CliArgs } from './cli-args';
@@ -121,7 +122,7 @@ function indent(text: string): string {
 async function start(args: CliArgs): Promise<void> {
   // A bare `start` only has a safe default in mock mode (the fake auto-seeds any issue). In real mode
   // we refuse to invent an issue/repo — point the operator at the two supported ways to begin instead.
-  const issueRef = args.positionals[0] ?? (args.mock ? 'demo/repo#1' : undefined);
+  let issueRef = args.positionals[0] ?? (args.mock ? 'demo/repo#1' : undefined);
   if (!issueRef) {
     console.error(
       [
@@ -136,7 +137,16 @@ async function start(args: CliArgs): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  const repoRef = issueRef.split('#')[0] ?? issueRef;
+  // Accept a pasted issue URL or clone string and normalize to the canonical owner/repo#N (see
+  // integration/refs). Tolerate non-canonical refs in mock mode, where the fake seeds any ref.
+  let repoRef: string;
+  try {
+    const parsed = parseIssueRef(issueRef);
+    issueRef = parsed.ref;
+    repoRef = parsed.repo;
+  } catch {
+    repoRef = issueRef.split('#')[0] ?? issueRef;
+  }
   const { repo, loop, version, github } = buildLoop(args, repoRef);
 
   console.log(`Config version ${version}; starting run for issue ${issueRef}`);

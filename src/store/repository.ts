@@ -126,6 +126,19 @@ export interface LogRecord {
   createdAt: string;
 }
 
+/**
+ * The state of a side-effect ledger slot (the transactional outbox, README Milestone 7), returned by
+ * {@link Repository.beginSideEffect}:
+ *  - `fresh`   — no row existed; this caller just claimed it and must perform the external call.
+ *  - `done`    — a prior attempt completed it; reuse `result`, do NOT call the external service again.
+ *  - `pending` — a prior attempt claimed but never completed it (a crash mid-call): the call may or
+ *                may not have applied, so the caller must escalate rather than blindly retry.
+ */
+export type SideEffectClaim =
+  | { state: 'fresh' }
+  | { state: 'pending' }
+  | { state: 'done'; result: unknown };
+
 // --- raw row shapes (snake_case, as stored) ------------------------------------
 
 interface RunRow {
@@ -423,6 +436,20 @@ export class Repository {
     return counters;
   }
 
+  /**
+   * How many times this run has transitioned *into* `state` — the "visit index" the side-effect
+   * ledger keys on (README Milestone 7). It is stable while a stage runs (the stage's own outgoing
+   * transition has not committed yet), so a crash/replay of the same visit computes the same key and
+   * reuses the ledger; a legitimate re-entry (a back-edge or an operator resume into the state) adds a
+   * transition, so the next visit gets fresh keys and performs its side effects anew.
+   */
+  stateVisitCount(runId: number, state: string): number {
+    const row = this.db
+      .prepare('SELECT COUNT(*) AS n FROM transitions WHERE run_id = ? AND to_state = ?')
+      .get(runId, state) as { n: number };
+    return row.n;
+  }
+
   // --- events ------------------------------------------------------------------
 
   enqueueEvent(input: { runId: number; type: string; payload?: unknown }): EventRow {
@@ -602,5 +629,35 @@ export class Repository {
       .prepare('SELECT * FROM artifacts WHERE run_id = ? ORDER BY id ASC')
       .all(runId) as ArtifactRow[];
     return rows.map(mapArtifact);
+  }
+
+  // --- side-effect ledger (the transactional outbox, README Milestone 7) --------
+
+  /**
+   * Claim a side-effect slot before performing a non-idempotent external call. Atomic via the
+   * `(run_id, key)` unique index: the `INSERT OR IGNORE` either inserts (this caller wins → `fresh`)
+   * or is ignored, in which case we read the existing row's state (`done` reuses its result, `pending`
+   * is the ambiguous partial-application case). See {@link SideEffectClaim} and `completeSideEffect`.
+   */
+  beginSideEffect(runId: number, key: string): SideEffectClaim {
+    const info = this.db
+      .prepare("INSERT OR IGNORE INTO side_effects (run_id, key, status) VALUES (?, ?, 'pending')")
+      .run(runId, key);
+    if (info.changes === 1) return { state: 'fresh' };
+    const row = this.db
+      .prepare('SELECT status, result FROM side_effects WHERE run_id = ? AND key = ?')
+      .get(runId, key) as { status: 'pending' | 'done'; result: string | null };
+    return row.status === 'done' ? { state: 'done', result: parseJson(row.result) } : { state: 'pending' };
+  }
+
+  /**
+   * Mark a claimed slot `done` and store the external call's result, so a later replay of the same
+   * visit reuses it instead of calling out again. Paired with {@link beginSideEffect}; the two are
+   * separate autocommitted writes (the outbox is deliberately outside the transition transaction).
+   */
+  completeSideEffect(runId: number, key: string, result: unknown): void {
+    this.db
+      .prepare("UPDATE side_effects SET status = 'done', result = ? WHERE run_id = ? AND key = ?")
+      .run(toJson(result), runId, key);
   }
 }

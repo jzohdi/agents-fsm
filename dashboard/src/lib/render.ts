@@ -196,6 +196,52 @@ export function stepperModel(fsm: Partial<FsmConfig> | null | undefined, current
   }));
 }
 
+// --- escalation inspector (needs_human UX, README Milestone 7) -----------------
+
+export interface EscalationModel {
+  /** The escalation trigger, a first-class cause label in the log (e.g. `git_error`). */
+  trigger: string;
+  /** The state the run escalated *from* — where a resume sends it back to retry. */
+  fromState: string;
+  /** One-line operator guidance for this trigger: how to fix it and whether to resume or revert. */
+  guidance: string;
+  /** The structured reason payload, for the operator to inspect (the full cause). */
+  reason: unknown;
+}
+
+/** Operator guidance per escalation trigger — the "fix" half of inspect → fix → resume/revert. */
+const ESCALATION_GUIDANCE: Record<string, string> = {
+  malformed_output: "The agent's output failed validation after retries. Resume to retry, or revert to the stage with a clarifying reason.",
+  invalid_transition: 'The agent requested a transition the FSM does not allow. Revert to a valid state, or resume to retry.',
+  missing_reason: 'A back-edge was requested without the required reason. Revert with a reason so the stage knows why it is re-running.',
+  internal_review_cap: 'Self-review never converged within its round limit. Resume for a fresh round budget, or revert to the producing stage with notes.',
+  git_error: 'A git/GitHub operation failed (auth, a rejected push, or a conflict). Fix the cause, then resume.',
+  executor_error: 'The agent harness errored after its own retries. Check the harness and credentials, then resume.',
+  budget_exceeded: 'The run hit its token / cost / time budget. Raise the budget and resume, or stop the run.',
+  config_version_mismatch: 'The run was started under a different FSM config version. Resume to retry under the current rules.',
+  should_split: 'Triage split this issue into smaller ones (see the reason). Start runs for the children; this run can be stopped.',
+  partial_side_effect: 'A comment or sub-issue may have been partly created before a crash. Verify on GitHub and remove any partial artifact, then resume.',
+};
+
+/**
+ * The escalation inspector for a `needs_human` run: the trigger, the stage it escalated from, the
+ * structured reason, and a one-line operator guidance — the "inspect" half of the needs_human loop.
+ * Returns `null` when the run has no escalation transition (so the panel renders only when relevant).
+ */
+export function escalationModel(
+  transitions: Transition[] | undefined,
+  escalationState = 'needs_human',
+): EscalationModel | null {
+  const esc = [...(transitions ?? [])].reverse().find((t) => t.toState === escalationState);
+  if (!esc) return null;
+  return {
+    trigger: esc.trigger,
+    fromState: esc.fromState,
+    reason: esc.reason,
+    guidance: ESCALATION_GUIDANCE[esc.trigger] ?? 'Inspect the reason below, fix the cause, then resume or revert.',
+  };
+}
+
 export interface BackEdge {
   from: string;
   to: string;

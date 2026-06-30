@@ -106,6 +106,23 @@ CREATE TABLE IF NOT EXISTS logs (
   created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
+-- Idempotency ledger / transactional outbox for non-idempotent external side effects
+-- (posting issue/PR comments, creating sub-issues — README §3.3 risk register / Milestone 7).
+-- The runner claims a row ('pending') before a GitHub call and completes it ('done' + result)
+-- after, keyed by a deterministic `${state}#${visit}:${slot}` slot. On a crash/replay it reuses a
+-- `done` row's result instead of re-calling GitHub (no duplicate comment/sub-issue); a `pending`
+-- row means a previous attempt may have partly applied, so the run escalates rather than retrying.
+CREATE TABLE IF NOT EXISTS side_effects (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id     INTEGER NOT NULL REFERENCES runs(id),
+  key        TEXT    NOT NULL,                       -- `${state}#${visit}:${slot}`, unique per run
+  status     TEXT    NOT NULL CHECK (status IN ('pending', 'done')),
+  result     TEXT,                                   -- JSON result of the external call; NULL while pending
+  created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+-- One ledger row per (run, slot): makes the claim atomic (INSERT OR IGNORE relies on this index).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_side_effects_key ON side_effects(run_id, key);
+
 CREATE INDEX IF NOT EXISTS idx_transitions_run ON transitions(run_id, id);
 CREATE INDEX IF NOT EXISTS idx_events_status ON events(status, id);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_run ON agent_runs(run_id, id);

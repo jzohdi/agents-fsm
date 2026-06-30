@@ -28,6 +28,24 @@ export const MIGRATIONS: Migration[] = [
     name: 'add runs.archived_at',
     apply: (db) => addColumnIfMissing(db, 'runs', 'archived_at', 'TEXT'),
   },
+  {
+    version: 2,
+    name: 'create side_effects ledger',
+    // The transactional outbox (Milestone 7). Mirrors schema.sql; both use IF NOT EXISTS, so this is
+    // a no-op on a fresh DB the baseline already provisioned and a retrofit on a pre-existing one.
+    apply: (db) =>
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS side_effects (
+           id         INTEGER PRIMARY KEY AUTOINCREMENT,
+           run_id     INTEGER NOT NULL REFERENCES runs(id),
+           key        TEXT    NOT NULL,
+           status     TEXT    NOT NULL CHECK (status IN ('pending', 'done')),
+           result     TEXT,
+           created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         );
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_side_effects_key ON side_effects(run_id, key);`,
+      ),
+  },
 ];
 
 /** The schema version a fully-migrated database reports — the highest defined migration. */

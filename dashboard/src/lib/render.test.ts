@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  escalationModel,
   escapeHtml,
   fmtCost,
   fmtDuration,
@@ -118,6 +119,44 @@ describe('stepperModel', () => {
   });
   it('leaves nothing current when the state is off the spine (escalation)', () => {
     expect(stepperModel(FSM, 'needs_human').every((n) => n.status === 'todo')).toBe(true);
+  });
+});
+
+describe('escalationModel', () => {
+  const t = (over: Partial<Transition>): Transition => ({
+    id: 1, fromState: 'plan', toState: 'plan_review', trigger: 'proceed', reason: null, backEdge: false, createdAt: '', ...over,
+  });
+
+  it('returns null when there is no escalation transition', () => {
+    expect(escalationModel([t({})], 'needs_human')).toBeNull();
+    expect(escalationModel(undefined)).toBeNull();
+  });
+
+  it('reports the latest escalation with its trigger, from-state, reason, and guidance', () => {
+    const model = escalationModel(
+      [
+        t({ id: 1 }),
+        t({ id: 2, fromState: 'code_review', toState: 'needs_human', trigger: 'git_error', reason: { detail: 'push rejected' } }),
+      ],
+      'needs_human',
+    );
+    expect(model).toMatchObject({ trigger: 'git_error', fromState: 'code_review', reason: { detail: 'push rejected' } });
+    expect(model!.guidance).toMatch(/resume/i);
+  });
+
+  it('gives partial_side_effect guidance that points the operator at GitHub cleanup', () => {
+    const model = escalationModel([t({ toState: 'needs_human', trigger: 'partial_side_effect' })], 'needs_human');
+    expect(model!.guidance).toMatch(/verify on GitHub/i);
+  });
+
+  it('falls back to generic guidance for an unknown trigger', () => {
+    const model = escalationModel([t({ toState: 'needs_human', trigger: 'mystery' })], 'needs_human');
+    expect(model!.guidance).toMatch(/fix the cause/i);
+  });
+
+  it('honors a custom escalation state', () => {
+    const model = escalationModel([t({ toState: 'parked', trigger: 'budget_exceeded' })], 'parked');
+    expect(model).toMatchObject({ trigger: 'budget_exceeded' });
   });
 });
 

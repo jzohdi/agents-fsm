@@ -12,9 +12,11 @@ import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { migrate, openDb, type Db } from './db';
-import { LATEST_VERSION, columnExists } from './migrations';
+import { LATEST_VERSION, columnExists, runMigrations } from './migrations';
 
 const userVersion = (db: Db): number => db.pragma('user_version', { simple: true }) as number;
+const tableExists = (db: Db, name: string): boolean =>
+  db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
 
 const created: string[] = [];
 
@@ -65,6 +67,19 @@ describe('migrate', () => {
     migrate(db); // CREATE IF NOT EXISTS leaves the old `runs` as-is; the migration adds the column
 
     expect(columnExists(db, 'runs', 'archived_at')).toBe(true);
+    expect(userVersion(db)).toBe(LATEST_VERSION);
+    db.close();
+  });
+
+  it('retrofits a database created before the side_effects ledger existed', () => {
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, flags TEXT NOT NULL DEFAULT '{}', archived_at TEXT)`);
+    db.pragma('user_version = 1'); // already past migration 1; only migration 2 (side_effects) should run
+    expect(tableExists(db, 'side_effects')).toBe(false);
+
+    runMigrations(db); // the migration creates the ledger on a pre-existing DB
+
+    expect(tableExists(db, 'side_effects')).toBe(true);
     expect(userVersion(db)).toBe(LATEST_VERSION);
     db.close();
   });

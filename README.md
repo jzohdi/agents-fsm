@@ -409,6 +409,20 @@ Swap the per-stage harness from a CLI subprocess to the **Claude Agent SDK**, in
 
 Choosing between the two executors is configuration, not a rewrite — a deployment can keep the subprocess executor or opt into the SDK one. Neither the FSM engine nor its tests change.
 
+### Milestone 11 — Repo auto-pickup / continuous mode (post-MVP)
+
+Point the orchestrator at a **whole repository** (not a single issue) and have it work the backlog on its own: pick up an open issue, drive it to a merge-ready PR, **wait for a human to merge that PR, then automatically start the next issue** — repeating until the backlog is empty. This is the "set it and let it run" mode the dashboard's new-run box hints at.
+
+It is mostly **composition of pieces already planned**, which is why it is cheap to add once they exist:
+- **Issue ingestion** for a repo: list open issues via the GitHub adapter (`gh issue list` / `gh search`, the same surface `suggestIssues` already uses) and create a run per issue — gated by a configurable in-flight cap (default **1**, i.e. strictly sequential).
+- **Auto-advance on merge** reuses the **Milestone 9 merged-PR signal** (`PullRequest.state === 'merged'`, polled now / webhook later): a repo "slot" frees when the current run's PR is merged (or the issue is closed), and the next issue from the ordered backlog is admitted. The **Scheduler** (Milestone 9) already computes a deterministic order and a dispatchable set; continuous mode is that gate driving issue *admission*, not just stage dispatch.
+- **Repo as a first-class dimension** from **Milestone 8 Phase A** (the `repos` table + a repo argument): continuous mode is configured per repo (which label/milestone to pull from, the in-flight cap, the base branch).
+- **A repo control surface**: `POST /repos` to enroll a repo in continuous mode and `DELETE`/pause it; the dashboard gets a repo view showing the backlog, the active run, and merged/blocked counts.
+
+**Sequencing & safety:** serial by default (in-flight cap 1) means it needs **no concurrency machinery** — it can ship on the serial loop ahead of Milestone 8 Phase B, with parallel pickup (cap > 1) folding in later once worktrees exist. It never auto-merges (a human still reviews and merges every PR — the same no-stacked-PRs discipline as §3.1), so "continuous" means *continuous pickup*, not unattended shipping. A run that escalates to `needs_human` holds its slot until resolved, so a broken issue pauses the queue rather than silently skipping ahead.
+
+**Tests:** an ingestion test (a repo's open issues become ordered runs, capped); an auto-advance test (a merged PR frees the slot and admits exactly the next issue, in order); a gate test (an escalated run blocks pickup until resolved). The Scheduler and FSM engine are unchanged — this is admission control built on their existing outputs.
+
 ---
 
 ## 6. Key risks and how the design handles them
@@ -416,7 +430,7 @@ Choosing between the two executors is configuration, not a rewrite — a deploym
 - **Infinite review loops.** Mitigated by round-limit guards that escalate to `needs_human`.
 - **Reversion without progress** (an agent re-runs a stage and produces the same output). Mitigated by requiring a structured `reason` on every back-edge so the target stage knows what to change.
 - **Slow cost/time drift** that no single loop limit catches. Mitigated by a per-run budget guard (tokens/time/invocations) that escalates to `needs_human`.
-- **Duplicate side-effects on restart** (a second PR, a double charge). Mitigated by at-least-once events with idempotent, id-keyed handlers and stages that check recorded state before acting — designed in at Layer 3, tested from Milestone 2. *Known exception:* posting comments (review stages, triage) and creating sub-issues (a triage split) are not idempotent, so a crash in the narrow window after the GitHub call but before the transition commits can repeat them. The transition itself never duplicates (it is event-keyed), and normal operation is unaffected; a transactional outbox is the proper fix (Milestone 7).
+- **Duplicate side-effects on restart** (a second PR, a double charge). Mitigated by at-least-once events with idempotent, id-keyed handlers and stages that check recorded state before acting — designed in at Layer 3, tested from Milestone 2. The non-idempotent calls — posting comments (review stages, triage) and creating sub-issues (a triage split) — are covered by a **transactional outbox** (Milestone 7, `src/agent/side-effects.ts` + the `side_effects` ledger): a crash in the window after the GitHub call but before the transition commits is replayed from the ledger (the completed call is reused, never repeated), and the irreducible mid-call window escalates `partial_side_effect` for a human to verify rather than silently duplicating. The transition itself never duplicates (it is event-keyed).
 - **Config edits breaking in-flight runs.** Mitigated by pinning each run to the `fsm_config_version` it started under; edits only affect new runs.
 - **Malformed agent output coerced into a bad transition.** Mitigated by strict schema validation: bounded retry, then escalate with the raw output — never guess.
 - **Dependency cycles / deadlock** (issue A waits on B waits on A). Mitigated by deterministic cycle detection in the Scheduler that escalates the whole cycle to `needs_human` instead of parking forever.
@@ -443,7 +457,7 @@ The build order puts the novel, high-risk core first (FSM engine, then event-dri
 
 ## 8. Implementation status
 
-**Done: Milestone 0 (Foundations), Milestone 1 (FSM engine), Milestone 2 (event loop + agent runner on stubs), Milestone 3 (integrations — Git/GitHub adapter + Claude Code subprocess executor), Milestone 4 (real agents), Milestone 5 (API + telemetry surface), Milestone 6 (local web dashboard).**
+**Done: Milestone 0 (Foundations), Milestone 1 (FSM engine), Milestone 2 (event loop + agent runner on stubs), Milestone 3 (integrations — Git/GitHub adapter + Claude Code subprocess executor), Milestone 4 (real agents), Milestone 5 (API + telemetry surface), Milestone 6 (local web dashboard), Milestone 7 (polish — transactional outbox, `needs_human` UX, operating guide).**
 
 - **Layer 1 — State Store** (`src/store/`): SQLite schema, `db.ts` connection/migration, and a typed `Repository`. Round counters are derived from the `transitions` log (`computeCounters`), never stored as mutable fields. `commitTransition` is transactional; the event queue supports atomic, status-gated claim.
 - **Layer 2 — FSM Engine** (`src/fsm/`): pure `decideNext` (forward resolution with skip flags, `toOneOf` targets, guard escalation), `budgetExceeded`, and config loading with zod + semantic validation and content-hash versioning. The default pipeline (§2) ships as `src/fsm/default-config.json`.
@@ -534,4 +548,67 @@ The build order puts the novel, high-risk core first (FSM engine, then event-dri
 - **Pure view-model logic** (`dashboard/src/lib/render.ts`, typed): the **FSM graph as inline SVG** (laid out from `forwardOrder`, back-edges as labeled arcs, current node highlighted — no graph library), the runs-table model, and per-stage **telemetry aggregation**. No DOM/Svelte, so it is unit-tested by `dashboard/src/lib/render.test.ts`, **run by the root vitest suite** — first-class in the toolchain (an upgrade on the vanilla cut, where the logic sat outside it).
 - **The Svelte app** (`dashboard/src/`): a reactive `store.svelte.ts` (`$state`) fed by `EventSource('/stream')`, and `App` + `RunsList` / `RunDetail` / `FsmGraph` / `Editor` components — a **run view** (live graph + transition history), **telemetry**, a **live activity log**, **artifact** links, **control buttons** (start/pause/resume/stop/revert with an inline revert form), and an **FSM editor** (validated JSON over `GET`/`PUT /config`, surfacing `400`/`409`). Svelte auto-escapes interpolated text; the only hand-built markup is the (escaped) SVG.
 - **Build & dev**: `npm run build:dashboard` → `dashboard/dist/` (gitignored); the daemon serves it. `npm run dev:dashboard` runs Vite with **HMR**, proxying the API + SSE to a running daemon (`npm start -- serve`) for hot-reload development. `npm run check:dashboard` type-checks the Svelte app with `svelte-check`; `dashboard/` is outside the root `tsc`/`eslint` scope (its own toolchain). `.claude/launch.json` runs the daemon for the preview tool; pass `--config <path>` to `serve` to make the FSM editor writable (read-only otherwise, so the bundled default is never overwritten).
+
+**Added in Milestone 7 — polish** (design in [plans/milestone-7.md](plans/milestone-7.md)): restart-correctness hardening, `needs_human` UX, and the operating guide (§9). 353 tests passing (+19 over M6).
+
+- **Transactional outbox** (`src/agent/side-effects.ts` + the `side_effects` ledger, schema migration 2): the non-idempotent GitHub calls (issue/PR comments, sub-issue creation) are wrapped in a `SideEffectLedger` keyed `${state}#${visit}:${slot}`. A crash in the post-call / pre-commit window is replayed from the ledger — a completed call is reused (no duplicate comment or sub-issues), and a call left in-flight by a crash escalates `partial_side_effect` rather than retrying a non-idempotent operation. The visit index (transitions into the state) makes automatic recovery dedup within a visit while an operator resume — a fresh visit — deliberately retries clean. Proven by an extended crash-recovery test (a triage split replayed through the loop creates each sub-issue exactly once).
+- **`needs_human` UX** (`escalationModel` in `dashboard/src/lib/render.ts` → the escalation inspector in `RunDetail.svelte`): a `needs_human` run shows *why* it escalated — the trigger, the stage it escalated from, the structured reason, and a one-line operator guidance per trigger (including the `partial_side_effect` GitHub-cleanup step) — alongside the existing Resume / Revert / Stop controls. Resume (from `needs_human`) and Revert both reset the round counters (a fresh budget), now asserted directly in the loop tests.
+
+---
+
+## 9. Operating the fleet
+
+A practical guide: from zero to a running, recoverable fleet. The daemon is headless and binds to
+loopback; the dashboard is a pure client of its API (§3.3 Layer 7).
+
+### 9.1 Prerequisites
+- **Node ≥ 20** and a working **`gh`** (GitHub CLI), authenticated (`gh auth login`) — the real
+  Git/GitHub adapter shells out to it.
+- **Secrets** live in the environment, never in SQLite. Copy `.env.example` → `.env` and fill in
+  `GITHUB_TOKEN` (issues / PRs / branches / comments) and `ANTHROPIC_API_KEY` (the agents). `.env`
+  is gitignored — never commit it.
+- `npm install` once.
+
+### 9.2 Run a single issue (one-shot CLI)
+```
+npm start -- <owner/repo#issue> --repo <owner/repo>
+```
+Runs **real by default** — it spends tokens and pushes to GitHub; the CLI prints a `[real mode] …`
+banner. Add `--mock` for a zero-cost, zero-network run (stub executor + in-memory GitHub). Useful
+flags: `--db <path>` (persist state, e.g. `./.agent-work/run.db`), `--config <path>` (custom FSM),
+`--poll-timeout`/`--poll-interval` (the triage reply poller).
+
+### 9.3 Run the daemon + dashboard
+```
+npm run build:dashboard                              # build the SPA the daemon serves
+npm start -- serve --config ./fsm.json --db ./.agent-work/run.db
+# open http://127.0.0.1:4319
+```
+The daemon recovers crash-stranded events on startup, runs the reply poller, and serves the
+dashboard. Start runs from the dashboard's **File a new run** bar (GitHub-backed autocomplete) or by
+`POST /runs`. For dashboard development with hot reload, `npm run dev` (one-command build-watch +
+in-process daemon) or `npm run dev:dashboard` (Vite HMR against a running daemon).
+
+### 9.4 Configure the FSM
+The pipeline (states, transitions, back-edges, guard limits, budget) is one config object. Edit it
+in the dashboard's **FSM editor** (validated `PUT /config`: invalid → `400`, the file is untouched)
+or edit the `--config` file directly. Edits apply to **new** runs only and are refused (`409`) while
+any run is in flight — pause/stop or let runs finish first. Without `--config`, the config is
+read-only (the bundled default is never overwritten).
+
+### 9.5 Resolve a `needs_human` run (inspect → fix → resume/revert)
+When a run escalates, open it in the dashboard. The **escalation inspector** shows the trigger, the
+stage it escalated from, the reason, and guidance:
+1. **Inspect** — read the trigger + reason. For `partial_side_effect`, check the issue/PR on GitHub
+   and delete any partial comment or sub-issue first.
+2. **Fix** — address the cause (credentials, a conflict, the issue text, the budget, …).
+3. **Act** — **Resume** re-runs the escalated-from stage with a fresh round budget, or **Revert
+   `<state>`** (with a reason) sends the run back to an earlier stage. **Stop** ends it (terminal,
+   inspectable). Both Resume and Revert reset the round counters.
+
+### 9.6 Crash recovery
+Just restart the daemon (`serve`). On startup it reclaims events stranded `processing` by the crash
+and re-drains them; idempotent, event-keyed transitions and the transactional outbox (§8 / risk
+register) ensure no duplicate transition, comment, or sub-issue. Nothing manual is required — except
+the rare `partial_side_effect` escalation, handled per §9.5.
 

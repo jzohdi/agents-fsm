@@ -6,7 +6,7 @@
  * The end-to-end working-tree / PR / comment lifecycle is covered in runner-lifecycle.test.ts.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { AgentsConfig } from '../fsm/config';
 import { FakeGitHub } from '../integration/github-fake';
@@ -253,6 +253,67 @@ describe('AgentRunner — live activity', () => {
 
     expect(outcome.kind).toBe('handoff');
     expect(repo.listLogs(run.id)).toHaveLength(2); // persistence is independent of the watcher
+  });
+});
+
+describe('AgentRunner — side-effect outbox (idempotent non-idempotent calls, README Milestone 7)', () => {
+  it('posts review PR comments once across a replay of the same visit', async () => {
+    const { repo, runner, run, github } = setup(
+      () => ({ output: { requestedTransition: 'approve', comments: ['nit: rename x', 'add a test'] } }),
+      { code_review: { phases: ['produce'], io: { kind: 'review' } } },
+      {},
+      'code_review',
+    );
+    const pr = await github.openPr({ branch: 'b', base: 'main', title: 't', body: '' });
+    repo.setRunPr(run.id, pr.number);
+    const postComment = vi.spyOn(github, 'postComment');
+
+    await runner.runStage(repo.getRun(run.id)!); // attempt 1 posts the comments + records the outbox
+    expect(postComment).toHaveBeenCalledTimes(2);
+
+    await runner.runStage(repo.getRun(run.id)!); // replay (same visit): the outbox reuses, no re-post
+    expect(postComment).toHaveBeenCalledTimes(2); // not 4
+  });
+
+  it('posts triage sub-issues and the split comment once across a replay', async () => {
+    const { repo, runner, run, github } = setup(
+      () => ({ output: { decision: 'split', subIssues: [{ title: 'A', body: 'a' }, { title: 'B', body: 'b' }] } }),
+      { triage: { phases: ['produce'], io: { kind: 'triage' } } },
+      {},
+      'triage',
+    );
+    const createIssue = vi.spyOn(github, 'createIssue');
+    const postIssueComment = vi.spyOn(github, 'postIssueComment');
+
+    const first = await runner.runStage(repo.getRun(run.id)!);
+    const second = await runner.runStage(repo.getRun(run.id)!); // replay
+
+    expect(createIssue).toHaveBeenCalledTimes(2); // not 4
+    expect(postIssueComment).toHaveBeenCalledTimes(1); // not 2
+    // The replay still returns the same escalation outcome (driven by the reused sub-issues).
+    expect(first.kind).toBe('escalate');
+    expect(second.kind).toBe('escalate');
+  });
+
+  it('escalates partial_side_effect when a prior attempt left a call in-flight (a crash mid-call)', async () => {
+    const { repo, runner, run, github } = setup(
+      () => ({ output: { decision: 'proceed' } }),
+      { triage: { phases: ['produce'], io: { kind: 'triage' } } },
+      {},
+      'triage',
+    );
+    // Simulate a crash *during* the signoff comment: the slot (visit 0) was claimed, never completed.
+    repo.beginSideEffect(run.id, 'triage#0:signoff');
+    const postIssueComment = vi.spyOn(github, 'postIssueComment');
+
+    const outcome = await runner.runStage(repo.getRun(run.id)!);
+
+    expect(outcome.kind).toBe('escalate');
+    if (outcome.kind === 'escalate') {
+      expect(outcome.trigger).toBe('partial_side_effect');
+      expect(outcome.reason).toMatchObject({ kind: 'partial_side_effect', key: 'triage#0:signoff' });
+    }
+    expect(postIssueComment).not.toHaveBeenCalled(); // the ambiguous call is never retried
   });
 });
 

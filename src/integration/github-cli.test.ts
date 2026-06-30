@@ -75,6 +75,17 @@ describe('GitHubCli — gh-backed API (injected exec)', () => {
     expect(calls[0]!.args).toEqual(['issue', 'view', '42', '--repo', 'o/r', '--json', 'number,title,body']);
   });
 
+  it('normalizes a URL `repo` so the `gh api` path is owner/repo, not a broken URL path', async () => {
+    // Regression: `--repo https://github.com/jzohdi/tmux-speedrun` once produced
+    // `gh api repos/https://github.com/.../comments` → "unsupported protocol scheme".
+    const { exec, calls } = stubExec({ 'gh api': ok('[]') });
+    const gh = new GitHubCli({ repo: 'https://github.com/jzohdi/tmux-speedrun', workingRoot: '/w', exec });
+
+    await gh.listIssueComments(31);
+
+    expect(calls[0]!.args).toEqual(['api', 'repos/jzohdi/tmux-speedrun/issues/31/comments?per_page=100']);
+  });
+
   it('suggests issues via `gh search issues`, mapping repository + number to a ref', async () => {
     const { exec, calls } = stubExec({
       'gh search': ok(

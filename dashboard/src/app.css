@@ -58,7 +58,9 @@ input, textarea, button, select { font: inherit; }
   border-bottom: 1px solid var(--rule); position: sticky; top: 0; z-index: 30;
   background: rgba(247, 245, 240, 0.86); backdrop-filter: blur(10px);
 }
-.af-topbar .af-row { display: flex; align-items: center; gap: 30px; padding: 16px 0; flex-wrap: wrap; }
+/* Vertical padding only — the `padding` shorthand would clobber `.af-wrap`'s horizontal padding
+   (higher specificity), making the topbar touch the screen edges. */
+.af-topbar .af-row { display: flex; align-items: center; gap: 30px; padding-top: 16px; padding-bottom: 16px; flex-wrap: wrap; }
 .af-brand { font-size: 19px; font-weight: 800; letter-spacing: -0.03em; display: flex; align-items: baseline; gap: 9px; }
 .af-brand .o { color: var(--accent); }
 .af-brand span { font-family: var(--mono); font-size: 10px; font-weight: 500; letter-spacing: 0.2em; text-transform: uppercase; color: var(--ink3); }
@@ -194,6 +196,15 @@ input, textarea, button, select { font: inherit; }
 .af-revert input { width: 150px; }
 .af-revert input:focus, .af-revert select:focus { outline: none; background: var(--paper2); }
 
+/* --- escalation inspector (needs_human UX, README Milestone 7) --- */
+.af-esc { margin-top: 24px; border: 1px solid var(--rose); border-left-width: 3px; background: var(--rose-soft); padding: 16px 20px; }
+.af-esc-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.af-esc-head .tag { font-family: var(--mono); font-size: 10px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--rose); }
+.af-esc-head .trig { font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--ink); }
+.af-esc-head .from { color: var(--ink3); font-size: 12.5px; }
+.af-esc-guide { margin: 10px 0 0; color: var(--ink2); font-size: 13.5px; line-height: 1.5; }
+.af-esc-reason { margin: 10px 0 0; font-family: var(--mono); font-size: 11.5px; color: var(--ink2); white-space: pre-wrap; word-break: break-word; max-height: 160px; overflow: auto; }
+
 /* --- state machine (stepper + back-edge arcs) --- */
 .af-sm-wrap { position: relative; margin-top: 36px; padding-top: 58px; overflow-x: auto; }
 .af-sm-arcs { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
@@ -296,7 +307,7 @@ input, textarea, button, select { font: inherit; }
 }
 @media (max-width: 640px) {
   .af-wrap { padding: 0 16px; }
-  .af-topbar .af-row { gap: 16px 18px; padding: 12px 0; }
+  .af-topbar .af-row { gap: 16px 18px; padding-top: 12px; padding-bottom: 12px; } /* vertical only — keep .af-wrap's horizontal padding */
   .af-dhead h1 { font-size: 23px; }
   .af-filebar input { font-size: 14px; padding: 13px 16px; }
   .af-filebar .lab { display: none; }

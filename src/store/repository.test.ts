@@ -338,6 +338,60 @@ describe('logs (the live activity stream)', () => {
   });
 });
 
+describe('stateVisitCount (the side-effect ledger visit index)', () => {
+  it('counts transitions into a state and ignores other runs/states', () => {
+    const run = newRun();
+    const other = newRun();
+    expect(repo.stateVisitCount(run.id, 'code_review')).toBe(0);
+
+    repo.appendTransition({ runId: run.id, fromState: 'backend', toState: 'code_review', trigger: 'proceed' });
+    expect(repo.stateVisitCount(run.id, 'code_review')).toBe(1);
+
+    // A back-edge out then a fresh entry — a legitimate second review round bumps the visit index.
+    repo.appendTransition({ runId: run.id, fromState: 'code_review', toState: 'backend', trigger: 'request_changes', backEdge: true });
+    repo.appendTransition({ runId: run.id, fromState: 'backend', toState: 'code_review', trigger: 'proceed' });
+    expect(repo.stateVisitCount(run.id, 'code_review')).toBe(2);
+
+    // Scoped to the run + state.
+    repo.appendTransition({ runId: other.id, fromState: 'backend', toState: 'code_review', trigger: 'proceed' });
+    expect(repo.stateVisitCount(run.id, 'code_review')).toBe(2);
+    expect(repo.stateVisitCount(run.id, 'backend')).toBe(1);
+  });
+});
+
+describe('side-effect ledger (the transactional outbox, README Milestone 7)', () => {
+  it('claims fresh, then reports pending until completed, then reuses the stored result', () => {
+    const run = newRun();
+    const key = 'triage#0:signoff';
+
+    // First claim wins → fresh; the caller now performs the external call.
+    expect(repo.beginSideEffect(run.id, key)).toEqual({ state: 'fresh' });
+
+    // A replay before completion sees the in-flight claim → pending (ambiguous; caller escalates).
+    expect(repo.beginSideEffect(run.id, key)).toEqual({ state: 'pending' });
+
+    // After completion, replays reuse the stored result and never re-perform the call.
+    repo.completeSideEffect(run.id, key, { id: 42, author: 'agent-bot' });
+    expect(repo.beginSideEffect(run.id, key)).toEqual({ state: 'done', result: { id: 42, author: 'agent-bot' } });
+  });
+
+  it('scopes slots per run and per key', () => {
+    const a = newRun();
+    const b = newRun();
+    repo.beginSideEffect(a.id, 'k');
+    // Same key, different run, and same run, different key are both independent claims.
+    expect(repo.beginSideEffect(b.id, 'k')).toEqual({ state: 'fresh' });
+    expect(repo.beginSideEffect(a.id, 'other')).toEqual({ state: 'fresh' });
+  });
+
+  it('round-trips a null/undefined result as a done claim', () => {
+    const run = newRun();
+    repo.beginSideEffect(run.id, 'k');
+    repo.completeSideEffect(run.id, 'k', undefined); // fire-and-forget calls (e.g. a signoff comment)
+    expect(repo.beginSideEffect(run.id, 'k')).toEqual({ state: 'done', result: null });
+  });
+});
+
 describe('foreign keys', () => {
   it('rejects a transition referencing a non-existent run', () => {
     expect(() =>

@@ -1,10 +1,16 @@
 <script lang="ts">
   import { ui, control, revertRun } from './store.svelte';
-  import { telemetryModel, fmtCost, fmtDuration, fmtTokens, escapeHtml } from './render';
+  import { telemetryModel, escalationModel, fmtCost, fmtDuration, fmtTokens, escapeHtml, humanizeState } from './render';
   import StateMachine from './StateMachine.svelte';
 
   const detail = $derived(ui.detail);
   const run = $derived(detail?.run ?? null);
+  // The escalation inspector (needs_human UX, README M7): why the run escalated + operator guidance.
+  const escalation = $derived(
+    run && run.status === 'needs_human'
+      ? escalationModel(detail?.transitions, ui.config?.fsm.escalationState)
+      : null,
+  );
   const terminal = $derived(run ? run.status === 'done' || run.status === 'stopped' : false);
   const tel = $derived(telemetryModel(detail?.agentRuns ?? []));
   const stageMeta = $derived(
@@ -94,6 +100,18 @@
 
   {#if ui.config}
     <StateMachine fsm={ui.config.fsm} {run} transitions={detail?.transitions ?? []} {stageMeta} />
+  {/if}
+
+  {#if escalation}
+    <div class="af-esc" role="alert">
+      <div class="af-esc-head">
+        <span class="tag">needs human</span>
+        <span class="trig">{escalation.trigger}</span>
+        <span class="from">escalated from {humanizeState(escalation.fromState)}</span>
+      </div>
+      <p class="af-esc-guide">{escalation.guidance}</p>
+      {#if escalation.reason}<pre class="af-esc-reason">{reasonText(escalation.reason)}</pre>{/if}
+    </div>
   {/if}
     </div>
   </section>
