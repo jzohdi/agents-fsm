@@ -11,9 +11,10 @@
  * KISS: a single long-lived process. Stop it with Ctrl-C (SIGINT/SIGTERM → graceful close).
  */
 
+import { existsSync } from 'node:fs';
 import type { Server } from 'node:http';
 
-import { createApiServer } from './api/server';
+import { createApiServer, DEFAULT_PUBLIC_DIR } from './api/server';
 import { buildOrchestrator } from './build-runner';
 import { ReplyPoller } from './loop/reply-poller';
 import type { CliArgs } from './cli-args';
@@ -27,6 +28,9 @@ export async function serve(args: CliArgs): Promise<void> {
   const config = orchestrator.getConfig();
   console.log(`agent-fleet daemon listening on http://localhost:${args.port} (FSM config ${config.version}${args.real ? ', real mode' : ''})`);
   console.log('  POST /runs · GET /runs · GET /runs/:id · POST /runs/:id/{pause,resume,stop,revert} · GET|PUT /config · GET /stream');
+  if (!existsSync(DEFAULT_PUBLIC_DIR)) {
+    console.warn('  ⚠ dashboard not built — run `npm run build:dashboard` (or `npm run dev:dashboard` for HMR). The API works regardless.');
+  }
 
   // Background reply polling: re-arm `awaiting_input` runs when a human replies on the issue.
   const stopPolling = startReplyPolling(orchestrator, repo, github, args);

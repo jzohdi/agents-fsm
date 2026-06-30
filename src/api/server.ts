@@ -18,22 +18,36 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { fileURLToPath } from 'node:url';
 
 import { ApiError, type Orchestrator } from './orchestrator';
+import { serveStatic } from './static';
 import type { RunStatus } from '../store/repository';
 import type { StreamEvent } from './stream';
 
 /** Heartbeat so idle SSE connections aren't dropped by intermediaries (a bare comment line). */
 const SSE_HEARTBEAT_MS = 25_000;
 
+/**
+ * The built dashboard assets (Layer 7) — the output of `npm run build:dashboard`. Resolved from this
+ * module so it works under `tsx`. Built on demand and gitignored; the daemon warns if it is missing.
+ */
+export const DEFAULT_PUBLIC_DIR = fileURLToPath(new URL('../../dashboard/dist/', import.meta.url));
+
+export interface ApiServerOptions {
+  /** Directory the dashboard's static assets are served from. Defaults to the bundled `public/`. */
+  publicDir?: string;
+}
+
 /** Build the daemon's HTTP server. The caller decides when/where to `listen` (port 0 in tests). */
-export function createApiServer(orchestrator: Orchestrator): Server {
+export function createApiServer(orchestrator: Orchestrator, options: ApiServerOptions = {}): Server {
+  const publicDir = options.publicDir ?? DEFAULT_PUBLIC_DIR;
   return createServer((req, res) => {
-    handle(orchestrator, req, res).catch((err) => sendError(res, err));
+    handle(orchestrator, req, res, publicDir).catch((err) => sendError(res, err));
   });
 }
 
-async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerResponse, publicDir: string): Promise<void> {
   const method = req.method ?? 'GET';
   const url = new URL(req.url ?? '/', 'http://localhost');
   const path = url.pathname.replace(/\/+$/, '') || '/';
@@ -85,6 +99,9 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
     if (method === 'PUT') return sendJson(res, 200, orch.updateConfig(await readJson(req)));
     return sendError(res, new ApiError(405, `method ${method} not allowed on /config`));
   }
+
+  // --- dashboard (Layer 7): any other GET serves a static asset (`/` → index.html) ---
+  if (method === 'GET') return serveStatic(res, publicDir, url.pathname);
 
   sendError(res, new ApiError(404, `no route for ${method} ${path}`));
 }

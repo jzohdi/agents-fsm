@@ -3,6 +3,10 @@ dist/
 coverage/
 *.log
 
+# Dashboard build output (Milestone 6): `npm run build:dashboard` → served by the daemon. Built on
+# demand, not committed.
+dashboard/dist/
+
 # Real-run working trees (the daemon clones each target repo into <workingRoot>/run-<id>)
 .agent-work/
 

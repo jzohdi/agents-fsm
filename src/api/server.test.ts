@@ -4,8 +4,11 @@
  * still on the stub executor + fake GitHub (no network, no cost).
  */
 
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { loadDefaultConfig } from '../fsm/config';
@@ -24,7 +27,7 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((s) => new Promise<void>((r) => s.close(() => r()))));
 });
 
-async function start(): Promise<{ base: string; orchestrator: Orchestrator }> {
+async function start(opts: { publicDir?: string } = {}): Promise<{ base: string; orchestrator: Orchestrator }> {
   const loaded = loadDefaultConfig();
   const repo = new Repository(openDb(':memory:'));
   const github = new FakeGitHub({ autoSeedIssues: true });
@@ -33,11 +36,20 @@ async function start(): Promise<{ base: string; orchestrator: Orchestrator }> {
     onActivity: (activity) => broadcaster.publish({ type: 'activity', activity }),
   });
   const orchestrator = new Orchestrator({ repo, runner, config: loaded, broadcaster });
-  const server = createApiServer(orchestrator);
+  const server = createApiServer(orchestrator, opts.publicDir ? { publicDir: opts.publicDir } : {});
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const { port } = server.address() as AddressInfo;
   return { base: `http://127.0.0.1:${port}`, orchestrator };
+}
+
+/** A throwaway dashboard dir so the static-serving test doesn't depend on a real `build:dashboard`. */
+function fixturePublicDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'af-public-'));
+  writeFileSync(join(dir, 'index.html'), '<!doctype html><title>agent-fleet — orchestrator</title><div id="app"></div>');
+  writeFileSync(join(dir, 'app.js'), 'export const x = 1;');
+  writeFileSync(join(dir, 'style.css'), 'body{}');
+  return dir;
 }
 
 describe('HTTP API', () => {
@@ -156,6 +168,25 @@ describe('HTTP API', () => {
 
     await reader.cancel();
     controller.abort();
+  });
+  it('serves the dashboard static assets (Layer 7) with correct content types', async () => {
+    const { base } = await start({ publicDir: fixturePublicDir() });
+
+    const index = await fetch(`${base}/`); // "/" → index.html
+    expect(index.status).toBe(200);
+    expect(index.headers.get('content-type')).toContain('text/html');
+    expect(await index.text()).toContain('<title>agent-fleet');
+
+    const app = await fetch(`${base}/app.js`);
+    expect(app.status).toBe(200);
+    expect(app.headers.get('content-type')).toContain('text/javascript');
+
+    const css = await fetch(`${base}/style.css`);
+    expect(css.status).toBe(200);
+    expect(css.headers.get('content-type')).toContain('text/css');
+
+    // A missing asset is a clean 404 (and the API routes still win over static).
+    expect((await fetch(`${base}/does-not-exist.js`)).status).toBe(404);
   });
 });
 
