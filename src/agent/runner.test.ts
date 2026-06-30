@@ -295,6 +295,49 @@ describe('AgentRunner — side-effect outbox (idempotent non-idempotent calls, R
     expect(second.kind).toBe('escalate');
   });
 
+  it('reuses the stored comment on a clarify replay, preserving the await_input anchor', async () => {
+    // clarify is the case that *depends* on the call result (the comment id/author the reply poller
+    // anchors on), so the outbox must return the same stored comment — not just skip the re-post.
+    const { repo, runner, run, github } = setup(
+      () => ({ output: { decision: 'clarify', questions: ['which db?'] } }),
+      { triage: { phases: ['produce'], io: { kind: 'triage' } } },
+      {},
+      'triage',
+    );
+    const postIssueComment = vi.spyOn(github, 'postIssueComment');
+
+    const first = await runner.runStage(repo.getRun(run.id)!);
+    const second = await runner.runStage(repo.getRun(run.id)!); // replay, same visit
+
+    expect(postIssueComment).toHaveBeenCalledTimes(1); // posted once
+    const anchorOf = (o: typeof first) => (o.kind === 'await_input' ? (o.reason as { commentId: number }).commentId : null);
+    expect(anchorOf(first)).not.toBeNull();
+    expect(anchorOf(second)).toBe(anchorOf(first)); // the reused comment carries the same anchor
+  });
+
+  it('re-posts side effects on a legitimate re-entry (a new visit bumps the slot keys)', async () => {
+    // A back-edge that brings a run back to a review stage is a genuine new round — its comments must
+    // NOT be suppressed by the outbox. The visit index (transitions into the state) makes the keys fresh.
+    const { repo, runner, run, github } = setup(
+      () => ({ output: { requestedTransition: 'approve', comments: ['nit'] } }),
+      { code_review: { phases: ['produce'], io: { kind: 'review' } } },
+      {},
+      'code_review',
+    );
+    const pr = await github.openPr({ branch: 'b', base: 'main', title: 't', body: '' });
+    repo.setRunPr(run.id, pr.number);
+    const postComment = vi.spyOn(github, 'postComment');
+
+    await runner.runStage(repo.getRun(run.id)!); // visit 0 → posts
+    expect(postComment).toHaveBeenCalledTimes(1);
+
+    // Simulate the run leaving and re-entering code_review (a committed transition bumps the visit).
+    repo.appendTransition({ runId: run.id, fromState: 'backend', toState: 'code_review', trigger: 'proceed' });
+
+    await runner.runStage(repo.getRun(run.id)!); // visit 1 → fresh slot → posts again
+    expect(postComment).toHaveBeenCalledTimes(2); // a new round, not suppressed
+  });
+
   it('escalates partial_side_effect when a prior attempt left a call in-flight (a crash mid-call)', async () => {
     const { repo, runner, run, github } = setup(
       () => ({ output: { decision: 'proceed' } }),

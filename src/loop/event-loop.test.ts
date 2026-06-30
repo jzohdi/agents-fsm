@@ -253,6 +253,29 @@ describe('crash recovery (idempotent processing)', () => {
     expect(finalRun.status).toBe('needs_human');
     expect(repo.listTransitions(run.id).filter((t) => t.trigger === 'should_split')).toHaveLength(1);
   });
+
+  it('a partial_side_effect escalation is resolved by resume (fresh visit), not re-escalated forever', async () => {
+    // The critical no-infinite-loop property of the visit-index outbox: a slot left `pending` by a
+    // crash escalates partial_side_effect; resume re-enters the stage at a NEW visit (fresh keys), so
+    // the retry performs cleanly instead of re-hitting the stale pending row and escalating again.
+    const { repo, loop } = setup((req) => (req.stage === 'triage' ? { output: { decision: 'proceed' } } : goldenPathHandler(req)));
+
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    // Simulate a crash mid-signoff: the visit-0 slot was claimed but never completed.
+    repo.beginSideEffect(run.id, 'triage#0:signoff');
+
+    await loop.runUntilIdle();
+    expect(repo.getRun(run.id)!.status).toBe('needs_human');
+    expect(repo.listTransitions(run.id).at(-1)!.trigger).toBe('partial_side_effect');
+
+    // Operator verifies GitHub, removes any partial artifact, and resumes → a clean retry at visit 1.
+    loop.resumeRun(run.id);
+    await loop.runUntilIdle();
+
+    // The run advanced past triage to done — it did not get stuck re-escalating on the stale slot.
+    expect(repo.getRun(run.id)!.status).toBe('done');
+    expect(repo.listTransitions(run.id).filter((t) => t.trigger === 'partial_side_effect')).toHaveLength(1);
+  });
 });
 
 describe('loop-owned guards escalate', () => {

@@ -181,7 +181,15 @@ export function seedRuns(repo: Repository, version: string): number[] {
       repo.appendTransition({ runId: id, fromState: be.from, toState: be.to, trigger: be.trigger, reason: be.reason, backEdge: true });
     }
     if (s.escalateFrom) {
-      repo.appendTransition({ runId: id, fromState: s.escalateFrom, toState: 'needs_human', trigger: 'escalate', reason: 'exceeded revise limit (3)' });
+      // Use a real escalation trigger + structured reason (as the loop emits) so the dashboard's
+      // escalation inspector shows genuine per-trigger guidance, not the unknown-trigger fallback.
+      repo.appendTransition({
+        runId: id,
+        fromState: s.escalateFrom,
+        toState: 'needs_human',
+        trigger: 'internal_review_cap',
+        reason: { kind: 'internal_review_cap', cap: 3, notes: 'layout regressions persist after 3 fix rounds' },
+      });
     }
     if (s.stopped) {
       repo.appendTransition({ runId: id, fromState: s.currentState, toState: 'stopped', trigger: 'stop', reason: 'stopped by operator' });

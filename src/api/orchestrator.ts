@@ -28,7 +28,7 @@ import type {
   Transition,
 } from '../store/repository';
 import type { GitHub, IssueSuggestion } from '../integration/github';
-import { parseIssueRef, type ParsedIssueRef } from '../integration/refs';
+import { parseIssueRef, parseRepoRef, type ParsedIssueRef } from '../integration/refs';
 import { Broadcaster, type StreamListener } from './stream';
 
 /** A failure with a client-facing HTTP status. The server maps `status` straight onto the response. */
@@ -59,6 +59,14 @@ export interface OrchestratorOptions {
   broadcaster: Broadcaster;
   /** GitHub adapter, used (read-only) to power the new-run autocomplete. Omit → suggestions are empty. */
   github?: GitHub;
+  /**
+   * The single repo this daemon's adapter is bound to (`owner/repo`, or any form {@link parseRepoRef}
+   * accepts). When set, {@link Orchestrator.start} refuses an issue from a *different* repo — the MVP is
+   * single-repo (the adapter operates only on this repo), and the cross-repo new-run autocomplete makes
+   * a mismatched pick easy, so we fail loud rather than silently run the wrong repo's issue. Omit (mock /
+   * no `--repo`) to disable the guard. Multi-repo support lifts this (README Milestone 8).
+   */
+  repoRef?: string;
   /** Path the FSM config is persisted to; required for `updateConfig` (omit → config is read-only). */
   configPath?: string;
   now?: () => number;
@@ -77,6 +85,8 @@ export class Orchestrator {
   private readonly loop: EventLoop;
   private readonly configPath?: string;
   private readonly github?: GitHub;
+  /** Canonical `owner/repo` this daemon is bound to, or undefined to disable the single-repo guard. */
+  private readonly configuredRepo?: string;
   private config: LoadedConfig;
 
   // Single-flight drain pump (plans/milestone-5.md §2.2).
@@ -92,6 +102,8 @@ export class Orchestrator {
     this.config = options.config;
     this.configPath = options.configPath;
     this.github = options.github;
+    // Normalize the bound repo for the start guard; a malformed value just disables it (never crashes the daemon).
+    this.configuredRepo = safeParseRepoRef(options.repoRef);
     this.onError = options.onError ?? ((err) => console.error(`[orchestrator] drain pump error: ${String(err)}`));
     this.loop = new EventLoop(this.repo, this.config.fsm, this.config.version, this.runner, {
       onTransition: (transition, run) => this.broadcaster.publish({ type: 'transition', runId: run.id, transition, run }),
@@ -119,6 +131,14 @@ export class Orchestrator {
       parsed = parseIssueRef(input.issueRef);
     } catch (err) {
       throw new ApiError(400, err instanceof Error ? err.message : String(err));
+    }
+    // Single-repo guard: the adapter operates only on the daemon's bound repo, so refuse an issue from a
+    // different one (the cross-repo autocomplete makes a mismatched pick easy). Fail loud, not silent.
+    if (this.configuredRepo && parsed.repo.toLowerCase() !== this.configuredRepo.toLowerCase()) {
+      throw new ApiError(
+        400,
+        `this daemon is bound to ${this.configuredRepo}, but ${parsed.ref} is in a different repo; restart with --repo ${parsed.repo} to run it`,
+      );
     }
     const run = this.loop.startRun({ issueRef: parsed.ref, repoRef: input.repoRef ?? parsed.repo });
     this.kick();
@@ -330,5 +350,15 @@ export class Orchestrator {
     const run = this.repo.getRun(runId);
     if (!run) throw new ApiError(404, `run ${runId} not found`);
     return run;
+  }
+}
+
+/** Normalize a configured repo for the start guard, or undefined if absent/unparseable (guard off). */
+function safeParseRepoRef(repoRef: string | undefined): string | undefined {
+  if (!repoRef) return undefined;
+  try {
+    return parseRepoRef(repoRef);
+  } catch {
+    return undefined;
   }
 }

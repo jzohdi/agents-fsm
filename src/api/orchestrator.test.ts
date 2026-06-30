@@ -22,7 +22,7 @@ const DEFAULT_CONFIG_PATH = fileURLToPath(new URL('../fsm/default-config.json', 
 
 /** Build an Orchestrator over an in-memory DB + stub + fake GitHub. The handler can reference the
  *  orchestrator via the returned object (e.g. to pause itself mid-stage) through a late binding. */
-function setup(opts: { handler?: StubHandler; configPath?: string } = {}) {
+function setup(opts: { handler?: StubHandler; configPath?: string; repoRef?: string } = {}) {
   const loaded = loadDefaultConfig();
   const repo = new Repository(openDb(':memory:'));
   const github = new FakeGitHub({ autoSeedIssues: true });
@@ -38,6 +38,7 @@ function setup(opts: { handler?: StubHandler; configPath?: string } = {}) {
     config: loaded,
     broadcaster,
     github,
+    ...(opts.repoRef ? { repoRef: opts.repoRef } : {}),
     ...(opts.configPath ? { configPath: opts.configPath } : {}),
   });
   return { orchestrator, repo, github, events };
@@ -90,6 +91,22 @@ describe('Orchestrator — start + drain', () => {
   it('rejects an unparseable issue reference with a 400', () => {
     const { orchestrator } = setup();
     expect(() => orchestrator.start({ issueRef: 'not a ref' })).toThrow(ApiError);
+  });
+
+  it('refuses an issue from a different repo than the daemon is bound to (single-repo guard)', () => {
+    const { orchestrator, repo } = setup({ repoRef: 'jzohdi/tmux-speedrun' });
+    // Same repo (any casing/URL form) is allowed.
+    expect(() => orchestrator.start({ issueRef: 'https://github.com/JZohdi/tmux-speedrun/issues/31' })).not.toThrow();
+    // A cross-repo issue (e.g. picked from the cross-repo autocomplete) is a loud 400, not a wrong-repo run.
+    expect(() => orchestrator.start({ issueRef: 'acme/web#318' })).toThrow(/different repo/);
+    // Only the same-repo run exists; the cross-repo start created nothing.
+    expect(repo.listRuns().map((r) => r.repoRef.toLowerCase())).toEqual(['jzohdi/tmux-speedrun']);
+  });
+
+  it('disables the single-repo guard when no repo is configured (mock / no --repo)', () => {
+    const { orchestrator } = setup(); // no repoRef
+    expect(() => orchestrator.start({ issueRef: 'acme/web#1' })).not.toThrow();
+    expect(() => orchestrator.start({ issueRef: 'other/repo#2' })).not.toThrow();
   });
 });
 

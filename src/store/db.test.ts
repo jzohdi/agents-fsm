@@ -17,6 +17,11 @@ import { LATEST_VERSION, columnExists, runMigrations } from './migrations';
 const userVersion = (db: Db): number => db.pragma('user_version', { simple: true }) as number;
 const tableExists = (db: Db, name: string): boolean =>
   db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
+/** Column name + type + not-null + default, for comparing a table's shape across DBs. */
+const columns = (db: Db, table: string): unknown[] =>
+  (db.pragma(`table_info(${table})`) as Array<{ name: string; type: string; notnull: number; dflt_value: unknown }>).map(
+    (c) => ({ name: c.name, type: c.type, notnull: c.notnull, dflt_value: c.dflt_value }),
+  );
 
 const created: string[] = [];
 
@@ -81,6 +86,12 @@ describe('migrate', () => {
 
     expect(tableExists(db, 'side_effects')).toBe(true);
     expect(userVersion(db)).toBe(LATEST_VERSION);
+
+    // Drift guard: a retrofitted ledger must be schema-identical to a fresh DB's (the migration SQL and
+    // schema.sql define the same table; if they drift, old and new databases diverge silently).
+    const fresh = openDb();
+    expect(columns(db, 'side_effects')).toEqual(columns(fresh, 'side_effects'));
+    fresh.close();
     db.close();
   });
 });

@@ -96,6 +96,7 @@ export function buildOrchestrator(args: CliArgs): {
     config: loaded,
     broadcaster,
     github, // powers the new-run autocomplete (GET /suggestions)
+    ...(repoRef ? { repoRef } : {}), // bind the single-repo start guard to the daemon's repo (empty → off, e.g. mock)
     ...(configPath ? { configPath } : {}),
     // A FatalExecutorError (e.g. the harness is unauthenticated) fails every run; surface its remedy
     // prominently rather than a bare stack trace, the way the one-shot CLI does on shutdown.

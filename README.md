@@ -589,6 +589,11 @@ dashboard. Start runs from the dashboard's **File a new run** bar (GitHub-backed
 `POST /runs`. For dashboard development with hot reload, `npm run dev` (one-command build-watch +
 in-process daemon) or `npm run dev:dashboard` (Vite HMR against a running daemon).
 
+> **Single-repo (MVP):** a daemon is bound to the one repo it was started with (`--repo`). The new-run
+> autocomplete searches *all* your GitHub issues, so it can surface issues from other repos — starting
+> one of those is refused with a clear error (run a separate daemon bound to that repo instead).
+> Multi-repo is [Milestone 8](#milestone-8--multi-repo-support-post-mvp).
+
 ### 9.4 Configure the FSM
 The pipeline (states, transitions, back-edges, guard limits, budget) is one config object. Edit it
 in the dashboard's **FSM editor** (validated `PUT /config`: invalid → `400`, the file is untouched)
