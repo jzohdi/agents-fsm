@@ -1,10 +1,10 @@
 /**
  * Shared wiring for the operator entry points (the one-shot CLI and the `serve` daemon).
  *
- * `buildRunner` constructs the Agent Runner + its GitHub adapter for the selected mode — stub/fake
- * (default; no network, no cost) or real (`--real`: the Claude Code subprocess executor + the
- * `gh`/`git` adapter + real prompts). Factored out of `cli.ts` so the CLI and the M5 daemon build
- * the runner identically and the wiring can't drift.
+ * `buildRunner` constructs the Agent Runner + its GitHub adapter for the selected mode — real
+ * (default: the Claude Code subprocess executor + the `gh`/`git` adapter + real prompts) or stub/fake
+ * (`--mock`: no network, no cost). Factored out of `cli.ts` so the CLI and the M5 daemon build the
+ * runner identically and the wiring can't drift.
  *
  * `buildOrchestrator` adds the M5 service layer on top: a shared {@link Broadcaster}, the runner's
  * live activities wired into it, and an {@link Orchestrator} (which owns the Event Loop). The same
@@ -40,7 +40,7 @@ export function buildRunner(
   repoRef: string,
   options: BuildRunnerOptions = {},
 ): { runner: AgentRunner; github: GitHub } {
-  if (!args.real) {
+  if (args.mock) {
     const github = new FakeGitHub({ autoSeedIssues: true });
     const runner = new AgentRunner(repo, new StubExecutor(goldenPathHandler), agents, github, {
       ...(options.onActivity ? { onActivity: options.onActivity } : {}),

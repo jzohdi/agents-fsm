@@ -17,7 +17,7 @@ const DEFAULT_CONFIG_PATH = fileURLToPath(new URL('./fsm/default-config.json', i
 
 describe('buildOrchestrator (stub/fake mode)', () => {
   it('assembles a working orchestrator that drives a run to done', async () => {
-    const { orchestrator } = buildOrchestrator(parseCliArgs(['o/r#1']));
+    const { orchestrator } = buildOrchestrator(parseCliArgs(['o/r#1', '--mock']));
     const run = orchestrator.start({ issueRef: 'o/r#1' });
     await orchestrator.settle();
     expect(orchestrator.getRun(run.id).status).toBe('done');

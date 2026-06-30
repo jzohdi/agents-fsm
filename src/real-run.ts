@@ -3,7 +3,7 @@
  *
  * Builds the Agent Runner that drives a *live*, token-spending run: the Claude Code subprocess
  * executor, the `gh`/`git`-backed adapter, and the real composed system prompts. Factored out of the
- * CLI so the operator CLI (`--real`) and the flag-gated end-to-end test share one wiring — and so the
+ * CLI so the operator CLI (real by default, unless `--mock`) and the flag-gated end-to-end test share one wiring — and so the
  * §6 cost-control "cheap model first" override is reachable from both and unit-testable.
  *
  * Constructing the executor and adapter is cheap and side-effect-free (neither spawns a process or

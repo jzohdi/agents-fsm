@@ -1,0 +1,67 @@
+/**
+ * Forward-only schema migrations (Layer 1 — see README §3.3).
+ *
+ * `schema.sql` is the canonical **current** schema, applied with `CREATE TABLE IF NOT EXISTS` to fully
+ * provision a fresh database. The migrations here bring a **pre-existing** database (created against an
+ * older schema) up to that same shape. Each is written to be **idempotent** — e.g. add a column only
+ * if it is missing — so it is a harmless no-op on a fresh DB the baseline already satisfied, and safe
+ * to re-run after a mid-way crash. The applied version is recorded in SQLite's built-in
+ * `PRAGMA user_version`, so an up-to-date database skips the work on every open.
+ *
+ * Adding a migration: append `{ version: <next>, name, apply }` (versions must stay a gap-free 1..N
+ * sequence) and reflect the change in `schema.sql` too. Keep migrations additive: SQLite can
+ * `ALTER TABLE ADD COLUMN` cheaply but cannot change a CHECK constraint in place — that needs a full
+ * table rebuild (the 12-step ALTER procedure); none is pending.
+ */
+
+import type { Db } from './db';
+
+export interface Migration {
+  version: number;
+  name: string;
+  apply: (db: Db) => void;
+}
+
+export const MIGRATIONS: Migration[] = [
+  {
+    version: 1,
+    name: 'add runs.archived_at',
+    apply: (db) => addColumnIfMissing(db, 'runs', 'archived_at', 'TEXT'),
+  },
+];
+
+/** The schema version a fully-migrated database reports — the highest defined migration. */
+export const LATEST_VERSION = MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);
+
+// Guard the invariant the runner relies on: a gap-free, strictly increasing 1..N sequence.
+MIGRATIONS.forEach((m, i) => {
+  if (m.version !== i + 1) {
+    throw new Error(`migrations must be numbered 1..N with no gaps; found version ${m.version} at index ${i}`);
+  }
+});
+
+/**
+ * Apply every migration the database has not yet recorded, in order, pinning `user_version` after
+ * each. Idempotent and crash-safe: a fresh DB re-runs the (guarded) migrations as no-ops and ends
+ * pinned at {@link LATEST_VERSION}; an older DB gets exactly the changes it is missing.
+ */
+export function runMigrations(db: Db): void {
+  const current = db.pragma('user_version', { simple: true }) as number;
+  for (const m of MIGRATIONS) {
+    if (m.version <= current) continue;
+    db.transaction(() => m.apply(db))(); // the schema change itself is atomic
+    // Record progress outside the DDL transaction (some PRAGMAs can't run inside one); re-applying an
+    // already-applied migration after a crash here is a no-op, so the unrecorded window is harmless.
+    db.pragma(`user_version = ${m.version}`);
+  }
+}
+
+/** Whether `table` has a column named `column`. Identifiers are internal constants — never user input. */
+export function columnExists(db: Db, table: string, column: string): boolean {
+  const cols = db.pragma(`table_info(${table})`) as Array<{ name: string }>;
+  return cols.some((c) => c.name === column);
+}
+
+function addColumnIfMissing(db: Db, table: string, column: string, definition: string): void {
+  if (!columnExists(db, table, column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}

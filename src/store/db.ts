@@ -1,22 +1,26 @@
 /**
  * SQLite connection + migration (Layer 1 — see README §3.3).
  *
- * KISS: the whole schema is applied on open via `CREATE TABLE IF NOT EXISTS`.
- * When the schema grows beyond what that handles, this is where a real migration
- * runner would slot in.
+ * On open we apply `schema.sql` (the canonical current schema, `CREATE TABLE IF NOT EXISTS`, which
+ * fully provisions a fresh database) and then run the forward-only migrations in {@link ./migrations}
+ * to bring any pre-existing database up to the same shape. Migrations are idempotent and tracked via
+ * SQLite's `PRAGMA user_version`, so this is safe to run on every open.
  */
 
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
 
+import { runMigrations } from './migrations';
+
 export type Db = Database.Database;
 
 const SCHEMA_SQL = readFileSync(new URL('./schema.sql', import.meta.url), 'utf8');
 
-/** Apply the schema to a database (idempotent). */
+/** Provision the schema and apply any pending migrations (idempotent). */
 export function migrate(db: Db): void {
-  db.exec(SCHEMA_SQL);
+  db.exec(SCHEMA_SQL); // baseline: full current schema; a no-op for tables that already exist
+  runMigrations(db); // retrofit older databases (e.g. add columns) and pin user_version
 }
 
 /**

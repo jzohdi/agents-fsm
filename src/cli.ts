@@ -2,24 +2,24 @@
  * Demo / operator CLI: start a run and watch it advance through the FSM, or resume a parked run.
  *
  * Two modes:
- *  - **stub/fake (default)** — the `StubExecutor` + `FakeGitHub`, so the demo makes no network calls
- *    and costs nothing. Milestone 2 validated the orchestration mechanism this way; Milestone 4a
- *    added the working-tree lifecycle through the `GitHub` adapter (here the fake).
- *  - **real (`--real`)** — the Claude Code subprocess executor + the `gh`/`git`-backed `GitHubCli`
+ *  - **real (default)** — the Claude Code subprocess executor + the `gh`/`git`-backed `GitHubCli`
  *    with the real composed system prompts (Milestone 4b). This spends tokens and creates a real
- *    branch + PR, so it is opt-in. Preconditions: `gh auth status` logged in with push access,
- *    `ANTHROPIC_API_KEY` set (plans/milestone-4.md §6).
+ *    branch + PR. Preconditions: `gh auth status` logged in with push access, `ANTHROPIC_API_KEY`
+ *    set (plans/milestone-4.md §6), and `--repo <owner/name>`.
+ *  - **stub/fake (`--mock`)** — the `StubExecutor` + `FakeGitHub`, so it makes no network calls and
+ *    costs nothing. Milestone 2 validated the orchestration mechanism this way; the tests and UI dev
+ *    use it. The `FakeGitHub` auto-seeds issues, so any issueRef works.
  *
  * Usage:
- *   tsx src/cli.ts <issueRef> [--db <path>]                                  # start (stub/fake)
- *   tsx src/cli.ts <issueRef> --real [--repo o/r] [--base main]             # start (real)
+ *   tsx src/cli.ts <issueRef> --repo o/r [--base main]                       # start (real, the default)
  *                  [--work ./.agent-work] [--cheap] [--db <path>]
  *                  [--local-repo <path>] [--clone-url <url>] [--permission-mode <mode>] [--model sonnet] [--timeout <min>]
- *   tsx src/cli.ts resume <runId> [--real --repo o/r ...] [--db <path>]      # resume a needs_human run
- *   tsx src/cli.ts serve [--port 4319] [--db <path>] [--config <path>] [--real ...]  # run the daemon (HTTP API + live stream, M5)
+ *   tsx src/cli.ts <issueRef> --mock [--db <path>]                           # start (no tokens / no network)
+ *   tsx src/cli.ts resume <runId> [--repo o/r ...] [--mock] [--db <path>]    # resume a needs_human run
+ *   tsx src/cli.ts serve [--port 4319] [--db <path>] [--config <path>] [--mock]  # run the daemon (HTTP API + live stream, M5)
  *
  * With no `--db` it uses an in-memory database (nothing persists); `resume` across processes needs a
- * file path. The demo `FakeGitHub` auto-seeds issues, so any issueRef works in stub mode. `--cheap`
+ * file path. `--cheap`
  * pins every phase to the cheap model (haiku) — proves plumbing but too weak to follow the JSON
  * contract to `done`; `--model sonnet` runs produce/review on a cheaper-than-opus model that does.
  * `--local-repo` clones each run's working tree from a local checkout (offline) while still pushing.
@@ -47,9 +47,9 @@ function printActivity(a: PhaseActivity): void {
 function buildLoop(args: CliArgs, repoRef: string): { repo: Repository; loop: EventLoop; version: string; github: GitHub } {
   const { fsm, agents, version } = loadDefaultConfig();
   const repo = new Repository(openDb(args.db));
-  if (args.real) {
+  if (!args.mock) {
     const model = args.cheap ? 'cheap (haiku, plumbing only)' : args.model ?? 'default (opus)';
-    console.log(`[real mode] repo=${args.repo ?? repoRef} base=${args.base} work=${args.work} model=${model} — spends tokens, opens a real PR.`);
+    console.log(`[real mode] repo=${args.repo ?? repoRef} base=${args.base} work=${args.work} model=${model} — spends tokens, opens a real PR. (pass --mock for a no-cost run)`);
   }
   const { runner, github } = buildRunner(args, repo, agents, repoRef, { onActivity: printActivity });
   const loop = new EventLoop(repo, fsm, version, runner, {
@@ -90,7 +90,7 @@ function report(repo: Repository, runId: number): void {
     const last = repo.listTransitions(runId).at(-1);
     console.log(`\n⚠️  Escalated to needs_human via "${last?.trigger ?? '?'}". Reason:`);
     console.log(indent(formatReason(last?.reason)));
-    console.log(`\nFix the cause, then resume:  npm start -- resume ${runId} --real --repo <owner/name> [--model …] [--local-repo …] [--db <path>]`);
+    console.log(`\nFix the cause, then resume:  npm start -- resume ${runId} --repo <owner/name> [--model …] [--local-repo …] [--db <path>]`);
   }
 
   // Awaiting a human reply: triage asked a question on the issue. Tell the operator how to pick it
@@ -99,7 +99,7 @@ function report(repo: Repository, runId: number): void {
     const last = repo.listTransitions(runId).at(-1);
     console.log(`\n💬  Awaiting your reply on the issue. Triage asked:`);
     console.log(indent(formatReason(last?.reason)));
-    console.log(`\nReply on the issue, then resume:  npm start -- resume ${runId} --real --repo <owner/name> --db <path>`);
+    console.log(`\nReply on the issue, then resume:  npm start -- resume ${runId} --repo <owner/name> --db <path>`);
   }
 }
 
@@ -119,7 +119,23 @@ function indent(text: string): string {
 }
 
 async function start(args: CliArgs): Promise<void> {
-  const issueRef = args.positionals[0] ?? 'demo/repo#1';
+  // A bare `start` only has a safe default in mock mode (the fake auto-seeds any issue). In real mode
+  // we refuse to invent an issue/repo — point the operator at the two supported ways to begin instead.
+  const issueRef = args.positionals[0] ?? (args.mock ? 'demo/repo#1' : undefined);
+  if (!issueRef) {
+    console.error(
+      [
+        'No issue to run. Either:',
+        '  • run one issue from the CLI:   npm start -- owner/repo#123 --repo owner/repo',
+        '  • or start the app + dashboard and submit runs from the new-run box:',
+        '        npm run dev            (build-watch + daemon)',
+        '        npm start -- serve     (daemon only)',
+        '  • no-cost demo run (fake harness, no tokens/GitHub):   npm start -- --mock',
+      ].join('\n'),
+    );
+    process.exitCode = 1;
+    return;
+  }
   const repoRef = issueRef.split('#')[0] ?? issueRef;
   const { repo, loop, version, github } = buildLoop(args, repoRef);
 
@@ -134,7 +150,7 @@ async function start(args: CliArgs): Promise<void> {
 
 async function resume(args: CliArgs): Promise<void> {
   const runId = Number(args.positionals[1]);
-  if (!Number.isInteger(runId)) throw new Error('usage: cli.ts resume <runId> [--real --repo o/r ...] [--db <path>]');
+  if (!Number.isInteger(runId)) throw new Error('usage: cli.ts resume <runId> [--repo o/r ...] [--mock] [--db <path>]');
   const { repo, loop, github } = buildLoop(args, '');
 
   loop.recover();

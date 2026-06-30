@@ -13,9 +13,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "start": "tsx src/cli.ts",
+    "dev": "tsx src/dev.ts",
     "dev:dashboard": "vite dashboard",
     "dev:preview": "tsx src/dev-preview.ts",
-    "build:dashboard": "vite build dashboard"
+    "build:dashboard": "vite build dashboard",
+    "watch:dashboard": "vite build dashboard --watch"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1",

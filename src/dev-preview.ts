@@ -38,7 +38,9 @@ const THOUGHTS = [
 ];
 
 function main(): void {
-  const args = parseCliArgs(['serve', '--db', ':memory:', '--port', String(PORT), '--poll-timeout', '0']);
+  // `--mock`: the preview must use the stub executor + in-memory FakeGitHub (we seed both), never the
+  // real harness — runs are real by default now, so this flag is required here.
+  const args = parseCliArgs(['serve', '--mock', '--db', ':memory:', '--port', String(PORT), '--poll-timeout', '0']);
   const { orchestrator, repo, github, broadcaster } = buildOrchestrator(args);
 
   const version = orchestrator.getConfig().version;

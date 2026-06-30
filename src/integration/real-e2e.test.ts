@@ -5,7 +5,7 @@
  * skipped unless `RUN_REAL_E2E=1` — mirroring `RUN_REAL_HARNESS` / `RUN_REAL_GITHUB`. It drives the
  * full pipeline with the real Claude Code subprocess executor, the real composed prompts, and the
  * real `gh`/`git` adapter against a live repo + issue (via the same `buildRealRunner` wiring the CLI
- * `--real` mode uses), then asserts the run reached a terminal state and (when `done`) opened a PR.
+ * uses by default), then asserts the run reached a terminal state and (when `done`) opened a PR.
  *
  * Preconditions (plans/milestone-4.md §6):
  *   - `gh auth status` logged in with push access to the target repo,

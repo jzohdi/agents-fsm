@@ -3,8 +3,9 @@
  * without running the loop — `cli.ts` executes `main()` on import).
  *
  * Backed by `node:util parseArgs`, so `--key value` and `--key=value` both work and an unknown flag
- * errors loudly instead of being silently ignored. The defaults matter for safety: `real` defaults
- * to `false`, so the CLI never spends tokens or touches GitHub unless `--real` is passed explicitly.
+ * errors loudly instead of being silently ignored. Runs are **real by default** (the Claude Code
+ * harness + `gh`/`git` adapter — spends tokens, touches GitHub); pass `--mock` to use the stub
+ * executor + in-memory fake GitHub instead (no tokens, no network), as the tests and UI dev do.
  */
 
 import { parseArgs } from 'node:util';
@@ -13,7 +14,8 @@ export interface CliArgs {
   /** Subcommand + operands: `[]` or `[issueRef]` to start, `['resume', runId]` to resume. */
   positionals: string[];
   db: string;
-  real: boolean;
+  /** Use the stub executor + fake GitHub (no tokens, no network). Default `false` → a real run. */
+  mock: boolean;
   cheap: boolean;
   repo?: string;
   base: string;
@@ -47,7 +49,7 @@ export function parseCliArgs(argv: string[]): CliArgs {
       repo: { type: 'string' },
       base: { type: 'string' },
       work: { type: 'string' },
-      real: { type: 'boolean' },
+      mock: { type: 'boolean' },
       cheap: { type: 'boolean' },
       'clone-url': { type: 'string' },
       'local-repo': { type: 'string' },
@@ -63,7 +65,7 @@ export function parseCliArgs(argv: string[]): CliArgs {
   return {
     positionals,
     db: values.db ?? ':memory:',
-    real: values.real ?? false,
+    mock: values.mock ?? false,
     cheap: values.cheap ?? false,
     repo: values.repo,
     base: values.base ?? 'main',

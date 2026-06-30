@@ -1,6 +1,6 @@
 /**
- * CLI argument parsing tests. The load-bearing case is the safety default: without `--real`, the
- * CLI must stay in stub/fake mode so it never spends tokens or touches GitHub by accident.
+ * CLI argument parsing tests. The load-bearing case is the mode default: runs are real unless
+ * `--mock` is passed, so `mock` defaults to `false` (and the other defaults stay sane).
  */
 
 import { describe, expect, it } from 'vitest';
@@ -8,9 +8,9 @@ import { describe, expect, it } from 'vitest';
 import { parseCliArgs } from './cli-args';
 
 describe('parseCliArgs', () => {
-  it('defaults to stub/fake mode (never real unless asked) with safe defaults', () => {
+  it('defaults to a real run (mock off) with safe defaults', () => {
     const args = parseCliArgs(['owner/repo#1']);
-    expect(args.real).toBe(false); // SAFETY: no tokens / no GitHub unless --real
+    expect(args.mock).toBe(false); // real by default; --mock opts into the no-cost stub/fake harness
     expect(args.cheap).toBe(false);
     expect(args.db).toBe(':memory:');
     expect(args.base).toBe('main');
@@ -37,13 +37,13 @@ describe('parseCliArgs', () => {
     expect(args.pollIntervalSeconds).toBe(30);
   });
 
-  it('reads the real-mode flags and config (both --key value and --key=value)', () => {
+  it('reads the run flags and config (both --key value and --key=value)', () => {
     const args = parseCliArgs([
-      'owner/repo#1', '--real', '--cheap', '--repo', 'o/r', '--base=develop', '--work', '/tmp/w',
+      'owner/repo#1', '--mock', '--cheap', '--repo', 'o/r', '--base=develop', '--work', '/tmp/w',
       '--clone-url', 'git@github.com:o/r.git', '--local-repo', '/home/me/o-r', '--permission-mode=acceptEdits',
       '--model', 'sonnet',
     ]);
-    expect(args.real).toBe(true);
+    expect(args.mock).toBe(true);
     expect(args.cheap).toBe(true);
     expect(args.repo).toBe('o/r');
     expect(args.base).toBe('develop');
