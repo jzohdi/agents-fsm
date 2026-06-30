@@ -44,11 +44,21 @@ export interface EventLoopOptions {
 export class EventLoop {
   constructor(
     private readonly repo: Repository,
-    private readonly fsm: FsmConfig,
-    private readonly version: string,
+    private fsm: FsmConfig,
+    private version: string,
     private readonly runner: AgentRunner,
     private readonly options: EventLoopOptions = {},
   ) {}
+
+  /**
+   * Swap the FSM rules + version the loop applies to *new* work (M5 `updateConfig`). The Orchestrator
+   * only calls this while no run is in flight, so an in-flight run is never re-pointed at changed rules
+   * (the config-version pinning invariant, README §3.3 Layer 2). New runs pick up the new version.
+   */
+  setConfig(fsm: FsmConfig, version: string): void {
+    this.fsm = fsm;
+    this.version = version;
+  }
 
   /** Create a run in the initial state and enqueue its first event. Returns the run. */
   startRun(input: { issueRef: string; repoRef: string }): Run {
@@ -73,10 +83,10 @@ export class EventLoop {
    * the round counters (a fresh budget, per README §3.3 Layer 6), and enqueues an advance event so
    * the loop re-dispatches that stage — safely, because every stage side effect is idempotent.
    *
-   * The full pause/stop/revert control surface arrives with the API (M5); this is the minimal
-   * recover-and-continue, sharing the repo logic the API will reuse.
+   * Part of the M5 control surface alongside {@link pauseRun} / {@link stopRun} / {@link revertRun}.
+   * Returns the updated run; the caller (`Orchestrator`) kicks the drain pump.
    */
-  resumeRun(runId: number): void {
+  resumeRun(runId: number): Run {
     const run = this.repo.getRun(runId);
     if (!run) throw new Error(`resumeRun: run ${runId} not found`);
     if (run.status !== 'needs_human') throw new Error(`resumeRun: run ${runId} is "${run.status}", not needs_human`);
@@ -85,8 +95,8 @@ export class EventLoop {
     if (!escalation) throw new Error(`resumeRun: run ${runId} has no escalation transition to resume from`);
     const target = escalation.fromState;
 
-    this.repo.transaction(() => {
-      this.repo.commitTransition({
+    const transition = this.repo.transaction(() => {
+      const t = this.repo.commitTransition({
         runId,
         fromState: this.fsm.escalationState,
         toState: target,
@@ -96,7 +106,112 @@ export class EventLoop {
         eventId: null, // a manual operator transition, not driven by an event
       });
       this.repo.enqueueEvent({ runId, type: EVENT_ADVANCE });
+      return t;
     });
+    this.emit(transition, runId);
+    return this.requireRun(runId);
+  }
+
+  /**
+   * Pause a `running` run (README §3.3 Layer 6 — `pause` halts dispatch and is resumable). Status-only:
+   * the dispatch gate then leaves the run's pending event parked until {@link resumePausedRun}. A stage
+   * already in flight finishes (the commit honors the pause, §2.3); pause never interrupts the agent.
+   * Returns the updated run. Throws if the run isn't `running`.
+   */
+  pauseRun(runId: number): Run {
+    const run = this.repo.getRun(runId);
+    if (!run) throw new Error(`pauseRun: run ${runId} not found`);
+    if (run.status !== 'running') throw new Error(`pauseRun: run ${runId} is "${run.status}", not running`);
+    this.repo.setRunStatus(runId, 'paused');
+    return this.requireRun(runId);
+  }
+
+  /**
+   * Resume a `paused` run: flip it back to `running` so the dispatch gate admits its already-pending
+   * event (paused never removes it). Status-only — no new transition, no new event (which would risk a
+   * duplicate dispatch). Returns the updated run; the caller kicks the pump. Throws if not `paused`.
+   */
+  resumePausedRun(runId: number): Run {
+    const run = this.repo.getRun(runId);
+    if (!run) throw new Error(`resumePausedRun: run ${runId} not found`);
+    if (run.status !== 'paused') throw new Error(`resumePausedRun: run ${runId} is "${run.status}", not paused`);
+    this.repo.setRunStatus(runId, 'running');
+    return this.requireRun(runId);
+  }
+
+  /**
+   * Stop a run (README §3.3 Layer 6 — terminal, not resumable; `stop` is not delete, all state/artifacts
+   * stay for inspection). Sets the terminal `stopped` status; the dispatch gate then never admits its
+   * events. A stage in flight finishes and its commit honors the stop (§2.3). Returns the updated run.
+   * Throws if the run is already terminal (`done`/`stopped`).
+   */
+  stopRun(runId: number): Run {
+    const run = this.repo.getRun(runId);
+    if (!run) throw new Error(`stopRun: run ${runId} not found`);
+    if (run.status === 'done' || run.status === 'stopped') {
+      throw new Error(`stopRun: run ${runId} is already "${run.status}"`);
+    }
+    // Cancel any not-yet-claimed follow-up event so a terminal run leaves no stale entry in the queue
+    // (an in-flight `processing` event is untouched — it finishes and its commit honors the stop, §2.3).
+    this.repo.transaction(() => {
+      this.repo.discardPendingEvents(runId);
+      this.repo.setRunStatus(runId, 'stopped');
+    });
+    return this.requireRun(runId);
+  }
+
+  /**
+   * Revert a run to an earlier (or any non-terminal) state on operator command (README §3.3 Layer 6 —
+   * `revert <state>` for normal control and `needs_human` resolution). Records a manual transition to
+   * `toState`, resets the round counters (a fresh budget, like {@link resumeRun}), sets `running`, and
+   * enqueues an advance event so the loop re-dispatches there. A `reason` is required so the target
+   * stage knows why it is re-running (README §2 — a reasonless revert just repeats prior output).
+   * Returns the updated run; the caller kicks the pump.
+   */
+  revertRun(runId: number, toState: string, reason: unknown): Run {
+    const run = this.repo.getRun(runId);
+    if (!run) throw new Error(`revertRun: run ${runId} not found`);
+    if (run.status === 'done' || run.status === 'stopped') {
+      throw new Error(`revertRun: run ${runId} is terminal ("${run.status}")`);
+    }
+    const target = this.fsm.states[toState];
+    if (!target) throw new Error(`revertRun: unknown state "${toState}"`);
+    if (target.terminal) throw new Error(`revertRun: cannot revert to terminal state "${toState}"`);
+    if (reason === undefined || reason === null || reason === '') {
+      throw new Error('revertRun: a reason is required so the target stage knows why it is re-running');
+    }
+    // Refuse while a stage is mid-flight: that stage will commit its own transition when it finishes
+    // and would clobber the revert (a serial-loop race). Wait for the stage to finish (pausing the run
+    // stops the *next* dispatch, so it then parks) before reverting.
+    if (this.repo.hasProcessingEvent(runId)) {
+      throw new Error(`revertRun: run ${runId} has a stage in flight; wait for it to finish (pause the run) before reverting`);
+    }
+
+    const transition = this.repo.transaction(() => {
+      // Cancel any follow-up event left over from the state the run was parked in, so the revert is
+      // driven by exactly one fresh advance event (never a stale one targeting the old state).
+      this.repo.discardPendingEvents(runId);
+      const t = this.repo.commitTransition({
+        runId,
+        fromState: run.currentState,
+        toState,
+        trigger: 'revert',
+        reason,
+        isReset: true, // fresh budget of rounds for the reverted-to loop
+        status: 'running',
+        eventId: null, // a manual operator transition, not driven by an event
+      });
+      this.repo.enqueueEvent({ runId, type: EVENT_ADVANCE });
+      return t;
+    });
+    this.emit(transition, runId);
+    return this.requireRun(runId);
+  }
+
+  private requireRun(runId: number): Run {
+    const run = this.repo.getRun(runId);
+    if (!run) throw new Error(`run ${runId} vanished`);
+    return run;
   }
 
   /** Process one event if any is dispatchable. Returns false when the queue is idle. */
@@ -228,11 +343,19 @@ export class EventLoop {
     }
 
     const terminal = this.fsm.states[decision.to]?.terminal === true;
+
+    // A `pause`/`stop` command can land *while* a stage runs (the stage awaits the harness). The
+    // dispatch gate already stops the *next* dispatch; here we also honor a status flipped mid-stage
+    // so the in-flight stage's commit doesn't clobber it back to `running` (M5, plans/milestone-5.md
+    // §2.3). The current stage always finishes — pause halts dispatch, it does not interrupt the agent.
+    const interrupted = this.repo.getRun(run.id)?.status;
     const status: RunStatus = terminal
       ? decision.to === this.fsm.escalationState
         ? 'needs_human'
         : 'done'
-      : 'running';
+      : interrupted === 'paused' || interrupted === 'stopped'
+        ? interrupted
+        : 'running';
 
     const transition = this.repo.transaction(() => {
       const t = this.repo.commitTransition({
@@ -252,8 +375,9 @@ export class EventLoop {
       for (const artifact of envelope.artifacts ?? []) {
         this.repo.recordArtifact({ runId: run.id, kind: artifact.kind, locator: artifact.locator });
       }
-      // Keep the run moving only while it stays running; terminal runs hold no executor.
-      if (!terminal) this.repo.enqueueEvent({ runId: run.id, type: EVENT_ADVANCE });
+      // Keep the run moving while it can still advance. A `stopped` run is terminal (no follow-up);
+      // a `paused` run keeps its pending event so `resume` re-dispatches it (§2.3).
+      if (!terminal && status !== 'stopped') this.repo.enqueueEvent({ runId: run.id, type: EVENT_ADVANCE });
       return t;
     });
 

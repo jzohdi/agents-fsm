@@ -467,6 +467,119 @@ describe('triage clarify → awaiting_input → resume', () => {
   });
 });
 
+describe('M5 control methods (pause / resume-paused / stop / revert)', () => {
+  it('pause halts the next dispatch; resume re-arms the parked event', async () => {
+    const { repo, loop } = setup(goldenPathHandler);
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.tick(); // process exactly one event (triage → plan), leaving a pending advance event
+
+    const paused = loop.pauseRun(run.id);
+    expect(paused.status).toBe('paused');
+    await loop.runUntilIdle(); // the dispatch gate refuses the parked event while paused
+    expect(repo.getRun(run.id)!.currentState).toBe('plan'); // did not advance
+
+    loop.resumePausedRun(run.id);
+    await loop.runUntilIdle();
+    expect(repo.getRun(run.id)!.status).toBe('done');
+  });
+
+  it('honors a pause that lands during a stage (the stage finishes, dispatch stops)', async () => {
+    const holder: { loop?: EventLoop } = {};
+    const handler: StubHandler = (req) => {
+      if (req.stage === 'plan' && req.phase === 'produce') holder.loop!.pauseRun(req.runId);
+      return goldenPathHandler(req);
+    };
+    const { repo, loop } = setup(handler);
+    holder.loop = loop;
+
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.runUntilIdle();
+
+    const parked = repo.getRun(run.id)!;
+    expect(parked.status).toBe('paused'); // the in-flight commit honored the pause
+    expect(parked.currentState).toBe('plan_review'); // plan still committed its transition
+  });
+
+  it('stop discards a parked run\'s pending follow-up event (no stale queue entry)', async () => {
+    // Park paused mid-`plan` so a pending advance event is left in the queue, then stop.
+    const holder: { loop?: EventLoop } = {};
+    const handler: StubHandler = (req) => {
+      if (req.stage === 'plan' && req.phase === 'produce') holder.loop!.pauseRun(req.runId);
+      return goldenPathHandler(req);
+    };
+    const { repo, loop } = setup(handler);
+    holder.loop = loop;
+
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.runUntilIdle();
+    expect(repo.getRun(run.id)!.status).toBe('paused'); // a pending follow-up event exists
+
+    loop.stopRun(run.id);
+    // Force the gate open: if the event had only been *gated* (not discarded) it would now be claimed.
+    repo.setRunStatus(run.id, 'running');
+    expect(await loop.tick()).toBe(false); // nothing to claim — the pending event was discarded
+  });
+
+  it('stop is terminal: the stage finishes but no follow-up event is enqueued', async () => {
+    const holder: { loop?: EventLoop } = {};
+    const handler: StubHandler = (req) => {
+      if (req.stage === 'plan' && req.phase === 'produce') holder.loop!.stopRun(req.runId);
+      return goldenPathHandler(req);
+    };
+    const { repo, loop } = setup(handler);
+    holder.loop = loop;
+
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.runUntilIdle();
+
+    expect(repo.getRun(run.id)!.status).toBe('stopped');
+    expect(() => loop.stopRun(run.id)).toThrowError(/already "stopped"/);
+    expect(() => loop.resumePausedRun(run.id)).toThrowError(/not paused/);
+  });
+
+  it('revert moves a parked run to an earlier state with a reset, discarding the stale follow-up event', async () => {
+    // Park paused mid-`plan` so the run carries a leftover pending event, then revert.
+    const holder: { loop?: EventLoop } = {};
+    const handler: StubHandler = (req) => {
+      if (req.stage === 'plan' && req.phase === 'produce') holder.loop!.pauseRun(req.runId);
+      return goldenPathHandler(req);
+    };
+    const { repo, loop } = setup(handler);
+    holder.loop = loop;
+
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.runUntilIdle();
+    expect(repo.getRun(run.id)!.status).toBe('paused');
+
+    loop.revertRun(run.id, 'plan', { note: 'redo the plan' });
+    // The stale follow-up event was cancelled, so exactly one advance event drives the revert.
+    await loop.runUntilIdle();
+
+    const revert = repo.listTransitions(run.id).find((t) => t.trigger === 'revert')!;
+    expect(revert).toMatchObject({ toState: 'plan', isReset: true, eventId: null });
+    // plan re-pauses (the handler still fires), so the run parks again — proving the single clean event.
+    expect(repo.getRun(run.id)!.status).toBe('paused');
+    expect(repo.getRun(run.id)!.currentState).toBe('plan_review');
+  });
+
+  it('refuses to revert while a stage is in flight (would race the committing stage)', () => {
+    const { repo, loop } = setup(goldenPathHandler);
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    repo.claimNextEvent(); // the run's event is now `processing` — a stage is mid-flight
+    expect(() => loop.revertRun(run.id, 'plan', { note: 'x' })).toThrowError(/in flight/);
+  });
+
+  it('validates control inputs', () => {
+    const { loop } = setup(goldenPathHandler);
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    expect(() => loop.pauseRun(999)).toThrowError(/not found/);
+    expect(() => loop.resumePausedRun(run.id)).toThrowError(/not paused/); // it's running
+    expect(() => loop.revertRun(run.id, 'plan', '')).toThrowError(/reason is required/);
+    expect(() => loop.revertRun(run.id, 'ghost', { note: 'x' })).toThrowError(/unknown state/);
+    expect(() => loop.revertRun(run.id, 'done', { note: 'x' })).toThrowError(/terminal/);
+  });
+});
+
 describe('fatal executor error aborts the drain (does not escalate one run)', () => {
   it('propagates the error and leaves the run running + the event recoverable', async () => {
     const repo = new Repository(openDb(':memory:'));

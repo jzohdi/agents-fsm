@@ -110,7 +110,7 @@ export class AgentRunner {
   constructor(
     private readonly repo: Repository,
     private readonly executor: StageExecutor,
-    private readonly agents: AgentsConfig,
+    private agents: AgentsConfig,
     private readonly github: GitHub,
     options: AgentRunnerOptions = {},
   ) {
@@ -118,6 +118,15 @@ export class AgentRunner {
     this.baseBranch = options.baseBranch ?? DEFAULT_BASE_BRANCH;
     this.malformedRetryCap = options.malformedRetryCap ?? DEFAULT_MALFORMED_RETRY_CAP;
     this.onActivity = options.onActivity;
+  }
+
+  /**
+   * Swap the per-stage agent recipe (M5 `updateConfig`). Paired with {@link EventLoop.setConfig};
+   * the Orchestrator calls both only while no run is in flight, so a running stage is never
+   * re-pointed at a changed recipe.
+   */
+  setAgents(agents: AgentsConfig): void {
+    this.agents = agents;
   }
 
   /** Run the run's current stage to completion and return its outcome. */

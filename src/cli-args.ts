@@ -32,6 +32,10 @@ export interface CliArgs {
   pollTimeoutMinutes: number;
   /** Delay between reply-poll checks, in **seconds** — `--poll-interval`. */
   pollIntervalSeconds: number;
+  /** FSM config file the daemon/CLI runs under; enables `PUT /config` to persist edits — `--config`. */
+  config?: string;
+  /** Port the `serve` daemon listens on — `--port`. Default 4319. */
+  port: number;
 }
 
 export function parseCliArgs(argv: string[]): CliArgs {
@@ -52,6 +56,8 @@ export function parseCliArgs(argv: string[]): CliArgs {
       timeout: { type: 'string' },
       'poll-timeout': { type: 'string' },
       'poll-interval': { type: 'string' },
+      config: { type: 'string' },
+      port: { type: 'string' },
     },
   });
   return {
@@ -69,5 +75,7 @@ export function parseCliArgs(argv: string[]): CliArgs {
     timeoutMinutes: values.timeout !== undefined ? Number(values.timeout) : undefined,
     pollTimeoutMinutes: values['poll-timeout'] !== undefined ? Number(values['poll-timeout']) : 30,
     pollIntervalSeconds: values['poll-interval'] !== undefined ? Number(values['poll-interval']) : 15,
+    config: values.config,
+    port: values.port !== undefined ? Number(values.port) : 4319,
   };
 }

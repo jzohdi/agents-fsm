@@ -16,6 +16,7 @@
  *                  [--work ./.agent-work] [--cheap] [--db <path>]
  *                  [--local-repo <path>] [--clone-url <url>] [--permission-mode <mode>] [--model sonnet] [--timeout <min>]
  *   tsx src/cli.ts resume <runId> [--real --repo o/r ...] [--db <path>]      # resume a needs_human run
+ *   tsx src/cli.ts serve [--port 4319] [--db <path>] [--config <path>] [--real ...]  # run the daemon (HTTP API + live stream, M5)
  *
  * With no `--db` it uses an in-memory database (nothing persists); `resume` across processes needs a
  * file path. The demo `FakeGitHub` auto-seeds issues, so any issueRef works in stub mode. `--cheap`
@@ -26,54 +27,31 @@
  * flags error.
  */
 
-import { loadDefaultConfig, type AgentsConfig } from './fsm/config';
+import { loadDefaultConfig } from './fsm/config';
 import { openDb } from './store/db';
 import { Repository } from './store/repository';
-import { AgentRunner, type PhaseActivity } from './agent/runner';
-import { StubExecutor, goldenPathHandler, FatalExecutorError } from './agent/executor';
-import { FakeGitHub } from './integration/github-fake';
+import type { PhaseActivity } from './agent/runner';
+import { FatalExecutorError } from './agent/executor';
 import type { GitHub } from './integration/github';
-import { buildRealGitHub, buildRealRunner } from './real-run';
 import { EventLoop } from './loop/event-loop';
 import { ReplyPoller } from './loop/reply-poller';
 import { parseCliArgs, type CliArgs } from './cli-args';
+import { buildRunner } from './build-runner';
+import { serve } from './serve';
 
 /** Print one live agent activity, indented under the current transition for a readable run trace. */
 function printActivity(a: PhaseActivity): void {
   console.log(`     · [${a.stage}:${a.phase}] ${a.activity.summary}`);
 }
 
-/** Build the Agent Runner + its GitHub adapter for the selected mode (real vs. stub/fake). The
- *  adapter is returned so the Reply Poller shares the same instance (state, in the fake's case). */
-function buildRunner(args: CliArgs, repo: Repository, agents: AgentsConfig, repoRef: string): { runner: AgentRunner; github: GitHub } {
-  if (!args.real) {
-    // The stub executor does not stream, so the live activity sink simply stays quiet here.
-    const github = new FakeGitHub({ autoSeedIssues: true });
-    const runner = new AgentRunner(repo, new StubExecutor(goldenPathHandler), agents, github, { onActivity: printActivity });
-    return { runner, github };
-  }
-  const config = {
-    repo: args.repo ?? repoRef,
-    baseBranch: args.base,
-    workingRoot: args.work,
-    cheap: args.cheap,
-    cloneUrl: args.cloneUrl,
-    localRepo: args.localRepo,
-    permissionMode: args.permissionMode,
-    frontierModel: args.model,
-    ...(args.timeoutMinutes !== undefined ? { timeoutMs: args.timeoutMinutes * 60_000 } : {}),
-  };
-  const model = config.cheap ? 'cheap (haiku, plumbing only)' : config.frontierModel ?? 'default (opus)';
-  console.log(`[real mode] repo=${config.repo} base=${config.baseBranch} work=${config.workingRoot} model=${model} — spends tokens, opens a real PR.`);
-  const github = buildRealGitHub(config);
-  const runner = buildRealRunner(repo, agents, config, { onActivity: printActivity, github });
-  return { runner, github };
-}
-
 function buildLoop(args: CliArgs, repoRef: string): { repo: Repository; loop: EventLoop; version: string; github: GitHub } {
   const { fsm, agents, version } = loadDefaultConfig();
   const repo = new Repository(openDb(args.db));
-  const { runner, github } = buildRunner(args, repo, agents, repoRef);
+  if (args.real) {
+    const model = args.cheap ? 'cheap (haiku, plumbing only)' : args.model ?? 'default (opus)';
+    console.log(`[real mode] repo=${args.repo ?? repoRef} base=${args.base} work=${args.work} model=${model} — spends tokens, opens a real PR.`);
+  }
+  const { runner, github } = buildRunner(args, repo, agents, repoRef, { onActivity: printActivity });
   const loop = new EventLoop(repo, fsm, version, runner, {
     onTransition: (t) => console.log(`  ${t.fromState.padEnd(18)} --${t.trigger}-->  ${t.toState}`),
   });
@@ -177,7 +155,9 @@ async function resume(args: CliArgs): Promise<void> {
 
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
-  if (args.positionals[0] === 'resume') {
+  if (args.positionals[0] === 'serve') {
+    await serve(args); // start the daemon (HTTP API + live stream) and keep running
+  } else if (args.positionals[0] === 'resume') {
     await resume(args);
   } else {
     await start(args);

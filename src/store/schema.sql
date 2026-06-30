@@ -11,9 +11,10 @@ CREATE TABLE IF NOT EXISTS runs (
   repo_ref           TEXT    NOT NULL,                 -- one repo in the MVP; per-run for multi-repo (README M8)
   current_state      TEXT    NOT NULL,
   status             TEXT    NOT NULL
-                       CHECK (status IN ('running', 'paused', 'blocked', 'awaiting_input', 'done', 'needs_human')),
+                       CHECK (status IN ('running', 'paused', 'blocked', 'awaiting_input', 'done', 'needs_human', 'stopped')),
                        -- awaiting_input: parked after triage asked the human a question on the issue;
                        -- the reply poller re-arms it (→ running) when a human replies (see Reply Poller).
+                       -- stopped: ended by an operator `stop` command — terminal, not resumable (README §3.3 Layer 6).
   fsm_config_version TEXT    NOT NULL,                 -- pins the config version for the run's lifetime
   pr_number          INTEGER,
   branch             TEXT,

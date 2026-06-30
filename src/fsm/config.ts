@@ -10,7 +10,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { z } from 'zod';
 
 import type { AgentPhase } from '../store/repository';
@@ -338,4 +338,17 @@ export function loadConfig(path: string | URL): LoadedConfig {
 /** Load the built-in canonical pipeline (README §2). */
 export function loadDefaultConfig(): LoadedConfig {
   return loadConfig(new URL('./default-config.json', import.meta.url));
+}
+
+/**
+ * Validate a raw config object and write it to `path`, returning the freshly loaded `LoadedConfig`
+ * (M5 `updateConfig`). Validation runs *before* the write (`parseConfigFile` throws
+ * `ConfigValidationError` on a bad config), so a rejected config never overwrites a good file — the
+ * "never write a bad config" rule. The on-disk JSON is pretty-printed for human/version-control
+ * readability; the content hash is whitespace-independent, so formatting never affects the version.
+ */
+export function saveConfig(path: string, raw: unknown): LoadedConfig {
+  const { fsm, agents } = parseConfigFile(raw);
+  writeFileSync(path, `${JSON.stringify(raw, null, 2)}\n`);
+  return { fsm, agents, version: hashValue({ fsm, agents }) };
 }

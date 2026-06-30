@@ -1,0 +1,287 @@
+/**
+ * Orchestrator — the daemon's service layer (Layer 6, README §3.3 / Milestone 5).
+ *
+ * Sits between the HTTP transport and the Event Loop / store. It owns:
+ *  - the **run-control commands** (start / pause / resume / stop / revert) and the read queries
+ *    (list / fetch runs, get/update FSM config);
+ *  - the in-process **drain pump** that advances runs after a command enqueues work, without
+ *    blocking the HTTP response (a real stage takes minutes);
+ *  - wiring the loop's `onTransition` into the {@link Broadcaster} so every committed transition
+ *    reaches the live stream.
+ *
+ * It is deliberately transport-free: every method takes/returns domain objects and throws
+ * {@link ApiError} for client-visible failures, so the whole control surface is unit-testable
+ * against an in-memory DB + stub executor + fake GitHub, with the HTTP layer a thin shell on top
+ * (plans/milestone-5.md §2.1).
+ */
+
+import { saveConfig, type LoadedConfig } from '../fsm/config';
+import { EventLoop } from '../loop/event-loop';
+import type { AgentRunner } from '../agent/runner';
+import type {
+  AgentRunRecord,
+  Artifact,
+  LogRecord,
+  Repository,
+  Run,
+  RunStatus,
+  Transition,
+} from '../store/repository';
+import { Broadcaster, type StreamListener } from './stream';
+
+/** A failure with a client-facing HTTP status. The server maps `status` straight onto the response. */
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+/** A run plus everything the dashboard's run view needs (README §3.3 Layer 7 — run view + artifacts). */
+export interface RunDetail {
+  run: Run;
+  transitions: Transition[];
+  agentRuns: AgentRunRecord[];
+  artifacts: Artifact[];
+  logs: LogRecord[];
+}
+
+export interface OrchestratorOptions {
+  repo: Repository;
+  /** Already constructed with its `onActivity` wired to {@link broadcaster} (see `buildOrchestrator`). */
+  runner: AgentRunner;
+  config: LoadedConfig;
+  broadcaster: Broadcaster;
+  /** Path the FSM config is persisted to; required for `updateConfig` (omit → config is read-only). */
+  configPath?: string;
+  now?: () => number;
+  maxIterations?: number;
+  /** Called when a background drain throws (e.g. a `FatalExecutorError`). Default: log to stderr. */
+  onError?: (err: unknown) => void;
+}
+
+/** Statuses a run can no longer advance from — `updateConfig` is safe only when every run is here. */
+const TERMINAL_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>(['done', 'stopped']);
+
+export class Orchestrator {
+  private readonly broadcaster: Broadcaster;
+  private readonly repo: Repository;
+  private readonly runner: AgentRunner;
+  private readonly loop: EventLoop;
+  private readonly configPath?: string;
+  private config: LoadedConfig;
+
+  // Single-flight drain pump (plans/milestone-5.md §2.2).
+  private draining = false;
+  private rerun = false;
+  private current: Promise<void> = Promise.resolve();
+  private readonly onError: (err: unknown) => void;
+
+  constructor(options: OrchestratorOptions) {
+    this.repo = options.repo;
+    this.runner = options.runner;
+    this.broadcaster = options.broadcaster;
+    this.config = options.config;
+    this.configPath = options.configPath;
+    this.onError = options.onError ?? ((err) => console.error(`[orchestrator] drain pump error: ${String(err)}`));
+    this.loop = new EventLoop(this.repo, this.config.fsm, this.config.version, this.runner, {
+      onTransition: (transition, run) => this.broadcaster.publish({ type: 'transition', runId: run.id, transition, run }),
+      ...(options.now ? { now: options.now } : {}),
+      ...(options.maxIterations !== undefined ? { maxIterations: options.maxIterations } : {}),
+    });
+  }
+
+  /** Reclaim crash-stranded events, then drain anything already queued (e.g. after a daemon restart). */
+  recover(): void {
+    this.loop.recover();
+    this.kick();
+  }
+
+  // --- commands ----------------------------------------------------------------
+
+  /** Start a run for an issue and begin advancing it. Returns the created run immediately (the drain
+   *  runs in the background; watch the stream for progress). */
+  start(input: { issueRef: string; repoRef?: string }): Run {
+    if (!input.issueRef) throw new ApiError(400, 'issueRef is required');
+    const repoRef = input.repoRef ?? input.issueRef.split('#')[0] ?? input.issueRef;
+    const run = this.loop.startRun({ issueRef: input.issueRef, repoRef });
+    this.kick();
+    return run;
+  }
+
+  /** Pause a `running` run (halts the next dispatch; the current stage finishes). */
+  pause(runId: number): Run {
+    this.requireRun(runId); // 404 if missing
+    const run = this.conflictOnThrow(() => this.loop.pauseRun(runId)); // 409 if not running
+    this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
+    return run;
+  }
+
+  /**
+   * Resume a parked run — dispatching on its status: a `paused` run flips back to `running`; a
+   * `needs_human` run resumes from where it escalated (counter reset). Any other status is a `409`.
+   * An `awaiting_input` run is resumed by the Reply Poller on a human reply, not by this command.
+   */
+  resume(runId: number): Run {
+    const existing = this.requireRun(runId);
+    if (existing.status === 'paused') {
+      const run = this.loop.resumePausedRun(runId);
+      this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
+      this.kick();
+      return run;
+    }
+    if (existing.status === 'needs_human') {
+      const run = this.conflictOnThrow(() => this.loop.resumeRun(runId)); // emits its own transition event
+      this.kick();
+      return run;
+    }
+    throw new ApiError(409, `cannot resume a "${existing.status}" run`);
+  }
+
+  /** Stop a run (terminal, not resumable; state and artifacts are kept). */
+  stop(runId: number): Run {
+    this.requireRun(runId); // 404 if missing
+    const run = this.conflictOnThrow(() => this.loop.stopRun(runId)); // 409 if already terminal
+    this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
+    return run;
+  }
+
+  /**
+   * Re-arm an `awaiting_input` run after a human replied on the issue (the Reply Poller calls this in
+   * the daemon). Flips it back to `running`, then kicks the pump so the loop re-runs the stage that
+   * asked (`triage`). Publishes the status change to the stream.
+   */
+  resumeAwaitingInput(runId: number): Run {
+    this.loop.resumeAwaitingInput(runId);
+    const run = this.requireRun(runId);
+    this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
+    this.kick();
+    return run;
+  }
+
+  /** Revert a run to an earlier state with a reason, then re-dispatch it (README §3.3 Layer 6). */
+  revert(runId: number, toState: string, reason: unknown): Run {
+    if (!toState) throw new ApiError(400, 'toState is required');
+    if (reason === undefined || reason === null || reason === '') throw new ApiError(400, 'reason is required');
+    const target = this.config.fsm.states[toState];
+    if (!target) throw new ApiError(400, `unknown state "${toState}"`);
+    if (target.terminal) throw new ApiError(400, `cannot revert to terminal state "${toState}"`);
+    this.requireRun(runId); // 404 if missing
+    const run = this.conflictOnThrow(() => this.loop.revertRun(runId, toState, reason)); // emits its own transition event
+    this.kick();
+    return run;
+  }
+
+  // --- queries -----------------------------------------------------------------
+
+  getRun(runId: number): Run {
+    return this.requireRun(runId);
+  }
+
+  /** A run plus its transition history, per-phase agent runs, artifact refs, and activity log. */
+  getRunDetail(runId: number): RunDetail {
+    const run = this.requireRun(runId);
+    return {
+      run,
+      transitions: this.repo.listTransitions(runId),
+      agentRuns: this.repo.listAgentRuns(runId),
+      artifacts: this.repo.listArtifacts(runId),
+      logs: this.repo.listLogs(runId),
+    };
+  }
+
+  listRuns(status?: RunStatus): Run[] {
+    return this.repo.listRuns(status);
+  }
+
+  // --- config ------------------------------------------------------------------
+
+  /** The live FSM rules + agent recipe + pinned version. */
+  getConfig(): LoadedConfig {
+    return this.config;
+  }
+
+  /**
+   * Validate and persist a new FSM config, hot-swapping it in for *new* runs. Refuses (`409`) while
+   * any run is non-terminal, so an in-flight run is never re-pointed at changed rules (README §3.1 —
+   * edits only affect new runs; the per-run versioned store that would lift this restriction is M6).
+   * Invalid config → `400` with the aggregated problems; the file is only written once validation
+   * passes. Returns the new version.
+   */
+  updateConfig(raw: unknown): { version: string } {
+    if (!this.configPath) throw new ApiError(400, 'config is read-only (no config path configured)');
+    const active = this.repo.listRuns().filter((r) => !TERMINAL_STATUSES.has(r.status));
+    if (active.length > 0) {
+      const ids = active.map((r) => r.id).join(', ');
+      throw new ApiError(409, `cannot edit the FSM config while runs are in flight (run(s) ${ids}); pause/stop or let them finish first`);
+    }
+    let loaded: LoadedConfig;
+    try {
+      loaded = saveConfig(this.configPath, raw);
+    } catch (err) {
+      throw new ApiError(400, err instanceof Error ? err.message : String(err));
+    }
+    this.config = loaded;
+    this.loop.setConfig(loaded.fsm, loaded.version);
+    this.runner.setAgents(loaded.agents);
+    return { version: loaded.version };
+  }
+
+  // --- stream + pump -----------------------------------------------------------
+
+  subscribe(listener: StreamListener): () => void {
+    return this.broadcaster.subscribe(listener);
+  }
+
+  /** Await the in-flight drain (tests use this instead of sleeping; a daemon never needs to). */
+  async settle(): Promise<void> {
+    await this.current;
+  }
+
+  /** Start a background drain if none is running; otherwise flag the running one to re-scan (§2.2). */
+  private kick(): void {
+    if (this.draining) {
+      this.rerun = true;
+      return;
+    }
+    this.draining = true;
+    this.current = this.drainLoop();
+  }
+
+  private async drainLoop(): Promise<void> {
+    try {
+      do {
+        this.rerun = false;
+        await this.loop.runUntilIdle();
+      } while (this.rerun);
+    } catch (err) {
+      // A throwing drain (e.g. a FatalExecutorError when the harness is unauthenticated) aborts the
+      // whole pass; surface it rather than crashing the daemon. The triggering event stays recoverable
+      // (unmarked), so fixing the cause and re-kicking resumes from there.
+      this.onError(err);
+    } finally {
+      this.draining = false;
+    }
+  }
+
+  /**
+   * Run a loop control method, mapping any throw to a `409` (the run exists — callers `requireRun`
+   * first for the `404` — so a throw here means the run is in the wrong status for this command).
+   */
+  private conflictOnThrow(fn: () => Run): Run {
+    try {
+      return fn();
+    } catch (err) {
+      throw new ApiError(409, err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  private requireRun(runId: number): Run {
+    const run = this.repo.getRun(runId);
+    if (!run) throw new ApiError(404, `run ${runId} not found`);
+    return run;
+  }
+}

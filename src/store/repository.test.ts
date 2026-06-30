@@ -224,6 +224,31 @@ describe('events (at-least-once queue)', () => {
     expect(repo.claimNextEvent()!.runId).toBe(paused.id);
   });
 
+  it('discards a run\'s pending events (operator revert) without touching in-flight or done ones', () => {
+    const run = newRun();
+    repo.enqueueEvent({ runId: run.id, type: 'stage_done' });
+    repo.enqueueEvent({ runId: run.id, type: 'stage_done' });
+    const inFlight = repo.claimNextEvent()!; // one is now `processing`
+
+    // Cancels only the still-`pending` event; the `processing` one is left to finish.
+    expect(repo.discardPendingEvents(run.id)).toBe(1);
+    repo.markEventDone(inFlight.id);
+    expect(repo.claimNextEvent()).toBeUndefined(); // nothing left to claim
+
+    expect(repo.discardPendingEvents(run.id)).toBe(0); // idempotent: nothing pending now
+  });
+
+  it('reports whether a run has a stage in flight (a `processing` event)', () => {
+    const run = newRun();
+    expect(repo.hasProcessingEvent(run.id)).toBe(false);
+    repo.enqueueEvent({ runId: run.id, type: 'stage_done' });
+    expect(repo.hasProcessingEvent(run.id)).toBe(false); // pending, not in flight
+    const claimed = repo.claimNextEvent()!;
+    expect(repo.hasProcessingEvent(run.id)).toBe(true); // now processing
+    repo.markEventDone(claimed.id);
+    expect(repo.hasProcessingEvent(run.id)).toBe(false);
+  });
+
   it('reclaims stranded `processing` events on recovery so they are re-claimable', () => {
     const run = newRun();
     repo.enqueueEvent({ runId: run.id, type: 'stage_done' });

@@ -12,7 +12,7 @@ import type { Db } from './db';
 
 const NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
-export type RunStatus = 'running' | 'paused' | 'blocked' | 'awaiting_input' | 'done' | 'needs_human';
+export type RunStatus = 'running' | 'paused' | 'blocked' | 'awaiting_input' | 'done' | 'needs_human' | 'stopped';
 export type AgentPhase = 'produce' | 'self_review' | 'simplify';
 
 export interface Run {
@@ -454,6 +454,31 @@ export class Repository {
 
   markEventDone(id: number): void {
     this.db.prepare(`UPDATE events SET status = 'done', processed_at = ${NOW} WHERE id = ?`).run(id);
+  }
+
+  /**
+   * Whether the run has an event mid-flight (`processing`) — i.e. a stage is currently executing for
+   * it. An operator state-mutation that would race that stage's commit (e.g. `revert`) checks this
+   * first and refuses, since the serial loop will clobber whichever of the two writes lands second.
+   */
+  hasProcessingEvent(runId: number): boolean {
+    const row = this.db
+      .prepare("SELECT 1 FROM events WHERE run_id = ? AND status = 'processing' LIMIT 1")
+      .get(runId);
+    return row !== undefined;
+  }
+
+  /**
+   * Cancel a run's not-yet-claimed events by finalizing them (`pending` → `done`), so the claim never
+   * picks them up. Used by an operator `revert` (Layer 6): a reverted run gets a single fresh advance
+   * event, never a stale follow-up left over from the state it was parked in. Returns how many were
+   * cancelled. Only `pending` rows are touched — an in-flight (`processing`) event is left to finish.
+   */
+  discardPendingEvents(runId: number): number {
+    const info = this.db
+      .prepare(`UPDATE events SET status = 'done', processed_at = ${NOW} WHERE run_id = ? AND status = 'pending'`)
+      .run(runId);
+    return info.changes;
   }
 
   /**
