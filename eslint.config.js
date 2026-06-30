@@ -2,7 +2,8 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   {
-    ignores: ['node_modules/', 'dist/', 'coverage/'],
+    // `.agent-work/` holds per-run clones of *target* repos (real runs) — never lint their code.
+    ignores: ['node_modules/', 'dist/', 'coverage/', '.agent-work/'],
   },
   ...tseslint.configs.recommended,
   {

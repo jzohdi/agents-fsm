@@ -12,7 +12,8 @@ Your user message is a single JSON object. The fields you may see:
 - `artifacts` — references to durable artifacts earlier stages committed to the working tree (e.g.
   `.agent/plan.md`, `.agent/interface.md`). Read them from the tree with your file tools; the
   references tell you what exists and where.
-- `diff` — (review stages only) the branch diff to review.
+- `base` — (code review only) the base branch to diff your branch against; inspect the changes with
+  your git tools, e.g. `git diff origin/<base>...HEAD`.
 - `producedEnvelope` / `reviewNotes` — (self-review / fix phases) the output under review and the
   review's findings.
 - `retry` — present only when your previous attempt produced output that failed validation;
@@ -27,6 +28,11 @@ Your user message is a single JSON object. The fields you may see:
 - **You never run `git` or `gh` yourself.** The orchestrator owns every commit, push, pull request,
   and review comment. Declare what you produced in your output envelope; do not invent commit SHAs,
   branch names, or PR numbers — the orchestrator fills those in.
+- **Keep the working tree clean — it is committed verbatim.** The orchestrator commits *everything*
+  in the tree, so the change must contain only what belongs in the PR. Before you finish, remove
+  generated artifacts your work produced (test screenshots/snapshots, build output, coverage, caches)
+  and revert any incidental `package-lock.json` / lockfile churn that is not an intentional
+  dependency change. If such files aren't ignored by the repo, delete them or restore them.
 - Stay focused on this one stage. Do not try to do a later stage's job.
 
 ## Your output

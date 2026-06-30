@@ -12,7 +12,7 @@
 
 import { createSystemPromptFn } from './agent/prompts';
 import { AgentRunner, type AgentRunnerOptions } from './agent/runner';
-import { SubprocessStageExecutor } from './agent/subprocess-executor';
+import { DEFAULT_MODEL_MAP, SubprocessStageExecutor, type SubprocessExecutorOptions } from './agent/subprocess-executor';
 import { GitHubCli } from './integration/github-cli';
 import type { AgentsConfig } from './fsm/config';
 import type { AgentPhase, Repository } from './store/repository';
@@ -26,6 +26,25 @@ export interface RealRunConfig {
   workingRoot: string;
   /** Force every phase onto the `cheap` logical model — the cost-controlled first run (README §6). */
   cheap?: boolean;
+  /**
+   * Concrete model the `frontier` logical name resolves to (produce/self-review phases). Overrides
+   * the default (`opus`) so an operator can pick e.g. `sonnet` — cheaper than opus, but capable
+   * enough to follow the strict JSON contract that the cheap model (haiku) does not. Ignored under
+   * `cheap` (which forces every phase to the cheap model).
+   */
+  frontierModel?: string;
+  /** GitHub remote to fetch/push/PR against, e.g. an SSH remote. Defaults to the repo's HTTPS URL. */
+  cloneUrl?: string;
+  /** A local checkout to clone the working tree from (fast/offline); origin is still the GitHub remote. */
+  localRepo?: string;
+  /**
+   * Permission mode for the headless harness (`acceptEdits` / `bypassPermissions` / …). Producing
+   * stages must edit files and run tests unattended; pass this so the harness does not stall on a
+   * permission prompt it can't answer in `-p` mode (plans/milestone-4.md §6 harness permissions).
+   */
+  permissionMode?: string;
+  /** Per-invocation wall-clock cap in ms; a single stage is killed + escalated when exceeded. */
+  timeoutMs?: number;
 }
 
 /** The `cheap` logical model the cost-control override pins every phase to (the executor maps it to a concrete model). */
@@ -48,8 +67,18 @@ export function forceCheapModels(agents: AgentsConfig): AgentsConfig {
 /** Build the Agent Runner for a real, token-spending run. Throws if no repo is given. */
 export function buildRealRunner(repo: Repository, agents: AgentsConfig, config: RealRunConfig): AgentRunner {
   if (!config.repo) throw new Error('a real run needs a repo (owner/name); pass --repo or a start issueRef');
-  const executor = new SubprocessStageExecutor();
-  const github = new GitHubCli({ repo: config.repo, workingRoot: config.workingRoot });
+  const executorOpts: SubprocessExecutorOptions = {
+    extraArgs: config.permissionMode ? ['--permission-mode', config.permissionMode] : [],
+  };
+  if (config.frontierModel) executorOpts.modelMap = { ...DEFAULT_MODEL_MAP, frontier: config.frontierModel };
+  if (config.timeoutMs !== undefined) executorOpts.timeoutMs = config.timeoutMs;
+  const executor = new SubprocessStageExecutor(executorOpts);
+  const github = new GitHubCli({
+    repo: config.repo,
+    workingRoot: config.workingRoot,
+    ...(config.cloneUrl ? { cloneUrl: config.cloneUrl } : {}),
+    ...(config.localRepo ? { localRepo: config.localRepo } : {}),
+  });
   const recipe = config.cheap ? forceCheapModels(agents) : agents;
   const options: AgentRunnerOptions = { systemPrompt: createSystemPromptFn(), baseBranch: config.baseBranch };
   return new AgentRunner(repo, executor, recipe, github, options);

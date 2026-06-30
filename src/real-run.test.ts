@@ -51,6 +51,19 @@ describe('buildRealRunner', () => {
     expect(runner).toBeInstanceOf(AgentRunner);
   });
 
+  it('accepts the optional source/auth/model overrides (local repo, clone url, model)', () => {
+    const runner = buildRealRunner(repo(), agents, {
+      repo: 'o/r',
+      baseBranch: 'main',
+      workingRoot: '/tmp/work',
+      localRepo: '/home/me/o-r',
+      cloneUrl: 'git@github.com:o/r.git',
+      frontierModel: 'sonnet',
+      permissionMode: 'acceptEdits',
+    });
+    expect(runner).toBeInstanceOf(AgentRunner);
+  });
+
   it('throws a clear error when no repo is given (e.g. real resume without --repo)', () => {
     expect(() => buildRealRunner(repo(), agents, { repo: '', baseBranch: 'main', workingRoot: '/tmp/work' })).toThrowError(
       /needs a repo/,

@@ -1,7 +1,7 @@
 # Milestone 4 — Real agents (design + plan)
 
 > Status: **M4a done** (orchestration plumbing on fakes + stub); **M4b code-complete** (real prompts,
-> the `SystemPromptFn` loader, CLI real mode, and an offline real-prompt e2e — 204 tests passing,
+> the `SystemPromptFn` loader, CLI real mode, and an offline real-prompt e2e — 218 tests passing,
 > +1 flag-gated real run skipped by default). The only remaining M4b item is the operator running
 > the flag-gated, token-spending end-to-end run against tmux-speedrun (§6), which needs the
 > operator-created issue and live `gh`/API auth — it is not part of `npm test`. This document records
@@ -93,14 +93,15 @@ tiny per-stage descriptor in the agent recipe (`StageAgentConfig`), defaulting s
 |------|--------------|----------------|-------------------|-----------------|
 | `triage` | none (no branch yet) | issue title + body | no | nothing — just routes |
 | `produce` | ensure tree (create branch first time) | issue; artifacts already in the tree (read via file tools) | yes | `commitAndPush`; if `opensPr` and no PR yet → `openPr` + `setRunPr`; record artifacts |
-| `review` | ensure tree (read-only tools) | artifacts in the tree via file tools; **plus the injected branch diff for `code_review`** | no | post comments from the envelope; no commit |
+| `review` | ensure tree (read-only tools) | artifacts in the tree via file tools; **`code_review` also gets the base branch and inspects the diff itself via read-only git tools** (§3.6) | no | post comments from the envelope; no commit |
 
 This descriptor is part of the version-pinned config, so a reconfigured FSM declares the effects
 of any new stage. It folds into the existing recipe for cohesion (all "how this stage runs").
 
 Note the two `review` stages differ in *what* they read: `plan_review` reads `.agent/plan.md`
-directly via the harness's read-only file tools, while `code_review` also gets the computed branch
-diff injected (§3.6) — so the runner injects a diff only for code review, not all review stages.
+directly via the harness's read-only file tools, while `code_review` is given the base branch and
+inspects the diff itself via read-only git tools (§3.6) — so the runner adds `input.base` only for
+code review, not all review stages.
 
 ### 3.3 Working-tree lifecycle and idempotency
 
@@ -162,11 +163,21 @@ output." Today the runner escalates immediately (M3 left retry as a TODO). M4 ad
 
 ### 3.6 Diff handling for review stages
 
-For `code_review`, the runner reads the diff via `github.readDiff({ workingDir, base, branch })`
-once and includes it in the agent input (deterministic, and the review agent needs only read-only
-tools — no `Bash(git diff)` grant). `plan_review` needs no diff; it reads `.agent/plan.md` via file
-tools. Note a **size cap**: if the diff is very large, truncate with a marker and lean on the
-agent's file-reading tools for detail; a smarter chunking strategy is a later concern, not MVP.
+**Decision (revised after the first real run): `code_review` inspects the diff itself; we do not
+inject it.** We initially injected the computed diff into the agent input, but a real run showed that
+a large diff (a regenerated `package-lock.json` was ~6k lines) blows the harness context window, and
+bounding it ourselves (truncating / excluding lock files) is us doing the harness's job — which
+contradicts the core principle "delegate the within-stage agentics; managing the agent's own context
+is the harness's job" (README §3.1). So instead:
+
+- The runner gives `code_review` the **base branch** (`input.base`), not a diff.
+- `code_review` is granted **read-only git tools** (`Bash(git diff:*)`, `git log`, `git show`,
+  `git status`) and inspects the change itself: `git diff origin/<base>...HEAD --stat` first, then
+  drilling into specific files — managing its own context, skipping large generated files.
+- `plan_review` still needs nothing extra; it reads `.agent/plan.md` via file tools (no PR, no diff).
+
+`github.readDiff` stays on the adapter as a capability the dashboard/API will use to *display* a
+run's diff to a human, but it is no longer on the review path.
 
 ### 3.7 The agent verifies its own tests (decided)
 
@@ -297,25 +308,43 @@ A real run costs tokens, and creates a real branch + PR — so it is **not** par
   `jzohdi/tmux-speedrun` for **improving the home page with some UI/UX changes**, before the run,
   and provide its number. This is the first full end-to-end target. (A UI/UX change is a good first
   test: it exercises the `frontend` stage and produces a visible, reviewable PR.)
-- **Preconditions:** `gh auth status` is logged in with push access to `jzohdi/tmux-speedrun`;
-  `ANTHROPIC_API_KEY` set; the home-page issue exists and its number is known.
+- **Preconditions:** `gh auth status` is logged in with push access to `jzohdi/tmux-speedrun`; the
+  **standalone `claude` CLI is authenticated on its own** — either `ANTHROPIC_API_KEY` in the
+  environment, or a persistent `claude login`. A desktop-app / managed Claude Code session does
+  **not** carry over to a spawned `claude -p` (it brokers auth via host env vars with no on-disk
+  credential), so a fresh subprocess reports "Not logged in" and every stage escalates
+  `executor_error`. Verify with `claude -p 'hi' --model haiku < /dev/null` before a real run. Also:
+  the home-page issue exists and its number is known.
 - **Harness permissions:** producing stages need the harness to edit files and run the tests
-  autonomously. The per-stage `--allowedTools` grant (Edit/Write/Bash) should suffice in headless
-  `-p` mode; if the first run shows the harness still refusing to act, widen the policy via
-  `SubprocessStageExecutor`'s `extraArgs` escape hatch (e.g. `--permission-mode acceptEdits`) — kept
-  out of the CLI for now rather than guessing the exact flag before the first run proves what is
-  needed (§3.2 tool allow-list, §3.7).
+  autonomously. In headless `-p` mode the per-stage `--allowedTools` grant (Edit/Write/Bash) and the
+  skipped trust dialog usually suffice, but pass `--permission-mode acceptEdits` (plumbed through the
+  CLI → `SubprocessStageExecutor.extraArgs`) so a producing stage never stalls on a prompt it can't
+  answer; fall back to `--permission-mode bypassPermissions` if a stage still refuses to act.
+- **Repo source + remote auth:** the adapter clones a fresh per-run working tree and pushes the
+  branch to GitHub for the PR. Three ways to source/auth it, simplest first:
+  - `--local-repo <path>` — clone the working tree from a local checkout you already have (fast,
+    offline); origin is repointed to the GitHub remote so push/PR still work. Reuses whatever HTTPS
+    credential your git already has (e.g. an osxkeychain github.com entry or `gh auth setup-git`).
+  - default (no flag) — clone over HTTPS; needs an HTTPS credential helper (`gh auth setup-git`).
+  - `--clone-url git@github.com:<owner>/<repo>.git` — clone/push over SSH (combinable with
+    `--local-repo` to override the push remote).
 - **Procedure:** run the CLI in real mode against the repo + issue number, e.g.
-  `npm start -- 'jzohdi/tmux-speedrun#<n>' --real --base main --work ./.agent-work --db ./.agent-work/run.db`
-  (a file `--db` makes the run resumable); watch it advance to `done`; inspect the opened PR and the
-  committed artifacts (`.agent/plan.md`, `.agent/interface.md`, tests, code) and the review comments.
-  The same flow is also runnable as a gated vitest (`RUN_REAL_E2E=1 E2E_ISSUE=… npm test`), which
-  asserts a terminal state and a PR on `done`.
+  `npm start -- 'jzohdi/tmux-speedrun#<n>' --real --base main --work ./.agent-work --db ./.agent-work/run.db --local-repo /path/to/tmux-speedrun --permission-mode acceptEdits`
+  (a file `--db` makes the run resumable; `--cheap` pins every phase to the cheap model for a
+  plumbing shakeout first). Watch it advance to `done`; inspect the opened PR and the committed
+  artifacts (`.agent/plan.md`, `.agent/interface.md`, tests, code) and the review comments. The same
+  flow is also runnable as a gated vitest (`RUN_REAL_E2E=1 E2E_ISSUE=… npm test`), which asserts a
+  terminal state and a PR on `done`.
 - **Gating:** a `RUN_REAL_E2E=1`-style flag (mirrors `RUN_REAL_HARNESS` / `RUN_REAL_GITHUB`).
 - **Cleanup:** because the MVP does not auto-merge, the run stops at merge-ready; the human
   inspects, then closes the PR / deletes the branch (or merges if the change is genuinely good).
-- **Cost control:** start with the cheap model for all phases on the first run to shake out
-  plumbing, then switch to the real model defaults.
+- **Cost control / model choice (learned from the first live shakeout):** `--cheap` (every phase on
+  haiku) proves the plumbing but is **too weak to reach `done`** — haiku does not reliably honor the
+  "emit only JSON" contract (it returned a prose self-review, which correctly escalated
+  `malformed_output`). So use `--cheap` only to shake out plumbing; for a run that completes, use
+  `--model sonnet` (produce/self-review on Sonnet — far cheaper than the opus default, and capable
+  enough to follow the contract; the simplify pass stays on haiku), or drop the flag for the opus
+  default.
 
 ## 7. Decisions made
 

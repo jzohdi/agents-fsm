@@ -9,8 +9,9 @@
 
 import { describe, expect, it } from 'vitest';
 
-import type { AgentRunRequest } from './executor';
+import { FatalExecutorError, type AgentRunRequest } from './executor';
 import {
+  defaultSpawnProcess,
   HarnessError,
   parseHarnessOutput,
   SubprocessStageExecutor,
@@ -48,6 +49,26 @@ function req(overrides: Partial<AgentRunRequest> = {}): AgentRunRequest {
     ...overrides,
   };
 }
+
+describe('defaultSpawnProcess — stdin is closed', () => {
+  it('does not hang when the child reads stdin (gives it /dev/null)', async () => {
+    // `cat` with no args copies stdin to stdout until EOF. With an inherited, never-closed stdin
+    // pipe it would hang forever; with stdin set to /dev/null it reads EOF and exits immediately.
+    // This is the regression guard for the real-run bug where `claude -p` blocked waiting on stdin.
+    const result = await defaultSpawnProcess('cat', [], { cwd: process.cwd(), env: process.env });
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe('');
+  }, 5000);
+});
+
+describe('defaultSpawnProcess — per-invocation timeout', () => {
+  it('kills a child that exceeds the timeout and marks the result non-zero', async () => {
+    // A real subprocess that would run far longer than the cap — proves the kill actually fires.
+    const result = await defaultSpawnProcess('sleep', ['30'], { cwd: process.cwd(), env: process.env, timeoutMs: 250 });
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain('exceeded 250ms timeout');
+  }, 5000);
+});
 
 describe('SubprocessStageExecutor — argv', () => {
   it('builds the headless stream-json invocation with model and system prompt', () => {
@@ -137,6 +158,30 @@ describe('SubprocessStageExecutor — run', () => {
     const exec = new SubprocessStageExecutor({ spawnProcess });
     await expect(exec.run(req())).rejects.toThrowError(/ENOENT/);
   });
+
+  it('classifies a "Not logged in" result as a fatal auth error carrying a remedy', async () => {
+    const authEvent = JSON.stringify({ type: 'result', is_error: true, result: 'Not logged in · Please run /login' });
+    const { spawnProcess } = fakeSpawn({ code: 0, stdout: authEvent, stderr: '' });
+    const exec = new SubprocessStageExecutor({ spawnProcess });
+
+    // Fatal (the loop aborts on this), and it carries operator instructions for the CLI to print.
+    await expect(exec.run(req())).rejects.toBeInstanceOf(FatalExecutorError);
+    await expect(exec.run(req())).rejects.toMatchObject({ remedy: expect.stringContaining('claude login') });
+  });
+
+  it('classifies an auth failure on a non-zero exit too', async () => {
+    const { spawnProcess } = fakeSpawn({ code: 1, stdout: '', stderr: 'Invalid API key · Please run /login' });
+    const exec = new SubprocessStageExecutor({ spawnProcess });
+    await expect(exec.run(req())).rejects.toBeInstanceOf(FatalExecutorError);
+  });
+
+  it('surfaces a timeout result as a (non-fatal, per-run) HarnessError', async () => {
+    const { spawnProcess } = fakeSpawn({ code: 124, stdout: '', stderr: '[killed: exceeded 1000ms timeout]' });
+    const exec = new SubprocessStageExecutor({ spawnProcess });
+    // A timeout escalates one run (executor_error), it does NOT abort the whole drain like auth does.
+    await expect(exec.run(req())).rejects.toBeInstanceOf(HarnessError);
+    await expect(exec.run(req())).rejects.not.toBeInstanceOf(FatalExecutorError);
+  });
 });
 
 describe('parseHarnessOutput', () => {
@@ -161,6 +206,31 @@ describe('parseHarnessOutput', () => {
   it('returns the raw string when the result is not JSON (runner will escalate)', () => {
     const stdout = JSON.stringify({ type: 'result', result: 'I could not complete the task.' });
     expect(parseHarnessOutput(stdout).output).toBe('I could not complete the task.');
+  });
+
+  it('extracts a JSON envelope wrapped in a prose preamble (the real-run failure mode)', () => {
+    // Verbatim shape of what Sonnet emitted: a one-line preamble, then a valid envelope.
+    const text =
+      'The plan is written to `.agent/plan.md`. This is a pure frontend change — no backend work needed.\n\n' +
+      '{"requestedTransition":"proceed","artifacts":[{"kind":"plan","locator":{"path":".agent/plan.md"}}],"flags":{"needs_frontend":true,"needs_backend":false}}';
+    const stdout = JSON.stringify({ type: 'result', result: text });
+    expect(parseHarnessOutput(stdout).output).toEqual({
+      requestedTransition: 'proceed',
+      artifacts: [{ kind: 'plan', locator: { path: '.agent/plan.md' } }],
+      flags: { needs_frontend: true, needs_backend: false },
+    });
+  });
+
+  it('extracts a JSON object with a trailing epilogue and ignores braces inside strings', () => {
+    const text = '{"requestedTransition":"approve","comments":["rename {x} to y"]}\n\nDone — looks good!';
+    const stdout = JSON.stringify({ type: 'result', result: text });
+    expect(parseHarnessOutput(stdout).output).toEqual({ requestedTransition: 'approve', comments: ['rename {x} to y'] });
+  });
+
+  it('picks the last JSON object when the prose contains an earlier one', () => {
+    const text = 'Example shape: {"requestedTransition":"x"}. My actual answer:\n{"requestedTransition":"proceed"}';
+    const stdout = JSON.stringify({ type: 'result', result: text });
+    expect(parseHarnessOutput(stdout).output).toEqual({ requestedTransition: 'proceed' });
   });
 
   it('throws when there is no result event', () => {

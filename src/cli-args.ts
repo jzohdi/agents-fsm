@@ -18,6 +18,16 @@ export interface CliArgs {
   repo?: string;
   base: string;
   work: string;
+  /** GitHub remote override (e.g. an SSH remote) — `--clone-url`. */
+  cloneUrl?: string;
+  /** Local checkout to clone the working tree from (fast/offline) — `--local-repo`. */
+  localRepo?: string;
+  /** Harness permission mode for autonomous edits (e.g. `acceptEdits`) — `--permission-mode`. */
+  permissionMode?: string;
+  /** Concrete model for produce/self-review phases (e.g. `sonnet`); default is opus — `--model`. */
+  model?: string;
+  /** Per-invocation wall-clock cap in **minutes** — `--timeout`. */
+  timeoutMinutes?: number;
 }
 
 export function parseCliArgs(argv: string[]): CliArgs {
@@ -31,6 +41,11 @@ export function parseCliArgs(argv: string[]): CliArgs {
       work: { type: 'string' },
       real: { type: 'boolean' },
       cheap: { type: 'boolean' },
+      'clone-url': { type: 'string' },
+      'local-repo': { type: 'string' },
+      'permission-mode': { type: 'string' },
+      model: { type: 'string' },
+      timeout: { type: 'string' },
     },
   });
   return {
@@ -41,5 +56,10 @@ export function parseCliArgs(argv: string[]): CliArgs {
     repo: values.repo,
     base: values.base ?? 'main',
     work: values.work ?? './.agent-work',
+    cloneUrl: values['clone-url'],
+    localRepo: values['local-repo'],
+    permissionMode: values['permission-mode'],
+    model: values.model,
+    timeoutMinutes: values.timeout !== undefined ? Number(values.timeout) : undefined,
   };
 }

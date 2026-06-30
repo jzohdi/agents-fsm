@@ -14,19 +14,23 @@
  *   tsx src/cli.ts <issueRef> [--db <path>]                                  # start (stub/fake)
  *   tsx src/cli.ts <issueRef> --real [--repo o/r] [--base main]             # start (real)
  *                  [--work ./.agent-work] [--cheap] [--db <path>]
+ *                  [--local-repo <path>] [--clone-url <url>] [--permission-mode <mode>] [--model sonnet] [--timeout <min>]
  *   tsx src/cli.ts resume <runId> [--real --repo o/r ...] [--db <path>]      # resume a needs_human run
  *
  * With no `--db` it uses an in-memory database (nothing persists); `resume` across processes needs a
  * file path. The demo `FakeGitHub` auto-seeds issues, so any issueRef works in stub mode. `--cheap`
- * pins every phase to the cheap model for a low-cost first real run (README §6). Arg parsing is
- * `node:util parseArgs`, so both `--key value` and `--key=value` work and unknown flags error.
+ * pins every phase to the cheap model (haiku) — proves plumbing but too weak to follow the JSON
+ * contract to `done`; `--model sonnet` runs produce/review on a cheaper-than-opus model that does.
+ * `--local-repo` clones each run's working tree from a local checkout (offline) while still pushing.
+ * Arg parsing is `node:util parseArgs`, so both `--key value` and `--key=value` work and unknown
+ * flags error.
  */
 
 import { loadDefaultConfig, type AgentsConfig } from './fsm/config';
 import { openDb } from './store/db';
 import { Repository } from './store/repository';
 import { AgentRunner } from './agent/runner';
-import { StubExecutor, goldenPathHandler } from './agent/executor';
+import { StubExecutor, goldenPathHandler, FatalExecutorError } from './agent/executor';
 import { FakeGitHub } from './integration/github-fake';
 import { buildRealRunner } from './real-run';
 import { EventLoop } from './loop/event-loop';
@@ -37,8 +41,19 @@ function buildRunner(args: CliArgs, repo: Repository, agents: AgentsConfig, repo
   if (!args.real) {
     return new AgentRunner(repo, new StubExecutor(goldenPathHandler), agents, new FakeGitHub({ autoSeedIssues: true }));
   }
-  const config = { repo: args.repo ?? repoRef, baseBranch: args.base, workingRoot: args.work, cheap: args.cheap };
-  console.log(`[real mode] repo=${config.repo} base=${config.baseBranch} work=${config.workingRoot} cheap=${config.cheap} — spends tokens, opens a real PR.`);
+  const config = {
+    repo: args.repo ?? repoRef,
+    baseBranch: args.base,
+    workingRoot: args.work,
+    cheap: args.cheap,
+    cloneUrl: args.cloneUrl,
+    localRepo: args.localRepo,
+    permissionMode: args.permissionMode,
+    frontierModel: args.model,
+    ...(args.timeoutMinutes !== undefined ? { timeoutMs: args.timeoutMinutes * 60_000 } : {}),
+  };
+  const model = config.cheap ? 'cheap (haiku, plumbing only)' : config.frontierModel ?? 'default (opus)';
+  console.log(`[real mode] repo=${config.repo} base=${config.baseBranch} work=${config.workingRoot} model=${model} — spends tokens, opens a real PR.`);
   return buildRealRunner(repo, agents, config);
 }
 
@@ -56,7 +71,30 @@ function report(repo: Repository, runId: number): void {
   const run = repo.getRun(runId);
   const agentRuns = repo.listAgentRuns(runId);
   console.log(`\nRun ${runId} finished in state "${run?.currentState}" (status: ${run?.status}).`);
-  console.log(`Agent invocations: ${agentRuns.length}; tokens used: ${run?.tokensUsed}.`);
+  console.log(`Agent invocations: ${agentRuns.length}; tokens used: ${run?.tokensUsed}; cost: $${run?.costUsed?.toFixed(4) ?? '0'}.`);
+
+  // On escalation, surface *why* (the cause is otherwise only in the DB) and how to continue.
+  if (run?.status === 'needs_human') {
+    const last = repo.listTransitions(runId).at(-1);
+    console.log(`\n⚠️  Escalated to needs_human via "${last?.trigger ?? '?'}". Reason:`);
+    console.log(indent(formatReason(last?.reason)));
+    console.log(`\nFix the cause, then resume:  npm start -- resume ${runId} --real --repo <owner/name> [--model …] [--local-repo …] [--db <path>]`);
+  }
+}
+
+/** Pretty-print a transition reason (structured payload or string) for the terminal. */
+function formatReason(reason: unknown): string {
+  if (reason === undefined || reason === null) return '(no reason recorded)';
+  if (typeof reason === 'string') return reason;
+  try {
+    return JSON.stringify(reason, null, 2);
+  } catch {
+    return String(reason);
+  }
+}
+
+function indent(text: string): string {
+  return text.split('\n').map((line) => `    ${line}`).join('\n');
 }
 
 async function start(args: CliArgs): Promise<void> {
@@ -95,6 +133,12 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error(err);
+  // A fatal, environment-level failure (e.g. the harness is unauthenticated) affects every run, so
+  // we shut down and print actionable instructions rather than a stack trace (plans/milestone-4.md §6).
+  if (err instanceof FatalExecutorError) {
+    console.error(`\n✖ Aborting — ${err.message}\n\n${err.remedy}\n`);
+  } else {
+    console.error(err);
+  }
   process.exitCode = 1;
 });

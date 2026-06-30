@@ -11,7 +11,7 @@ import type { FsmConfig } from '../fsm/types';
 import { openDb } from '../store/db';
 import { Repository } from '../store/repository';
 import { AgentRunner } from '../agent/runner';
-import { StubExecutor, goldenPathHandler, type StubHandler } from '../agent/executor';
+import { StubExecutor, goldenPathHandler, FatalExecutorError, type StageExecutor, type StubHandler } from '../agent/executor';
 import { FakeGitHub } from '../integration/github-fake';
 import { EVENT_ADVANCE, EventLoop, type EventLoopOptions } from './event-loop';
 
@@ -56,7 +56,7 @@ describe('golden path (start → done on stubs)', () => {
     expect(sequence(repo, run.id)).toEqual(GOLDEN_PATH);
 
     // The working-tree lifecycle ran: the branch was created (at plan) and the PR opened (at tdd).
-    expect(finalRun.branch).toBe(`agent/run-${run.id}`);
+    expect(finalRun.branch).toMatch(new RegExp(`^agent/run-${run.id}-[0-9a-f]{6}$`)); // id + unique suffix
     expect(finalRun.prNumber).not.toBeNull();
 
     // The onTransition stream saw every transition in order.
@@ -94,7 +94,7 @@ describe('golden path (start → done on stubs)', () => {
     expect(artifacts.map((a) => a.kind)).toEqual(['plan', 'interface', 'pr']);
     // Locators carry the runner's real branch/sha enrichment and the opened PR number.
     const plan = artifacts.find((a) => a.kind === 'plan')!;
-    expect(plan.locator).toMatchObject({ branch: `agent/run-${run.id}` });
+    expect((plan.locator as { branch: string }).branch).toMatch(new RegExp(`^agent/run-${run.id}-[0-9a-f]{6}$`));
     expect(plan.locator).toHaveProperty('sha');
     expect(artifacts.find((a) => a.kind === 'pr')!.locator).toHaveProperty('number');
   });
@@ -380,5 +380,30 @@ describe('loop-owned guards escalate', () => {
     await expect(loop.runUntilIdle()).resolves.toBeUndefined(); // a throwing subscriber must not wedge the loop
 
     expect(repo.getRun(run.id)!.currentState).toBe('done');
+  });
+});
+
+describe('fatal executor error aborts the drain (does not escalate one run)', () => {
+  it('propagates the error and leaves the run running + the event recoverable', async () => {
+    const repo = new Repository(openDb(':memory:'));
+    const { fsm, agents, version } = loadDefaultConfig();
+    // A FatalExecutorError means "no run can proceed" (e.g. the harness is unauthenticated).
+    const executor: StageExecutor = {
+      run: () => Promise.reject(new FatalExecutorError('harness not authenticated', 'run `claude login`')),
+    };
+    const runner = new AgentRunner(repo, executor, agents, new FakeGitHub({ autoSeedIssues: true }));
+    const loop = new EventLoop(repo, fsm, version, runner);
+
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+
+    // The drain aborts by propagating the fatal error, rather than parking the run in needs_human.
+    await expect(loop.runUntilIdle()).rejects.toBeInstanceOf(FatalExecutorError);
+
+    const after = repo.getRun(run.id)!;
+    expect(after.status).toBe('running'); // NOT escalated
+    expect(after.currentState).toBe('triage'); // still at the first stage
+    expect(repo.listTransitions(run.id)).toHaveLength(0); // no escalation transition written
+    // The claimed event was left `processing`, so a restart reclaims it → fix-and-rerun resumes.
+    expect(loop.recover()).toBe(1);
   });
 });

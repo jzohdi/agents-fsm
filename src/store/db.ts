@@ -6,7 +6,8 @@
  * runner would slot in.
  */
 
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
 
 export type Db = Database.Database;
@@ -23,6 +24,9 @@ export function migrate(db: Db): void {
  * Defaults to an in-memory database (used by tests).
  */
 export function openDb(path = ':memory:'): Db {
+  // better-sqlite3 won't create a missing parent directory, so create it for a file path
+  // (e.g. `./.agent-work/run.db` before the working root exists).
+  if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
   const db = new Database(path);
   // WAL improves concurrency for on-disk databases; it has no meaning for :memory:.
   if (path !== ':memory:') db.pragma('journal_mode = WAL');

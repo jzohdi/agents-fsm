@@ -20,6 +20,7 @@ import { budgetExceeded, decideNext, FsmError } from '../fsm/engine';
 import type { Decision, FsmConfig, StageResult } from '../fsm/types';
 import type { EventRow, Repository, Run, RunStatus, Transition } from '../store/repository';
 import type { AgentRunner, StageOutcome } from '../agent/runner';
+import { FatalExecutorError } from '../agent/executor';
 
 /** The single event type that drives the MVP loop: "advance this run's current stage." */
 export const EVENT_ADVANCE = 'advance';
@@ -157,11 +158,15 @@ export class EventLoop {
     }
 
     // The executor owns retry/backoff (Layer 5); if it still throws, retries are exhausted.
-    // Escalate this run rather than letting one stage failure kill the whole drain loop.
+    // Escalate this run rather than letting one stage failure kill the whole drain loop —
+    // EXCEPT a FatalExecutorError (e.g. the harness is unauthenticated), which every run would
+    // hit: propagate it so the drain aborts and the entry point surfaces the remedy. The event
+    // stays unclaimed-and-recoverable, so fixing the cause and re-running just resumes it.
     let outcome: StageOutcome;
     try {
       outcome = await this.runner.runStage(run);
     } catch (err) {
+      if (err instanceof FatalExecutorError) throw err;
       this.escalate(run, event, 'executor_error', { error: String(err) });
       return;
     }

@@ -19,7 +19,7 @@
 
 import { spawn } from 'node:child_process';
 
-import type { AgentRunRequest, AgentRunResult, StageExecutor } from './executor';
+import { FatalExecutorError, type AgentRunRequest, type AgentRunResult, type StageExecutor } from './executor';
 
 /** The result of running a subprocess to completion. */
 export interface ProcessResult {
@@ -32,8 +32,16 @@ export interface ProcessResult {
 export type SpawnProcess = (
   command: string,
   args: string[],
-  options: { cwd: string; env: NodeJS.ProcessEnv },
+  options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs?: number },
 ) => Promise<ProcessResult>;
+
+/**
+ * Default per-invocation wall-clock cap (20 min). A single stage's harness invocation can otherwise
+ * run unbounded — a real run saw a `tdd` invocation iterate on a slow browser test suite for 23
+ * minutes with no ceiling. On timeout the child is killed and the phase escalates (recoverable);
+ * a repo with a genuinely slow suite raises this via `--timeout`.
+ */
+export const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
 
 export interface SubprocessExecutorOptions {
   /** The CLI binary to invoke. Defaults to `claude`. */
@@ -49,6 +57,8 @@ export interface SubprocessExecutorOptions {
   extraArgs?: string[];
   /** Working directory used when a request omits `workingDir`. Defaults to `process.cwd()`. */
   defaultWorkingDir?: string;
+  /** Per-invocation wall-clock cap in ms; the child is killed when exceeded. Default {@link DEFAULT_TIMEOUT_MS}. 0 disables. */
+  timeoutMs?: number;
   /** Injectable spawn (for tests). Defaults to a real `child_process.spawn` wrapper. */
   spawnProcess?: SpawnProcess;
 }
@@ -67,11 +77,39 @@ export class HarnessError extends Error {
   }
 }
 
+/** Operator instructions printed when the spawned `claude` CLI is not authenticated. */
+export const CLAUDE_AUTH_REMEDY = [
+  'The `claude` CLI the orchestrator spawns is not authenticated (a desktop-app session does not',
+  'carry over to a spawned `claude -p` subprocess). Authenticate the standalone CLI, then re-run:',
+  '',
+  '  Fix:   claude login            (persists a login to disk; uses your subscription)',
+  '         — or —  export ANTHROPIC_API_KEY=sk-ant-...',
+  '  Test:  claude -p \'reply with {"ok":true}\' --model haiku < /dev/null',
+  '         → it should print a real result, not "Not logged in".',
+].join('\n');
+
+/**
+ * The harness is not authenticated — fatal (every stage would hit it). {@link FatalExecutorError}
+ * so the loop aborts rather than escalating one run; the CLI prints {@link CLAUDE_AUTH_REMEDY}.
+ */
+export class HarnessAuthError extends FatalExecutorError {
+  constructor(detail: string) {
+    super(`Claude Code is not authenticated: ${detail}`, CLAUDE_AUTH_REMEDY);
+    this.name = 'HarnessAuthError';
+  }
+}
+
+/** Recognize the harness's "not authenticated" signatures (login required or bad API key). */
+function isAuthFailure(text: string): boolean {
+  return /not logged in|please run \/login|authentication_failed|not authenticated|invalid api key|invalid x-api-key/i.test(text);
+}
+
 export class SubprocessStageExecutor implements StageExecutor {
   private readonly command: string;
   private readonly modelMap: Record<string, string>;
   private readonly extraArgs: string[];
   private readonly defaultWorkingDir: string;
+  private readonly timeoutMs: number;
   private readonly spawnProcess: SpawnProcess;
 
   constructor(options: SubprocessExecutorOptions = {}) {
@@ -79,6 +117,7 @@ export class SubprocessStageExecutor implements StageExecutor {
     this.modelMap = options.modelMap ?? DEFAULT_MODEL_MAP;
     this.extraArgs = options.extraArgs ?? [];
     this.defaultWorkingDir = options.defaultWorkingDir ?? process.cwd();
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.spawnProcess = options.spawnProcess ?? defaultSpawnProcess;
   }
 
@@ -110,12 +149,12 @@ export class SubprocessStageExecutor implements StageExecutor {
 
   async run(req: AgentRunRequest): Promise<AgentRunResult> {
     const cwd = req.workingDir ?? this.defaultWorkingDir;
-    const result = await this.spawnProcess(this.command, this.buildArgs(req), { cwd, env: process.env });
+    const result = await this.spawnProcess(this.command, this.buildArgs(req), { cwd, env: process.env, timeoutMs: this.timeoutMs });
 
     if (result.code !== 0) {
-      throw new HarnessError(
-        `claude exited with code ${result.code}: ${result.stderr.trim() || result.stdout.trim() || '(no output)'}`,
-      );
+      const detail = result.stderr.trim() || result.stdout.trim() || '(no output)';
+      if (isAuthFailure(detail)) throw new HarnessAuthError(detail);
+      throw new HarnessError(`claude exited with code ${result.code}: ${detail}`);
     }
     return parseHarnessOutput(result.stdout);
   }
@@ -148,7 +187,11 @@ interface ResultEvent {
 export function parseHarnessOutput(stdout: string): AgentRunResult {
   const event = findResultEvent(stdout);
   if (!event) throw new HarnessError('harness produced no result event');
-  if (event.is_error) throw new HarnessError(`harness reported an error result: ${event.result ?? '(no detail)'}`);
+  if (event.is_error) {
+    const detail = event.result ?? '(no detail)';
+    if (isAuthFailure(detail)) throw new HarnessAuthError(detail);
+    throw new HarnessError(`harness reported an error result: ${detail}`);
+  }
 
   const usage: AgentRunResult['usage'] = { tokens: sumTokens(event.usage) };
   if (typeof event.total_cost_usd === 'number' && Number.isFinite(event.total_cost_usd)) {
@@ -178,16 +221,34 @@ function isResultEvent(value: unknown): value is ResultEvent {
 }
 
 /**
- * Parse the agent's final text into structured JSON. Agents sometimes wrap JSON in a
- * markdown fence; we strip a single fence before parsing. If it still is not JSON we return
- * the raw string, leaving the Agent Runner to escalate on malformed output (never coerce).
+ * Parse the agent's final text into structured JSON, tolerating the common LLM habit of wrapping
+ * the JSON in a prose preamble/epilogue or a markdown fence even when told to emit JSON only.
+ *
+ * Order: (1) the whole text (the ideal the contract asks for, optionally fenced); (2) the last
+ * balanced top-level `{…}` object embedded in the text — models routinely write a sentence before
+ * the envelope. If nothing parses we return the raw string so the Agent Runner escalates malformed.
+ *
+ * This is recovery, not coercion: we only ever return JSON the model actually wrote, and the strict
+ * envelope/verdict schema downstream still rejects anything that isn't a valid result.
  */
 function parseResultText(text: string): unknown {
-  const candidate = stripFence(text.trim());
+  const direct = tryParse(stripFence(text.trim()));
+  if (direct !== undefined) return direct;
+
+  // Try embedded objects, last first (the envelope is the agent's "final answer", usually last).
+  const objects = balancedObjects(text);
+  for (let i = objects.length - 1; i >= 0; i--) {
+    const parsed = tryParse(objects[i]!);
+    if (parsed !== undefined) return parsed;
+  }
+  return text;
+}
+
+function tryParse(candidate: string): unknown {
   try {
     return JSON.parse(candidate);
   } catch {
-    return text;
+    return undefined; // no JSON value parses to undefined, so it is a safe "did not parse" sentinel
   }
 }
 
@@ -195,6 +256,40 @@ function stripFence(text: string): string {
   const fence = /^```(?:json)?\s*\n([\s\S]*?)\n```$/;
   const match = fence.exec(text);
   return match ? match[1]!.trim() : text;
+}
+
+/**
+ * Every balanced top-level `{…}` substring in `text`, in order. String contents (and escapes) are
+ * skipped so braces inside JSON strings never throw off the depth count. Used to pull an envelope
+ * out of surrounding prose; nested objects stay part of their enclosing top-level object.
+ */
+function balancedObjects(text: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === '}' && depth > 0) {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        out.push(text.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+  return out;
 }
 
 /** The Anthropic token-count fields on a usage object — summed for "tokens used". */
@@ -215,19 +310,49 @@ function sumTokens(usage: Record<string, unknown> | undefined): number {
   return total;
 }
 
-/** Default {@link SpawnProcess}: a thin promise wrapper over `child_process.spawn`. */
-function defaultSpawnProcess(
+/**
+ * Default {@link SpawnProcess}: a thin promise wrapper over `child_process.spawn`.
+ *
+ * stdin is `'ignore'` (`/dev/null`): we hand the harness its prompt as an argv argument, so it has
+ * no stdin to read. Without this, `claude -p` blocks waiting on stdin, warns "no stdin data received
+ * in 3s", and exits non-zero — the empty pipe is never closed. Giving it `/dev/null` is exactly what
+ * that warning recommends.
+ *
+ * `timeoutMs` bounds a single invocation: on expiry the child is killed (SIGTERM, then SIGKILL) and
+ * the result is marked non-zero with a timeout note, so the executor turns it into an escalation
+ * rather than letting one stage run forever.
+ */
+export function defaultSpawnProcess(
   command: string,
   args: string[],
-  options: { cwd: string; env: NodeJS.ProcessEnv },
+  options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs?: number },
 ): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd: options.cwd, env: options.env });
+    const child = spawn(command, args, { cwd: options.cwd, env: options.env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
+    let timedOut = false;
+    let timer: NodeJS.Timeout | undefined;
+    if (options.timeoutMs && options.timeoutMs > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        child.kill('SIGTERM');
+        setTimeout(() => child.kill('SIGKILL'), 5000).unref(); // force-kill if it ignores SIGTERM
+      }, options.timeoutMs);
+    }
     child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
     child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
-    child.on('error', reject); // e.g. the binary is not on PATH
-    child.on('close', (code) => resolve({ code, stdout, stderr }));
+    child.on('error', (err) => {
+      if (timer) clearTimeout(timer);
+      reject(err); // e.g. the binary is not on PATH
+    });
+    child.on('close', (code) => {
+      if (timer) clearTimeout(timer);
+      if (timedOut) {
+        resolve({ code: code ?? 124, stdout, stderr: `${stderr}\n[killed: exceeded ${options.timeoutMs}ms timeout]` });
+      } else {
+        resolve({ code, stdout, stderr });
+      }
+    });
   });
 }

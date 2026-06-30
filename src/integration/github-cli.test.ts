@@ -230,6 +230,30 @@ describe('GitHubCli — local git (real temp repo)', () => {
     expect(git(tree.path, ['log', '--oneline'])).toContain('pushed work');
   });
 
+  it('clones the working tree from a local checkout but pushes to the GitHub remote', async () => {
+    const remote = makeRemote();
+    // A local checkout of the same repo (origin = the bare remote), as the operator would have.
+    const localRoot = mkdtempSync(join(tmpdir(), 'agent-fleet-local-'));
+    const localRepo = join(localRoot, 'checkout');
+    git(localRoot, ['clone', remote, localRepo]);
+
+    const workingRoot = mkdtempSync(join(tmpdir(), 'agent-fleet-work-'));
+    const gh = new GitHubCli({ repo: 'o/r', workingRoot, cloneUrl: remote, localRepo });
+
+    const tree = await gh.prepareWorkingTree({ runId: 9, branch: 'agent/run-9', base: 'main' });
+    // origin must point at the GitHub remote (the bare repo), not the local checkout we cloned from.
+    expect(git(tree.path, ['remote', 'get-url', 'origin']).trim()).toBe(remote);
+    git(tree.path, ['config', 'user.email', 't@t']);
+    git(tree.path, ['config', 'user.name', 'T']);
+
+    writeFileSync(join(tree.path, 'local-sourced.txt'), 'hi\n');
+    await gh.commitAndPush({ workingDir: tree.path, branch: 'agent/run-9', message: 'from local clone' });
+
+    // The branch reached the GitHub remote, not the local checkout.
+    expect(execFileSync('git', ['ls-remote', '--heads', remote, 'agent/run-9'], { encoding: 'utf8' })).toContain('agent/run-9');
+    expect(execFileSync('git', ['ls-remote', '--heads', localRepo, 'agent/run-9'], { encoding: 'utf8' })).toBe('');
+  });
+
   it('commitAndPush is a no-op when there is nothing to commit', async () => {
     const remote = makeRemote();
     const workingRoot = mkdtempSync(join(tmpdir(), 'agent-fleet-work-'));

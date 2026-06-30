@@ -70,6 +70,26 @@ export interface StageExecutor {
   run(req: AgentRunRequest): Promise<AgentRunResult>;
 }
 
+/**
+ * A condition that **no run can recover from on its own** — e.g. the harness is not authenticated.
+ * Escalating one run to `needs_human` would be wrong (every run would hit it), so the Event Loop
+ * propagates this instead of swallowing it: the drain aborts and the entry point (CLI/API) surfaces
+ * the `remedy` and shuts down, so the operator fixes the root cause and re-runs.
+ *
+ * It lives on the seam (not in any one harness) so the loop can recognize it without depending on a
+ * specific executor; a concrete executor subclasses it with a harness-specific `remedy`.
+ */
+export class FatalExecutorError extends Error {
+  constructor(
+    message: string,
+    /** Operator-facing instructions to fix the cause (printed by the CLI on shutdown). */
+    public readonly remedy: string,
+  ) {
+    super(message);
+    this.name = 'FatalExecutorError';
+  }
+}
+
 /** What a stub handler returns for one request: the canned output and optional token/dollar cost. */
 export interface StubReply {
   output: unknown;

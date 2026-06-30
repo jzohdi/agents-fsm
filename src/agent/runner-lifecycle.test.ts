@@ -50,12 +50,14 @@ describe('AgentRunner lifecycle — produce stages', () => {
 
     const outcome = await runner.runStage(run);
 
-    expect(repo.getRun(run.id)!.branch).toBe(`agent/run-${run.id}`);
+    const branchRe = new RegExp(`^agent/run-${run.id}-[0-9a-f]{6}$`); // id + a unique suffix
+    const createdBranch = repo.getRun(run.id)!.branch!;
+    expect(createdBranch).toMatch(branchRe);
     expect(github.commitCount()).toBe(1);
     expect(outcome.kind).toBe('handoff');
     if (outcome.kind === 'handoff') {
       const plan = outcome.envelope.artifacts!.find((a) => a.kind === 'plan')!;
-      expect(plan.locator).toMatchObject({ branch: `agent/run-${run.id}` });
+      expect(plan.locator).toMatchObject({ branch: createdBranch });
       expect(plan.locator).toHaveProperty('sha');
     }
   });
@@ -72,6 +74,21 @@ describe('AgentRunner lifecycle — produce stages', () => {
     expect(repo.getRun(run.id)!.branch).toBe(branch); // unchanged
     expect(github.commitCount()).toBe(2); // one commit per produce stage
   });
+
+  it('gives distinct branch names to distinct runs (no cross-run collision)', async () => {
+    // The bug this guards: two runs sharing a branch name (e.g. after the operator wiped the db and
+    // run ids restarted) would let one run adopt another's leftover remote branch + commits.
+    const { repo, runner } = setup();
+    const a = newRunAt(repo, 'plan');
+    const b = newRunAt(repo, 'plan');
+    await runner.runStage(a);
+    await runner.runStage(b);
+
+    const branchA = repo.getRun(a.id)!.branch!;
+    const branchB = repo.getRun(b.id)!.branch!;
+    expect(branchA).not.toBe(branchB);
+    expect(branchA).toMatch(/^agent\/run-\d+-[0-9a-f]{6}$/);
+  });
 });
 
 describe('AgentRunner lifecycle — tdd opens the PR idempotently', () => {
@@ -84,6 +101,9 @@ describe('AgentRunner lifecycle — tdd opens the PR idempotently', () => {
     const prNumber = repo.getRun(run.id)!.prNumber;
     expect(github.listPrs()).toHaveLength(1);
     expect(prNumber).not.toBeNull();
+    // The PR body closes the issue and explains provenance (a useful, not-bare description).
+    expect(github.listPrs()[0]!.body).toContain('Closes #');
+    expect(github.listPrs()[0]!.body).toContain('agent-fleet');
 
     // A back-edge re-run of tdd must not open a second PR.
     await runner.runStage(repo.getRun(run.id)!);
@@ -108,7 +128,7 @@ describe('AgentRunner lifecycle — tdd opens the PR idempotently', () => {
 });
 
 describe('AgentRunner lifecycle — review stages', () => {
-  it('code_review is fed the branch diff, posts comments to the PR, and makes no commit', async () => {
+  it('gives code_review the base branch (not a diff), posts comments to the PR, and makes no commit', async () => {
     let reviewInput: Record<string, unknown> | undefined;
     const handler: StubHandler = (req) => {
       if (req.stage !== 'code_review') return goldenPathHandler(req);
@@ -121,14 +141,15 @@ describe('AgentRunner lifecycle — review stages', () => {
     repo.setRunBranch(run.id, branch);
     const pr = await github.openPr({ branch, base: 'main', title: 't', body: '' });
     repo.setRunPr(run.id, pr.number);
-    github.seedDiff({ base: 'main', branch, diff: 'diff --git a/x b/x' });
     const commitsBefore = github.commitCount();
 
     const outcome = await runner.runStage(repo.getRun(run.id)!);
 
     expect(outcome.kind).toBe('handoff');
-    // The runner injected the diff so the reviewer has something to review (read-only — no Bash).
-    expect(reviewInput!.diff).toBe('diff --git a/x b/x');
+    // The runner gives the reviewer the base branch to diff against; the agent inspects the diff
+    // itself via its git tools (no diff injected into the prompt).
+    expect(reviewInput!.base).toBe('main');
+    expect(reviewInput!.diff).toBeUndefined();
     expect(github.listComments().map((c) => c.body)).toEqual(['nit: rename x', 'add a test']);
     expect(github.commitCount()).toBe(commitsBefore); // review never commits
   });

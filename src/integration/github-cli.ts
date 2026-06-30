@@ -50,8 +50,14 @@ export interface GitHubCliOptions {
   repo: string;
   /** Where per-run working trees are cloned. Each run gets `<workingRoot>/run-<id>`. */
   workingRoot: string;
-  /** Clone source. Defaults to the repo's HTTPS URL. */
+  /** The GitHub remote each working tree fetches/pushes/PRs against. Defaults to the repo's HTTPS URL. */
   cloneUrl?: string;
+  /**
+   * A local checkout of the same repo to clone the working tree *from* (fast, offline) instead of
+   * cloning over the network. When set, the working clone's `origin` is repointed to {@link cloneUrl}
+   * so fetch/push/PR still target GitHub — the local path is only an object source, not the remote.
+   */
+  localRepo?: string;
   /** The `gh` binary. Defaults to `gh`. */
   ghCommand?: string;
   /** The `git` binary. Defaults to `git`. */
@@ -76,6 +82,7 @@ export class GitHubCli implements GitHub {
   private readonly repo: string;
   private readonly workingRoot: string;
   private readonly cloneUrl: string;
+  private readonly localRepo?: string;
   private readonly ghCommand: string;
   private readonly gitCommand: string;
   private readonly exec: ExecFn;
@@ -84,6 +91,7 @@ export class GitHubCli implements GitHub {
     this.repo = options.repo;
     this.workingRoot = options.workingRoot;
     this.cloneUrl = options.cloneUrl ?? `https://github.com/${options.repo}.git`;
+    this.localRepo = options.localRepo;
     this.ghCommand = options.ghCommand ?? 'gh';
     this.gitCommand = options.gitCommand ?? 'git';
     this.exec = options.exec ?? defaultExec;
@@ -141,7 +149,14 @@ export class GitHubCli implements GitHub {
     const path = join(this.workingRoot, `run-${input.runId}`);
 
     if (!existsSync(join(path, '.git'))) {
-      await this.git(['clone', this.cloneUrl, path]);
+      if (this.localRepo) {
+        // Clone fast/offline from a local checkout, then repoint origin at the GitHub remote so
+        // fetch/push/PR target GitHub — the local path is only an object source, not the remote.
+        await this.git(['clone', this.localRepo, path]);
+        await this.git(['remote', 'set-url', 'origin', this.cloneUrl], path);
+      } else {
+        await this.git(['clone', this.cloneUrl, path]);
+      }
     }
     await this.git(['fetch', 'origin'], path);
 
@@ -174,7 +189,9 @@ export class GitHubCli implements GitHub {
 
   async readDiff(input: ReadDiffInput): Promise<string> {
     // Diff the (local, latest-committed) branch against the up-to-date remote base, so it
-    // works even when `base` is not the clone's checked-out default branch.
+    // works even when `base` is not the clone's checked-out default branch. (Not used to feed
+    // code review — that agent inspects the diff itself via git tools, §3.6 — but kept as an
+    // adapter capability the dashboard/API will use to display a run's diff.)
     return this.git(['diff', `origin/${input.base}...${input.branch}`], input.workingDir);
   }
 

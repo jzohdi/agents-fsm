@@ -86,6 +86,10 @@
     "frontend": { "allowedTools": ["Read", "Grep", "Glob", "Edit", "Write", "Bash"] },
     "backend": { "allowedTools": ["Read", "Grep", "Glob", "Edit", "Write", "Bash"] },
     "plan_review": { "phases": ["produce"], "io": { "kind": "review" }, "allowedTools": ["Read", "Grep", "Glob"] },
-    "code_review": { "phases": ["produce"], "io": { "kind": "review" }, "allowedTools": ["Read", "Grep", "Glob"] }
+    "code_review": {
+      "phases": ["produce"],
+      "io": { "kind": "review" },
+      "allowedTools": ["Read", "Grep", "Glob", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)", "Bash(git status:*)"]
+    }
   }
 }

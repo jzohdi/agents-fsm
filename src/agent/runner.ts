@@ -17,6 +17,8 @@
  * the loop parks the run in `needs_human` with the cause in the log (plans/milestone-4.md §3.10).
  */
 
+import { randomBytes } from 'node:crypto';
+
 import { recipeFor, type AgentsConfig, type StageIo } from '../fsm/config';
 import type { GitHub, Issue, PullRequest } from '../integration/github';
 import type { AgentPhase, Repository, Run } from '../store/repository';
@@ -127,9 +129,12 @@ export class AgentRunner {
     if (run.branch === null) this.repo.setRunBranch(run.id, branch);
 
     const input: Record<string, unknown> = { issue };
-    // A review stage with a PR reviews its diff; without one (plan_review) it reads tree artifacts.
+    // code_review (a review stage with a PR) inspects the branch diff itself via its git tools, so
+    // we give it the base branch to diff against rather than injecting a (possibly huge) diff — the
+    // harness manages its own context (plans/milestone-4.md §3.6). plan_review has no PR and reads
+    // `.agent/plan.md` from the tree, so it needs neither.
     if (io.kind === 'review' && run.prNumber !== null) {
-      input.diff = await this.github.readDiff({ workingDir: tree.path, base: this.baseBranch, branch });
+      input.base = this.baseBranch;
     }
     return { issue, workingDir: tree.path, branch, input };
   }
@@ -267,7 +272,7 @@ export class AgentRunner {
     // produce: commit the agent's work, enrich its artifacts with the real branch + sha, and
     // (for `tdd`) find-or-open the PR.
     const branch = prep.branch!;
-    const commit = await this.github.commitAndPush({ workingDir: prep.workingDir!, branch, message: commitMessage(run) });
+    const commit = await this.github.commitAndPush({ workingDir: prep.workingDir!, branch, message: commitMessage(run, prep.issue) });
     let envelopeOut: AgentEnvelope = { ...envelope, artifacts: enrichArtifacts(envelope.artifacts, { branch, sha: commit.sha }) };
     if (io.opensPr) {
       const pr = await this.ensurePr(run, branch, prep.issue);
@@ -291,7 +296,7 @@ export class AgentRunner {
       branch,
       base: this.baseBranch,
       title: issue.title || `Run ${run.id}`,
-      body: `Closes #${issue.number}\n\nAutomated by agent-fleet run ${run.id}.`,
+      body: prBody(run, issue),
     });
     this.repo.setRunPr(run.id, pr.number);
     return pr;
@@ -301,12 +306,31 @@ export class AgentRunner {
 /** The effective recipe shape `recipeFor` returns. */
 type Recipe = ReturnType<typeof recipeFor>;
 
+/**
+ * The run's working-branch name, created once and persisted (so recovery reuses it). A short random
+ * suffix keeps it globally unique even when the run id is reused — e.g. the operator wiped the local
+ * db and ids restarted at 1 — so a fresh run never adopts a prior run's leftover remote branch + PR
+ * (the collision that let a stale implementation slip onto a new run's branch).
+ */
 function branchName(run: Run): string {
-  return `agent/run-${run.id}`;
+  return `agent/run-${run.id}-${randomBytes(3).toString('hex')}`;
 }
 
-function commitMessage(run: Run): string {
-  return `agent run ${run.id}: ${run.currentState}`;
+function commitMessage(run: Run, issue: Issue): string {
+  return `[agent] ${run.currentState}: ${issue.title || `issue #${issue.number}`} (#${issue.number})`;
+}
+
+/** A descriptive PR body: closes the issue, explains provenance, and points at the run's artifacts. */
+function prBody(run: Run, issue: Issue): string {
+  return [
+    `Closes #${issue.number}`,
+    '',
+    `🤖 Opened by **agent-fleet** (run ${run.id}) — produced by the pipeline triage → plan → plan_review`,
+    '→ interface_design → tdd → frontend/backend → code_review.',
+    '',
+    'The approach and design live on this branch as `.agent/plan.md` and `.agent/interface.md`.',
+    'This PR is merge-ready, not auto-merged: a human reviews and merges.',
+  ].join('\n');
 }
 
 /** Add `extra` (branch + sha) to each artifact's locator, leaving non-object locators wrapped. */

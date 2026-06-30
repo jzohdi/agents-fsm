@@ -19,12 +19,20 @@ describe('parseCliArgs', () => {
   });
 
   it('reads the real-mode flags and config (both --key value and --key=value)', () => {
-    const args = parseCliArgs(['owner/repo#1', '--real', '--cheap', '--repo', 'o/r', '--base=develop', '--work', '/tmp/w']);
+    const args = parseCliArgs([
+      'owner/repo#1', '--real', '--cheap', '--repo', 'o/r', '--base=develop', '--work', '/tmp/w',
+      '--clone-url', 'git@github.com:o/r.git', '--local-repo', '/home/me/o-r', '--permission-mode=acceptEdits',
+      '--model', 'sonnet',
+    ]);
     expect(args.real).toBe(true);
     expect(args.cheap).toBe(true);
     expect(args.repo).toBe('o/r');
     expect(args.base).toBe('develop');
     expect(args.work).toBe('/tmp/w');
+    expect(args.cloneUrl).toBe('git@github.com:o/r.git');
+    expect(args.localRepo).toBe('/home/me/o-r');
+    expect(args.permissionMode).toBe('acceptEdits');
+    expect(args.model).toBe('sonnet');
   });
 
   it('keeps the resume subcommand and run id as positionals', () => {
