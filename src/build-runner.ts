@@ -77,7 +77,12 @@ export function loadRunConfig(args: CliArgs): { loaded: LoadedConfig; configPath
  * into the shared {@link Broadcaster}, so the SSE stream sees them alongside transitions and status
  * changes. The GitHub adapter is returned so the daemon can share it with the Reply Poller.
  */
-export function buildOrchestrator(args: CliArgs): { orchestrator: Orchestrator; repo: Repository; github: GitHub } {
+export function buildOrchestrator(args: CliArgs): {
+  orchestrator: Orchestrator;
+  repo: Repository;
+  github: GitHub;
+  broadcaster: Broadcaster;
+} {
   const { loaded, configPath } = loadRunConfig(args);
   const repo = new Repository(openDb(args.db));
   const broadcaster = new Broadcaster();
@@ -90,6 +95,7 @@ export function buildOrchestrator(args: CliArgs): { orchestrator: Orchestrator; 
     runner,
     config: loaded,
     broadcaster,
+    github, // powers the new-run autocomplete (GET /suggestions)
     ...(configPath ? { configPath } : {}),
     // A FatalExecutorError (e.g. the harness is unauthenticated) fails every run; surface its remedy
     // prominently rather than a bare stack trace, the way the one-shot CLI does on shutdown.
@@ -98,5 +104,5 @@ export function buildOrchestrator(args: CliArgs): { orchestrator: Orchestrator; 
       else console.error(`[daemon] drain error: ${String(err)}`);
     },
   });
-  return { orchestrator, repo, github };
+  return { orchestrator, repo, github, broadcaster };
 }

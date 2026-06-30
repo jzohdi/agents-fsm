@@ -27,6 +27,7 @@ import type {
   RunStatus,
   Transition,
 } from '../store/repository';
+import type { GitHub, IssueSuggestion } from '../integration/github';
 import { Broadcaster, type StreamListener } from './stream';
 
 /** A failure with a client-facing HTTP status. The server maps `status` straight onto the response. */
@@ -55,6 +56,8 @@ export interface OrchestratorOptions {
   runner: AgentRunner;
   config: LoadedConfig;
   broadcaster: Broadcaster;
+  /** GitHub adapter, used (read-only) to power the new-run autocomplete. Omit → suggestions are empty. */
+  github?: GitHub;
   /** Path the FSM config is persisted to; required for `updateConfig` (omit → config is read-only). */
   configPath?: string;
   now?: () => number;
@@ -72,6 +75,7 @@ export class Orchestrator {
   private readonly runner: AgentRunner;
   private readonly loop: EventLoop;
   private readonly configPath?: string;
+  private readonly github?: GitHub;
   private config: LoadedConfig;
 
   // Single-flight drain pump (plans/milestone-5.md §2.2).
@@ -86,6 +90,7 @@ export class Orchestrator {
     this.broadcaster = options.broadcaster;
     this.config = options.config;
     this.configPath = options.configPath;
+    this.github = options.github;
     this.onError = options.onError ?? ((err) => console.error(`[orchestrator] drain pump error: ${String(err)}`));
     this.loop = new EventLoop(this.repo, this.config.fsm, this.config.version, this.runner, {
       onTransition: (transition, run) => this.broadcaster.publish({ type: 'transition', runId: run.id, transition, run }),
@@ -195,6 +200,15 @@ export class Orchestrator {
 
   listRuns(status?: RunStatus): Run[] {
     return this.repo.listRuns(status);
+  }
+
+  /**
+   * Open issues matching `query` for the dashboard's new-run autocomplete (README §3.3 Layer 7).
+   * Delegates to the GitHub adapter; with no adapter configured there are simply no suggestions.
+   */
+  async suggestIssues(query: string): Promise<IssueSuggestion[]> {
+    if (!this.github) return [];
+    return this.github.suggestIssues(query);
   }
 
   // --- config ------------------------------------------------------------------

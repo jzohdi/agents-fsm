@@ -90,3 +90,11 @@ export interface LogLine {
   stage?: string;
   level: string;
 }
+
+/** An open issue suggested by the daemon for the new-run autocomplete (`GET /suggestions`). */
+export interface IssueSuggestion {
+  ref: string;
+  repo: string;
+  number: number;
+  title: string;
+}

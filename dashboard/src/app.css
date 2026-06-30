@@ -100,9 +100,10 @@ input, textarea, button, select { font: inherit; }
 .af-ac .grp { font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink4); padding: 11px 32px 6px; }
 .af-ac .opt { display: flex; align-items: baseline; gap: 14px; padding: 9px 32px; cursor: pointer; }
 .af-ac .opt:hover, .af-ac .opt.act { background: var(--accent-soft); }
-.af-ac .opt .ref { font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--ink); }
+.af-ac .opt .ref { font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--ink); min-width: 150px; flex: 0 0 auto; }
 .af-ac .opt .ref b { color: var(--accent); }
-.af-ac .opt .tag { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--ink3); }
+.af-ac .opt .t { color: var(--ink2); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.af-ac .opt .tag { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--ink3); flex: 0 0 auto; padding-left: 12px; }
 .af-ac .none { padding: 14px 32px; color: var(--ink3); font-size: 13px; }
 
 /* --- banner --- */

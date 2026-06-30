@@ -27,6 +27,20 @@ describe('FakeGitHub — issues', () => {
     expect(await gh.readIssue('o/r#42')).toMatchObject({ ref: 'o/r#42', number: 42 });
     expect(await gh.readIssue('bare-ref')).toMatchObject({ number: 1 }); // fallback when no #n
   });
+
+  it('suggests seeded issues filtered by query (ref or title), newest first', async () => {
+    const gh = new FakeGitHub()
+      .seedIssue('acme/web#318', { number: 318, title: 'Checkout token refresh' })
+      .seedIssue('acme/web#312', { number: 312, title: 'Cart rounding error' })
+      .seedIssue('acme/api#205', { number: 205, title: 'Rate limit 429s' });
+
+    expect(await gh.suggestIssues('web')).toEqual([
+      { ref: 'acme/web#318', repo: 'acme/web', number: 318, title: 'Checkout token refresh' },
+      { ref: 'acme/web#312', repo: 'acme/web', number: 312, title: 'Cart rounding error' },
+    ]);
+    expect((await gh.suggestIssues('rounding')).map((s) => s.number)).toEqual([312]); // matches title
+    expect((await gh.suggestIssues('')).map((s) => s.number)).toEqual([318, 312, 205]); // all, newest first
+  });
 });
 
 describe('FakeGitHub — issue editing, creation, and comments', () => {

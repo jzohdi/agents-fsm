@@ -30,6 +30,20 @@ export interface Issue {
   body: string;
 }
 
+/**
+ * A repo/issue the operator might start a run on — what the dashboard's new-run autocomplete shows.
+ * Sourced from the logged-in user's open issues in the real adapter (`gh search issues`) and from the
+ * fake's seeded issues in tests.
+ */
+export interface IssueSuggestion {
+  /** Stable reference to file a run against, e.g. `owner/repo#42`. */
+  ref: string;
+  /** `owner/repo` the issue lives in. */
+  repo: string;
+  number: number;
+  title: string;
+}
+
 /** A pull request, the durable home for the run's code + a status mirror (README §3.5). */
 export interface PullRequest {
   number: number;
@@ -131,6 +145,13 @@ export interface ReadDiffInput {
 export interface GitHub {
   /** Read an issue by reference (e.g. `owner/repo#42`). */
   readIssue(issueRef: string): Promise<Issue>;
+
+  /**
+   * Suggest open issues the operator could start a run on, matching `query` (empty → the most
+   * relevant defaults). Powers the dashboard's new-run autocomplete: the real adapter searches the
+   * logged-in user's GitHub, the fake returns its seeded issues. Best-effort and read-only.
+   */
+  suggestIssues(query: string): Promise<IssueSuggestion[]>;
 
   /**
    * Rewrite an issue's title and/or body. Triage uses this to improve a vague issue into a

@@ -27,7 +27,7 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((s) => new Promise<void>((r) => s.close(() => r()))));
 });
 
-async function start(opts: { publicDir?: string } = {}): Promise<{ base: string; orchestrator: Orchestrator }> {
+async function start(opts: { publicDir?: string } = {}): Promise<{ base: string; orchestrator: Orchestrator; github: FakeGitHub }> {
   const loaded = loadDefaultConfig();
   const repo = new Repository(openDb(':memory:'));
   const github = new FakeGitHub({ autoSeedIssues: true });
@@ -35,12 +35,12 @@ async function start(opts: { publicDir?: string } = {}): Promise<{ base: string;
   const runner = new AgentRunner(repo, new StubExecutor(goldenPathHandler), loaded.agents, github, {
     onActivity: (activity) => broadcaster.publish({ type: 'activity', activity }),
   });
-  const orchestrator = new Orchestrator({ repo, runner, config: loaded, broadcaster });
+  const orchestrator = new Orchestrator({ repo, runner, config: loaded, broadcaster, github });
   const server = createApiServer(orchestrator, opts.publicDir ? { publicDir: opts.publicDir } : {});
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const { port } = server.address() as AddressInfo;
-  return { base: `http://127.0.0.1:${port}`, orchestrator };
+  return { base: `http://127.0.0.1:${port}`, orchestrator, github };
 }
 
 /** A throwaway dashboard dir so the static-serving test doesn't depend on a real `build:dashboard`. */
@@ -122,6 +122,19 @@ describe('HTTP API', () => {
     expect(put.status).toBe(400);
 
     expect((await fetch(`${base}/health`)).status).toBe(200);
+  });
+
+  it('serves new-run suggestions for ?q= from the GitHub adapter', async () => {
+    const { base, github } = await start();
+    github.seedIssue('acme/web#318', { number: 318, title: 'Checkout token refresh' });
+
+    const res = await fetch(`${base}/suggestions?q=checkout`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([{ ref: 'acme/web#318', repo: 'acme/web', number: 318, title: 'Checkout token refresh' }]);
+
+    expect(await (await fetch(`${base}/suggestions`)).json()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ ref: 'acme/web#318' })]),
+    ); // no query → all seeded issues
   });
 
   it('streams live events over SSE', async () => {

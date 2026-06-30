@@ -1,15 +1,31 @@
 <script lang="ts">
-  import { startRun, banner, suggestRuns, type RunSuggestion } from './store.svelte';
+  import { startRun, banner, fetchSuggestions } from './store.svelte';
+  import type { IssueSuggestion } from './types';
 
   let value = $state('');
   let open = $state(false);
   let activeIdx = $state(-1);
   let busy = $state(false);
+  let suggestions = $state<IssueSuggestion[]>([]);
 
-  const suggestions = $derived(open ? suggestRuns(value) : []);
+  // Debounced, race-guarded fetch of GitHub suggestions for the current query.
+  let debounce: ReturnType<typeof setTimeout> | undefined;
+  let seq = 0;
+  function refresh() {
+    clearTimeout(debounce);
+    debounce = setTimeout(async () => {
+      const mine = ++seq;
+      const items = await fetchSuggestions(value);
+      if (mine === seq && open) {
+        suggestions = items;
+        activeIdx = -1;
+      }
+    }, 160);
+  }
+
   // group by repo for the dropdown headers
   const groups = $derived.by(() => {
-    const m = new Map<string, RunSuggestion[]>();
+    const m = new Map<string, IssueSuggestion[]>();
     for (const s of suggestions) (m.get(s.repo) ?? m.set(s.repo, []).get(s.repo)!).push(s);
     return [...m.entries()];
   });
@@ -65,8 +81,8 @@
     <span class="lab"><span class="arr">▸</span> File a new run</span>
     <input
       bind:value
-      onfocus={() => (open = true)}
-      oninput={() => { open = true; activeIdx = -1; }}
+      onfocus={() => { open = true; refresh(); }}
+      oninput={() => { open = true; refresh(); }}
       onkeydown={onKeydown}
       placeholder="owner/repo#123 — start typing to search your repos &amp; issues"
       autocomplete="off"
@@ -78,7 +94,7 @@
   {#if open && value.trim() !== ''}
     <div class="af-ac">
       {#if suggestions.length === 0}
-        <div class="none">No matching runs yet — press <b>Start run</b> to file <code>{value.trim()}</code> anyway.</div>
+        <div class="none">No matching open issues — press <b>Start run</b> to file <code>{value.trim()}</code> anyway.</div>
       {:else}
         {#each groups as [repo, items] (repo)}
           <div class="grp">{repo} · {items.length}</div>
@@ -95,7 +111,8 @@
               tabindex="-1"
             >
               <span class="ref">{p.repo}<b>{p.num}</b></span>
-              <span class="tag">run again</span>
+              <span class="t">{s.title}</span>
+              <span class="tag">issue</span>
             </div>
           {/each}
         {/each}

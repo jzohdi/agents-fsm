@@ -14,6 +14,7 @@
  *   POST /runs/:id/pause        POST /runs/:id/resume
  *   POST /runs/:id/stop         POST /runs/:id/revert
  *   GET  /config                PUT /config
+ *   GET  /suggestions[?q=]
  *   GET  /stream[?runId=]       GET /health
  */
 
@@ -59,6 +60,11 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
   }
 
   if (method === 'GET' && path === '/health') return sendJson(res, 200, { ok: true });
+
+  // --- new-run autocomplete: open issues matching ?q= (README §3.3 Layer 7) ---
+  if (method === 'GET' && path === '/suggestions') {
+    return sendJson(res, 200, await orch.suggestIssues(url.searchParams.get('q') ?? ''));
+  }
 
   // --- runs ---
   if (path === '/runs') {

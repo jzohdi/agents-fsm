@@ -75,6 +75,37 @@ describe('GitHubCli — gh-backed API (injected exec)', () => {
     expect(calls[0]!.args).toEqual(['issue', 'view', '42', '--repo', 'o/r', '--json', 'number,title,body']);
   });
 
+  it('suggests issues via `gh search issues`, mapping repository + number to a ref', async () => {
+    const { exec, calls } = stubExec({
+      'gh search': ok(
+        JSON.stringify([
+          { repository: { nameWithOwner: 'acme/web' }, number: 318, title: 'Checkout token refresh' },
+          { repository: { nameWithOwner: 'acme/api' }, number: 205, title: 'Rate limit 429s' },
+        ]),
+      ),
+    });
+    const gh = new GitHubCli({ repo: 'o/r', workingRoot: '/w', exec });
+
+    const out = await gh.suggestIssues('checkout');
+
+    expect(out).toEqual([
+      { ref: 'acme/web#318', repo: 'acme/web', number: 318, title: 'Checkout token refresh' },
+      { ref: 'acme/api#205', repo: 'acme/api', number: 205, title: 'Rate limit 429s' },
+    ]);
+    expect(calls[0]!.args.slice(0, 3)).toEqual(['search', 'issues', '--state']);
+    expect(calls[0]!.args).toContain('checkout'); // the free-text query is passed
+    expect(calls[0]!.args).toEqual(expect.arrayContaining(['--json', 'repository,number,title']));
+  });
+
+  it('suggests the user-assigned issues when the query is empty, and is best-effort on failure', async () => {
+    const { exec, calls } = stubExec({ 'gh search': ok('[]') });
+    expect(await new GitHubCli({ repo: 'o/r', workingRoot: '/w', exec }).suggestIssues('  ')).toEqual([]);
+    expect(calls[0]!.args).toEqual(expect.arrayContaining(['--assignee', '@me']));
+
+    const boom: ExecFn = () => Promise.resolve({ code: 1, stdout: '', stderr: 'gh: auth required' });
+    expect(await new GitHubCli({ repo: 'o/r', workingRoot: '/w', exec: boom }).suggestIssues('x')).toEqual([]);
+  });
+
   it('opens a PR then reads it back by branch', async () => {
     const { exec, calls } = stubExec({
       'gh pr': ok(

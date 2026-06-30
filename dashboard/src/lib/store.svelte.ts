@@ -7,7 +7,7 @@
  */
 
 import { request } from './api';
-import type { LoadedConfig, LogLine, Run, RunDetail } from './types';
+import type { IssueSuggestion, LoadedConfig, LogLine, Run, RunDetail } from './types';
 
 const ARCHIVE_KEY = 'af-archived-runs';
 function loadArchived(): number[] {
@@ -59,22 +59,30 @@ export function toggleShowArchived(): void {
 }
 
 /**
- * Autocomplete suggestions for the new-run bar. For now these are derived from the issue refs the
- * daemon already knows about (distinct repos + recent issues); a GitHub-backed source (the logged-in
- * user's active repos & open issues) is the intended upgrade — same shape, different fetch.
+ * Autocomplete suggestions for the new-run bar. The daemon's `GET /suggestions?q=` searches the
+ * logged-in user's open GitHub issues (real mode) or its seeded issues (stub). If that request fails
+ * (e.g. an older daemon without the route, or `gh` unauthenticated) we fall back to the issue refs of
+ * runs already on screen so type-ahead still does something useful.
  */
-export interface RunSuggestion {
-  ref: string;
-  repo: string;
+export async function fetchSuggestions(query: string): Promise<IssueSuggestion[]> {
+  try {
+    return await request<IssueSuggestion[]>('GET', `/suggestions?q=${encodeURIComponent(query)}`);
+  } catch {
+    return localSuggestions(query);
+  }
 }
-export function suggestRuns(query: string): RunSuggestion[] {
+
+function localSuggestions(query: string): IssueSuggestion[] {
   const q = query.trim().toLowerCase();
   const seen = new Set<string>();
-  const out: RunSuggestion[] = [];
+  const out: IssueSuggestion[] = [];
   for (const r of ui.runs) {
     if (seen.has(r.issueRef)) continue;
     seen.add(r.issueRef);
-    if (!q || r.issueRef.toLowerCase().includes(q)) out.push({ ref: r.issueRef, repo: r.repoRef });
+    if (!q || r.issueRef.toLowerCase().includes(q)) {
+      const num = Number(r.issueRef.split('#')[1] ?? 0);
+      out.push({ ref: r.issueRef, repo: r.repoRef, number: num, title: r.issueRef });
+    }
   }
   return out;
 }

@@ -22,6 +22,7 @@ import {
   type IssueComment,
   type OpenPrInput,
   type PrepareWorkingTreeInput,
+  type IssueSuggestion,
   type PullRequest,
   type ReadDiffInput,
   type UpdateIssueInput,
@@ -167,6 +168,16 @@ export class FakeGitHub implements GitHub {
       return { ref: issueRef, number, title: `Issue ${number}`, body: '' };
     }
     throw new GitHubNotFoundError(`issue not found: ${issueRef}`);
+  }
+
+  /** Seeded issues whose ref or title contains `query` (case-insensitive), newest first. */
+  async suggestIssues(query: string): Promise<IssueSuggestion[]> {
+    const q = query.trim().toLowerCase();
+    return [...this.issues.values()]
+      .filter((i) => !q || i.ref.toLowerCase().includes(q) || i.title.toLowerCase().includes(q))
+      .sort((a, b) => b.number - a.number)
+      .slice(0, 25)
+      .map((i) => ({ ref: i.ref, repo: i.ref.split('#')[0] ?? i.ref, number: i.number, title: i.title }));
   }
 
   async updateIssue(input: UpdateIssueInput): Promise<Issue> {

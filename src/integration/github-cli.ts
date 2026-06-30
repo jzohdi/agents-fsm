@@ -30,6 +30,7 @@ import {
   type GitHub,
   type Issue,
   type IssueComment,
+  type IssueSuggestion,
   type OpenPrInput,
   type PrepareWorkingTreeInput,
   type PullRequest,
@@ -104,6 +105,32 @@ export class GitHubCli implements GitHub {
 
   async readIssue(issueRef: string): Promise<Issue> {
     return this.viewIssue(issueNumber(issueRef), issueRef);
+  }
+
+  /**
+   * Open issues for the new-run autocomplete, via `gh search issues`. With a query we free-text
+   * search the user's accessible issues; without one we default to open issues assigned to the
+   * logged-in user (`--assignee @me`). Best-effort: any `gh` failure yields an empty list rather
+   * than breaking the dashboard's type-ahead.
+   */
+  async suggestIssues(query: string): Promise<IssueSuggestion[]> {
+    const q = query.trim();
+    const args = ['search', 'issues', '--state', 'open', '--limit', '25', '--json', 'repository,number,title'];
+    if (q) args.push(q);
+    else args.push('--assignee', '@me');
+    try {
+      const parsed = JSON.parse(await this.gh(args)) as RawSearchIssue[];
+      return parsed
+        .filter((i) => i.repository?.nameWithOwner && typeof i.number === 'number')
+        .map((i) => ({
+          ref: `${i.repository.nameWithOwner}#${i.number}`,
+          repo: i.repository.nameWithOwner,
+          number: i.number,
+          title: i.title ?? `Issue ${i.number}`,
+        }));
+    } catch {
+      return []; // best-effort: a search miss or auth hiccup must not break type-ahead
+    }
   }
 
   async updateIssue(input: UpdateIssueInput): Promise<Issue> {
@@ -273,6 +300,13 @@ export class GitHubCli implements GitHub {
     }
     return result.stdout;
   }
+}
+
+/** The raw shape of a `gh search issues --json repository,number,title` element; extra fields ignored. */
+interface RawSearchIssue {
+  repository: { nameWithOwner: string };
+  number: number;
+  title?: string;
 }
 
 interface RawPr {

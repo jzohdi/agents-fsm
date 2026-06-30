@@ -37,6 +37,7 @@ function setup(opts: { handler?: StubHandler; configPath?: string } = {}) {
     runner,
     config: loaded,
     broadcaster,
+    github,
     ...(opts.configPath ? { configPath: opts.configPath } : {}),
   });
   return { orchestrator, repo, github, events };
@@ -100,6 +101,21 @@ describe('Orchestrator — queries', () => {
     } catch (err) {
       expect((err as ApiError).status).toBe(404);
     }
+  });
+
+  it('suggests issues from the GitHub adapter, and returns none when none is configured', async () => {
+    const { orchestrator, github } = setup();
+    github.seedIssue('acme/web#318', { number: 318, title: 'Checkout token refresh' });
+    expect(await orchestrator.suggestIssues('checkout')).toEqual([
+      { ref: 'acme/web#318', repo: 'acme/web', number: 318, title: 'Checkout token refresh' },
+    ]);
+
+    const loaded = loadDefaultConfig();
+    const repo = new Repository(openDb(':memory:'));
+    const broadcaster = new Broadcaster();
+    const runner = new AgentRunner(repo, new StubExecutor(goldenPathHandler), loaded.agents, new FakeGitHub());
+    const noGh = new Orchestrator({ repo, runner, config: loaded, broadcaster }); // github omitted
+    expect(await noGh.suggestIssues('anything')).toEqual([]);
   });
 });
 
