@@ -6,6 +6,12 @@
       "runtimeExecutable": "npx",
       "runtimeArgs": ["tsx", "src/cli.ts", "serve", "--port", "4331", "--poll-timeout", "0"],
       "port": 4331
+    },
+    {
+      "name": "dashboard-preview",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["/Users/jakezohdi/Documents/programming/projects/agent-fleet/dashboard/dev-mock-daemon.cjs"],
+      "port": 4319
     }
   ]
 }

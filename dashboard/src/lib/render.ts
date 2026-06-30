@@ -7,9 +7,23 @@
  * is what lets the reactive view layer stay thin.
  */
 
-import type { AgentRunRecord, FsmConfig, Run } from './types';
+import type { AgentRunRecord, FsmConfig, Run, RunStatus, Transition } from './types';
 
 // --- formatting ---------------------------------------------------------------
+
+/** Humanize an FSM state id for display (sentence case): `plan_review` → `Plan review`, `tdd` → `Tdd`. */
+export function humanizeState(state: string): string {
+  const spaced = state.replace(/_/g, ' ');
+  return spaced ? spaced[0]!.toUpperCase() + spaced.slice(1) : spaced;
+}
+
+/** A compact token count: `6234` → `6.2k`, `120000` → `120k`, `840` → `840`. */
+export function fmtTokens(value: number | null | undefined): string {
+  const n = Number(value ?? 0);
+  if (!Number.isFinite(n) || n < 1000) return String(Math.max(0, Math.round(n)));
+  const k = n / 1000;
+  return `${k >= 100 ? Math.round(k) : k.toFixed(1)}k`;
+}
 
 /** Escape text for safe insertion into an SVG string (the one place we build markup by hand). */
 export function escapeHtml(value: unknown): string {
@@ -38,29 +52,6 @@ export function fmtDuration(ms: number | null | undefined): string {
 }
 
 // --- view-models --------------------------------------------------------------
-
-export interface RunRow {
-  id: number;
-  issue: string;
-  state: string;
-  status: string;
-  statusClass: string;
-  tokens: number;
-  cost: number;
-}
-
-/** Display rows for the runs list, with a per-status CSS class for the status badge. */
-export function runsTableModel(runs: Run[] | undefined): RunRow[] {
-  return (runs ?? []).map((r) => ({
-    id: r.id,
-    issue: r.issueRef,
-    state: r.currentState,
-    status: r.status,
-    statusClass: `af-status af-status-${r.status}`,
-    tokens: r.tokensUsed ?? 0,
-    cost: r.costUsed ?? 0,
-  }));
-}
 
 export interface StageTelemetry {
   stage: string;
@@ -96,103 +87,129 @@ export function telemetryModel(agentRuns: AgentRunRecord[] | undefined): Telemet
   return { stages, totals };
 }
 
-// --- FSM graph (inline SVG) ---------------------------------------------------
+// --- pipeline board -----------------------------------------------------------
 
-const NODE_W = 116;
-const NODE_H = 38;
-const GAP_X = 34;
-const MARGIN = 18;
-const SPINE_Y = 78;
-const OTHER_DY = 96; // vertical offset for states not on the forward spine (e.g. needs_human)
+export interface PipelineRow {
+  id: number;
+  issue: string;
+  repo: string;
+  title: string; // first line of the issue ref's summary if we have one, else the ref
+  state: string;
+  status: RunStatus;
+  statusClass: string;
+  tokens: number;
+  cost: number;
+  resolved: boolean; // terminal (done/stopped) — eligible for archiving
+}
+export interface PipelineColumn {
+  key: string;
+  label: string;
+  terminal: boolean; // needs_human / resolved lanes render after a divider
+  runs: PipelineRow[];
+}
+export interface PipelineModel {
+  columns: PipelineColumn[];
+  archivedCount: number; // resolved runs hidden by the archive filter
+}
 
-interface Point {
-  x: number;
-  y: number;
+const RESOLVED_KEY = '__resolved__';
+
+function pipelineRow(r: Run): PipelineRow {
+  const resolved = r.status === 'done' || r.status === 'stopped';
+  return {
+    id: r.id,
+    issue: r.issueRef,
+    repo: r.repoRef,
+    title: r.issueRef,
+    state: r.currentState,
+    status: r.status,
+    statusClass: `af-stat af-stat-${r.status}`,
+    tokens: r.tokensUsed ?? 0,
+    cost: r.costUsed ?? 0,
+    resolved,
+  };
 }
 
 /**
- * Render the FSM as an inline SVG string: the `forwardOrder` states laid out as a left-to-right spine
- * (forward arrows between neighbors), any non-spine states (terminal/escalation) on a row below, and
- * every declared **back-edge** drawn as a labeled arc. The `currentState` node gets the
- * `af-node-current` class so the dashboard highlights where a run is. Colors come from CSS classes.
+ * Bucket runs into pipeline columns: the FSM's `forwardOrder` (minus terminal states) as flow lanes,
+ * then a `needs_human` escalation lane and a single `Resolved` lane (done + stopped). A run sits in
+ * the escalation lane if its status is `needs_human`, in Resolved if terminal, else in its
+ * `currentState` lane. Archived run ids are dropped from Resolved unless `showArchived` (their count
+ * is returned so the UI can offer to reveal them). Pure — the board view-model the dashboard renders.
  */
-export function fsmGraphSvg(fsm: Partial<FsmConfig> | null | undefined, currentState: string | undefined): string {
-  const spine = fsm?.forwardOrder ?? [];
+export function pipelineModel(
+  runs: Run[] | undefined,
+  fsm: Partial<FsmConfig> | null | undefined,
+  opts: { archived?: ReadonlySet<number>; showArchived?: boolean } = {},
+): PipelineModel {
+  const archived = opts.archived ?? new Set<number>();
   const states = fsm?.states ?? {};
-  const others = Object.keys(states).filter((s) => !spine.includes(s));
+  const escalation = fsm?.escalationState ?? 'needs_human';
+  const flow = (fsm?.forwardOrder ?? []).filter((s) => !states[s]?.terminal);
 
-  const pos: Record<string, Point> = {};
-  spine.forEach((s, i) => {
-    pos[s] = { x: MARGIN + i * (NODE_W + GAP_X), y: SPINE_Y };
-  });
-  others.forEach((s, i) => {
-    pos[s] = { x: MARGIN + i * (NODE_W + GAP_X), y: SPINE_Y + OTHER_DY };
-  });
+  const columns: PipelineColumn[] = flow.map((s) => ({ key: s, label: humanizeState(s), terminal: false, runs: [] }));
+  const needsHuman: PipelineColumn = { key: escalation, label: humanizeState(escalation), terminal: true, runs: [] };
+  const resolved: PipelineColumn = { key: RESOLVED_KEY, label: 'Resolved', terminal: true, runs: [] };
+  const byKey = new Map(columns.map((c) => [c.key, c]));
 
-  const cols = Math.max(spine.length, others.length, 1);
-  const width = MARGIN * 2 + cols * NODE_W + (cols - 1) * GAP_X;
-  const height = SPINE_Y + (others.length ? OTHER_DY : 0) + NODE_H + MARGIN;
-
-  const forwardEdges: string[] = [];
-  for (let i = 0; i < spine.length - 1; i++) {
-    const a = pos[spine[i]!];
-    const b = pos[spine[i + 1]!];
-    if (a && b) forwardEdges.push(forwardArrow(a, b));
-  }
-
-  const backEdges: string[] = [];
-  for (const [name, def] of Object.entries(states)) {
-    const from = pos[name];
-    if (!from) continue;
-    for (const [trigger, t] of Object.entries(def.transitions ?? {})) {
-      if (!t.backEdge) continue; // forward path is the spine; escalate edges are omitted for clarity
-      const targets = t.toOneOf ?? (t.to && t.to !== 'FORWARD' ? [t.to] : []);
-      for (const target of targets) {
-        const to = pos[target];
-        if (to) backEdges.push(backArc(from, to, trigger));
+  let archivedCount = 0;
+  for (const r of runs ?? []) {
+    const row = pipelineRow(r);
+    if (r.status === 'needs_human') {
+      needsHuman.runs.push(row);
+    } else if (row.resolved) {
+      if (archived.has(r.id)) {
+        archivedCount += 1;
+        if (opts.showArchived) resolved.runs.push(row);
+      } else {
+        resolved.runs.push(row);
       }
+    } else {
+      (byKey.get(r.currentState) ?? columns[0])?.runs.push(row);
     }
   }
-
-  const nodes = Object.entries(pos).map(([s, p]) => {
-    const cls = ['af-node'];
-    if (s === currentState) cls.push('af-node-current');
-    if (states[s]?.terminal) cls.push('af-node-terminal');
-    return (
-      `<g class="${cls.join(' ')}" data-state="${escapeHtml(s)}">` +
-      `<rect x="${p.x}" y="${p.y}" width="${NODE_W}" height="${NODE_H}" rx="7"></rect>` +
-      `<text x="${p.x + NODE_W / 2}" y="${p.y + NODE_H / 2}" text-anchor="middle" dominant-baseline="central">${escapeHtml(s)}</text>` +
-      `</g>`
-    );
-  });
-
-  return (
-    `<svg viewBox="0 0 ${width} ${height}" class="af-fsm" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="FSM graph">` +
-    `<defs><marker id="af-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">` +
-    `<path d="M0,0 L10,5 L0,10 z"></path></marker></defs>` +
-    forwardEdges.join('') +
-    backEdges.join('') +
-    nodes.join('') +
-    `</svg>`
-  );
+  return { columns: [...columns, needsHuman, resolved], archivedCount };
 }
 
-/** A straight forward arrow from the right edge of `a` to the left edge of `b` (same row). */
-function forwardArrow(a: Point, b: Point): string {
-  return `<line class="af-edge af-edge-forward" x1="${a.x + NODE_W}" y1="${a.y + NODE_H / 2}" x2="${b.x}" y2="${b.y + NODE_H / 2}" marker-end="url(#af-arrow)"></line>`;
+// --- state-machine stepper ----------------------------------------------------
+
+export interface StepperNode {
+  state: string;
+  label: string;
+  status: 'done' | 'current' | 'todo';
 }
 
-/** A back-edge arc bowing above the spine from `a` to `b`, labeled with the trigger. */
-function backArc(a: Point, b: Point, label: string): string {
-  const x1 = a.x + NODE_W / 2;
-  const x2 = b.x + NODE_W / 2;
-  const lift = 34 + Math.abs((x2 - x1) / (NODE_W + GAP_X)) * 4; // longer hops arc higher
-  const cx = (x1 + x2) / 2;
-  const cy = a.y - lift;
-  return (
-    `<g class="af-edge af-edge-back">` +
-    `<path d="M${x1},${a.y} Q${cx},${cy} ${x2},${b.y}" fill="none" marker-end="url(#af-arrow)"></path>` +
-    `<text class="af-edge-label" x="${cx}" y="${cy + 12}" text-anchor="middle">${escapeHtml(label)}</text>` +
-    `</g>`
-  );
+/**
+ * The forward-spine stepper for a run: each `forwardOrder` state marked done (before the current
+ * state), current, or todo. `currentState` outside the spine (e.g. the `needs_human` escalation)
+ * leaves no node current — pass the last forward state reached as `effectiveState` for those runs.
+ */
+export function stepperModel(fsm: Partial<FsmConfig> | null | undefined, currentState: string | undefined): StepperNode[] {
+  const order = fsm?.forwardOrder ?? [];
+  const idx = currentState ? order.indexOf(currentState) : -1;
+  return order.map((state, i) => ({
+    state,
+    label: humanizeState(state),
+    status: idx === -1 ? 'todo' : i < idx ? 'done' : i === idx ? 'current' : 'todo',
+  }));
 }
+
+export interface BackEdge {
+  from: string;
+  to: string;
+  label: string;
+}
+
+/**
+ * Distinct back-edges actually traversed by a run (from its transitions, `backEdge === true`),
+ * newest-wins on the trigger label — what the stepper draws as return arcs over the spine.
+ */
+export function traversedBackEdges(transitions: Transition[] | undefined): BackEdge[] {
+  const seen = new Map<string, BackEdge>();
+  for (const t of transitions ?? []) {
+    if (!t.backEdge) continue;
+    seen.set(`${t.fromState}→${t.toState}`, { from: t.fromState, to: t.toState, label: t.trigger });
+  }
+  return [...seen.values()];
+}
+

@@ -1,22 +1,35 @@
 <script lang="ts">
   import { ui, control, revertRun } from './store.svelte';
-  import { telemetryModel, fmtCost, fmtDuration } from './render';
-  import FsmGraph from './FsmGraph.svelte';
+  import { telemetryModel, fmtCost, fmtDuration, fmtTokens, escapeHtml } from './render';
+  import StateMachine from './StateMachine.svelte';
 
   const detail = $derived(ui.detail);
   const run = $derived(detail?.run ?? null);
   const terminal = $derived(run ? run.status === 'done' || run.status === 'stopped' : false);
   const tel = $derived(telemetryModel(detail?.agentRuns ?? []));
+  const stageMeta = $derived(
+    Object.fromEntries(tel.stages.map((s) => [s.stage, `${fmtDuration(s.durationMs)} · ${s.invocations}×`])),
+  );
   const revertable = $derived(
     ui.config ? Object.entries(ui.config.fsm.states).filter(([, d]) => !d.terminal).map(([name]) => name) : [],
+  );
+  const model = $derived(
+    detail?.agentRuns?.find((a) => a.model)?.model ?? 'claude-opus-4-8',
   );
 
   let revertTo = $state('');
   let revertReason = $state('');
-  // Keep the revert target valid as the config/run changes, without clobbering a user's choice.
   $effect(() => {
     if (revertable.length && !revertable.includes(revertTo)) revertTo = revertable[0]!;
   });
+
+  // live "model thinking" tail — auto-scroll to the newest line as the stream appends
+  let streamEl = $state<HTMLDivElement | undefined>(undefined);
+  $effect(() => {
+    void ui.logs.length;
+    if (streamEl) streamEl.scrollTop = streamEl.scrollHeight;
+  });
+  const liveTail = $derived(ui.logs.slice(-14));
 
   function reasonText(reason: unknown): string {
     return typeof reason === 'string' ? reason : JSON.stringify(reason);
@@ -25,6 +38,12 @@
     return locator && typeof locator === 'object' && typeof (locator as { url?: unknown }).url === 'string'
       ? (locator as { url: string }).url
       : null;
+  }
+  // Escape, then promote `…` spans to <code> and **…** to <mark> so wire lines highlight key pieces.
+  function formatWire(message: string): string {
+    return escapeHtml(message)
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*]+)\*\*/g, '<mark>$1</mark>');
   }
 
   async function submitRevert(e: SubmitEvent) {
@@ -35,10 +54,22 @@
 </script>
 
 {#if !run}
-  <div class="af-empty af-empty-pad">Select a run to inspect it, or start one above.</div>
+  <section class="af-sec" style="border-bottom:0">
+    <div class="af-wrap af-empty-pad">Select a run from the pipeline above, or file a new one.</div>
+  </section>
 {:else}
-  <div class="af-detail-head">
-    <h2>Run {run.id} · {run.issueRef} <span class="af-status af-status-{run.status}">{run.status}</span></h2>
+  <section class="af-sec">
+    <div class="af-wrap">
+  <div class="af-dhead">
+    <div>
+      <h1>Run {run.id} · {run.issueRef}</h1>
+      <div class="sub">
+        {#if run.branch}<span>branch <a href={`#`}>{run.branch}</a></span><span class="sep">·</span>{/if}
+        {#if run.prNumber}<span>PR #{run.prNumber}</span><span class="sep">·</span>{/if}
+        <span>{run.agentRunsCount} agent runs</span><span class="sep">·</span>
+        <span class="af-statline af-stat-{run.status}"><span class="pip"></span>{run.status.replace('_', ' ')}</span>
+      </div>
+    </div>
     <div class="af-controls">
       {#if run.status === 'running'}
         <button type="button" onclick={() => control('pause')}>Pause</button>
@@ -47,99 +78,123 @@
         <button type="button" onclick={() => control('resume')}>Resume</button>
       {/if}
       {#if !terminal}
-        <button type="button" class="af-danger" onclick={() => control('stop')}>Stop</button>
-        <form class="af-revert-form" onsubmit={submitRevert}>
+        <form class="af-revert" onsubmit={submitRevert}>
           <select bind:value={revertTo} aria-label="revert to state">
             {#each revertable as s (s)}<option value={s}>{s}</option>{/each}
           </select>
           <input bind:value={revertReason} placeholder="revert reason" aria-label="revert reason" />
-          <button type="submit" class="af-secondary">Revert</button>
+          <button type="submit">Revert</button>
         </form>
+        <button type="button" class="stop" onclick={() => control('stop')}>Stop</button>
       {:else}
-        <span class="af-reason">terminal — no further control</span>
+        <span class="terminal-note">terminal — no further control</span>
       {/if}
     </div>
   </div>
 
   {#if ui.config}
-    <FsmGraph fsm={ui.config.fsm} currentState={run.currentState} />
+    <StateMachine fsm={ui.config.fsm} {run} transitions={detail?.transitions ?? []} {stageMeta} />
   {/if}
+    </div>
+  </section>
 
-  <div class="af-panels">
-    <section class="af-panel">
-      <h3>Transitions</h3>
-      {#if detail && detail.transitions.length}
-        <table>
-          <thead><tr><th>from</th><th>trigger</th><th>to</th></tr></thead>
-          <tbody>
-            {#each detail.transitions as t (t.id)}
-              <tr>
-                <td>{t.fromState}</td>
-                <td class:af-back={t.backEdge}>{t.trigger}{t.backEdge ? ' ↩' : ''}</td>
-                <td>
-                  {t.toState}
-                  {#if t.reason}<div class="af-reason">{reasonText(t.reason)}</div>{/if}
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      {:else}
-        <p class="af-empty">No transitions yet.</p>
-      {/if}
-    </section>
-
-    <section class="af-panel">
-      <h3>Telemetry</h3>
-      <table>
-        <thead><tr><th>stage</th><th class="af-num">runs</th><th class="af-num">tokens</th><th class="af-num">time</th></tr></thead>
+  <section class="af-sec">
+    <div class="af-wrap af-triptych">
+    <div class="af-col">
+      <span class="af-eyebrow">Telemetry</span>
+      <table class="af-kv">
+        <thead><tr><th>stage</th><th class="num">runs</th><th class="num">tokens</th><th class="num">time</th></tr></thead>
         <tbody>
           {#if tel.stages.length === 0}
             <tr><td colspan="4" class="af-empty">No agent runs yet.</td></tr>
           {/if}
           {#each tel.stages as s (s.stage)}
-            <tr><td>{s.stage}</td><td class="af-num">{s.invocations}</td><td class="af-num">{s.tokens}</td><td class="af-num">{fmtDuration(s.durationMs)}</td></tr>
+            <tr><td>{s.stage}</td><td class="num">{s.invocations}</td><td class="num">{fmtTokens(s.tokens)}</td><td class="num">{fmtDuration(s.durationMs)}</td></tr>
           {/each}
         </tbody>
         <tfoot>
-          <tr><td>total</td><td class="af-num">{tel.totals.invocations}</td><td class="af-num">{tel.totals.tokens}</td><td class="af-num">{fmtDuration(tel.totals.durationMs)}</td></tr>
+          <tr><td>total · {fmtCost(run.costUsed)}</td><td class="num">{tel.totals.invocations}</td><td class="num">{fmtTokens(tel.totals.tokens)}</td><td class="num">{fmtDuration(tel.totals.durationMs)}</td></tr>
         </tfoot>
       </table>
-      <p class="af-reason">cost {fmtCost(run.costUsed)}</p>
-    </section>
+    </div>
 
-    <section class="af-panel">
-      <h3>Artifacts</h3>
+    <div class="af-col">
+      <span class="af-eyebrow">Artifacts</span>
       {#if detail && detail.artifacts.length}
-        <ul class="af-artifacts">
-          {#each detail.artifacts as a, i (i)}
-            <li>
-              <span class="af-kind">{a.kind}</span>
+        {#each detail.artifacts as a, i (i)}
+          <div class="af-art">
+            <span class="k">{a.kind}</span>
+            <span class="v">
               {#if artifactUrl(a.locator)}
                 <a href={artifactUrl(a.locator)} target="_blank" rel="noopener">{artifactUrl(a.locator)}</a>
               {:else}
-                <code>{reasonText(a.locator)}</code>
+                {reasonText(a.locator)}
               {/if}
-            </li>
-          {/each}
-        </ul>
+            </span>
+          </div>
+        {/each}
       {:else}
         <p class="af-empty">No artifacts yet.</p>
       {/if}
-    </section>
+    </div>
 
-    <section class="af-panel af-panel-wide">
-      <h3>Activity log</h3>
-      <div class="af-logs">
+    <div class="af-col">
+      <span class="af-eyebrow">Transitions</span>
+      {#if detail && detail.transitions.length}
+        {#each detail.transitions as t (t.id)}
+          <div class="af-tr" class:back={t.backEdge}>
+            <span class="f">{t.fromState}</span>
+            <span class="ar">{t.backEdge ? '↩' : '→'}</span>
+            <span class="to">{t.toState} <span class="trig">{t.trigger}</span></span>
+            {#if t.reason}<span class="why">{reasonText(t.reason)}</span>{/if}
+          </div>
+        {/each}
+      {:else}
+        <p class="af-empty">No transitions yet.</p>
+      {/if}
+    </div>
+  </div>
+</section>
+
+<section class="af-sec" style="border-bottom:0">
+  <div class="af-wrap af-actgrid">
+    <div class="wirecol">
+      <span class="af-eyebrow"><span>Activity wire</span><span style="color:var(--ink4)">{ui.logs.length} events</span></span>
+      <div class="af-wire">
         {#if ui.logs.length === 0}
           <p class="af-empty">No activity yet.</p>
         {/if}
         {#each ui.logs as line, i (i)}
-          <div class="af-log-line" class:af-log-warn={line.level === 'warn' || line.level === 'error'}>
-            {#if line.stage}<span class="af-log-stage">[{line.stage}] </span>{/if}{line.message}
+          <div class="ln" class:warn={line.level === 'warn' || line.level === 'error'}>
+            <span class="stg">{line.stage ?? '—'}</span>
+            <!-- eslint-disable-next-line svelte/no-at-html-tags — formatWire escapes input then promotes `code`/**mark** -->
+            <span class="msg">{@html formatWire(line.message)}</span>
           </div>
         {/each}
       </div>
-    </section>
+    </div>
+
+    <div class="livecol">
+      <span class="af-eyebrow"><span>Live · model thinking</span>
+        {#if run.status === 'running'}<span class="af-live on" style="font-size:10px"><span class="d"></span>stream</span>{/if}
+      </span>
+      <div class="af-livebox" class:idle={run.status !== 'running'}>
+        <div class="top"><span class="dd"></span><span class="lab">claude · {run.currentState} agent</span><span class="model">{model}</span></div>
+        <div class="af-stream" bind:this={streamEl}>
+          {#if run.status !== 'running'}
+            run is {run.status.replace('_', ' ')} — no live model activity
+          {:else if liveTail.length === 0}
+            <span class="tk">waiting for the next activity… <span class="af-cursor"></span></span>
+          {:else}
+            {#each liveTail as line, i (i)}
+              <!-- eslint-disable-next-line svelte/no-at-html-tags — escaped by formatWire -->
+              <div class="tk" class:warn={line.level === 'warn' || line.level === 'error'}>{@html formatWire(line.message)}</div>
+            {/each}
+            <span class="tk"><span class="af-cursor"></span></span>
+          {/if}
+        </div>
+      </div>
+    </div>
   </div>
+</section>
 {/if}

@@ -5,8 +5,18 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { escapeHtml, fmtCost, fmtDuration, fsmGraphSvg, runsTableModel, telemetryModel } from './render';
-import type { FsmConfig, Run } from './types';
+import {
+  escapeHtml,
+  fmtCost,
+  fmtDuration,
+  fmtTokens,
+  humanizeState,
+  pipelineModel,
+  stepperModel,
+  telemetryModel,
+  traversedBackEdges,
+} from './render';
+import type { FsmConfig, Run, Transition } from './types';
 
 const FSM: FsmConfig = {
   initial: 'triage',
@@ -42,18 +52,6 @@ describe('formatting', () => {
   });
 });
 
-describe('runsTableModel', () => {
-  it('maps run rows with a per-status class', () => {
-    expect(runsTableModel([run({ id: 2, status: 'done', tokensUsed: 3, costUsed: 0 })])).toEqual([
-      { id: 2, issue: 'o/r#1', state: 'plan', status: 'done', statusClass: 'af-status af-status-done', tokens: 3, cost: 0 },
-    ]);
-  });
-
-  it('tolerates an absent list', () => {
-    expect(runsTableModel(undefined)).toEqual([]);
-  });
-});
-
 describe('telemetryModel', () => {
   it('aggregates per stage with a phase breakdown and run totals', () => {
     const model = telemetryModel([
@@ -72,24 +70,64 @@ describe('telemetryModel', () => {
   });
 });
 
-describe('fsmGraphSvg', () => {
-  it('renders a node per state and marks the current + terminal nodes', () => {
-    const svg = fsmGraphSvg(FSM, 'plan');
-    expect(svg.startsWith('<svg')).toBe(true);
-    for (const state of Object.keys(FSM.states)) expect(svg).toContain(`data-state="${state}"`);
-    expect(svg).toMatch(/class="af-node af-node-current"[^>]*data-state="plan"/);
-    expect(svg).toMatch(/af-node-terminal"[^>]*data-state="done"/);
+describe('humanizeState / fmtTokens', () => {
+  it('humanizes state ids', () => {
+    expect(humanizeState('plan_review')).toBe('Plan review');
+    expect(humanizeState('tdd')).toBe('Tdd');
   });
-
-  it('draws forward spine arrows and a labeled back-edge arc', () => {
-    const svg = fsmGraphSvg(FSM, 'triage');
-    expect(svg).toContain('af-edge-forward');
-    expect(svg).toContain('af-edge-back');
-    expect(svg).toContain('>request_changes</text>');
-    expect(svg).toContain('marker id="af-arrow"');
-  });
-
-  it('does not throw on an empty config', () => {
-    expect(fsmGraphSvg({}, undefined)).toContain('<svg');
+  it('compacts token counts', () => {
+    expect(fmtTokens(840)).toBe('840');
+    expect(fmtTokens(6234)).toBe('6.2k');
+    expect(fmtTokens(120_000)).toBe('120k');
+    expect(fmtTokens(undefined)).toBe('0');
   });
 });
+
+describe('pipelineModel', () => {
+  it('buckets runs into flow lanes, an escalation lane and a resolved lane', () => {
+    const runs = [
+      run({ id: 1, currentState: 'plan', status: 'running' }),
+      run({ id: 2, currentState: 'plan_review', status: 'needs_human' }), // → escalation lane
+      run({ id: 3, currentState: 'done', status: 'done' }), // → resolved
+      run({ id: 4, currentState: 'plan', status: 'stopped' }), // → resolved (terminal status wins)
+    ];
+    const m = pipelineModel(runs, FSM);
+    const keys = m.columns.map((c) => c.key);
+    expect(keys).toEqual(['triage', 'plan', 'plan_review', 'needs_human', '__resolved__']); // 'done' (terminal) is not a flow lane
+    expect(m.columns.find((c) => c.key === 'plan')!.runs.map((r) => r.id)).toEqual([1]);
+    expect(m.columns.find((c) => c.key === 'needs_human')!.runs.map((r) => r.id)).toEqual([2]);
+    expect(m.columns.find((c) => c.key === '__resolved__')!.runs.map((r) => r.id)).toEqual([3, 4]);
+  });
+
+  it('hides archived resolved runs unless showArchived, reporting the hidden count', () => {
+    const runs = [run({ id: 3, currentState: 'done', status: 'done' }), run({ id: 5, currentState: 'done', status: 'done' })];
+    const archived = new Set([5]);
+    expect(pipelineModel(runs, FSM, { archived }).columns.at(-1)!.runs.map((r) => r.id)).toEqual([3]);
+    expect(pipelineModel(runs, FSM, { archived }).archivedCount).toBe(1);
+    expect(pipelineModel(runs, FSM, { archived, showArchived: true }).columns.at(-1)!.runs.map((r) => r.id)).toEqual([3, 5]);
+  });
+});
+
+describe('stepperModel', () => {
+  it('marks done / current / todo along the forward spine', () => {
+    expect(stepperModel(FSM, 'plan').map((n) => n.status)).toEqual(['done', 'current', 'todo', 'todo']);
+  });
+  it('leaves nothing current when the state is off the spine (escalation)', () => {
+    expect(stepperModel(FSM, 'needs_human').every((n) => n.status === 'todo')).toBe(true);
+  });
+});
+
+describe('traversedBackEdges', () => {
+  it('returns distinct traversed back-edges, newest trigger wins', () => {
+    const t = (over: Partial<Transition>): Transition => ({
+      id: 1, fromState: 'plan_review', toState: 'plan', trigger: 'request_changes', reason: null, backEdge: true, createdAt: '', ...over,
+    });
+    const edges = traversedBackEdges([
+      t({ id: 1 }),
+      t({ id: 2, fromState: 'plan', toState: 'plan_review', trigger: 'proceed', backEdge: false }), // forward, ignored
+      t({ id: 3, trigger: 'request_changes_again' }), // same from→to, overrides label
+    ]);
+    expect(edges).toEqual([{ from: 'plan_review', to: 'plan', label: 'request_changes_again' }]);
+  });
+});
+
