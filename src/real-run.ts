@@ -11,9 +11,10 @@
  */
 
 import { createSystemPromptFn } from './agent/prompts';
-import { AgentRunner, type AgentRunnerOptions } from './agent/runner';
+import { AgentRunner, type AgentRunnerOptions, type PhaseActivity } from './agent/runner';
 import { DEFAULT_MODEL_MAP, SubprocessStageExecutor, type SubprocessExecutorOptions } from './agent/subprocess-executor';
 import { GitHubCli } from './integration/github-cli';
+import type { GitHub } from './integration/github';
 import type { AgentsConfig } from './fsm/config';
 import type { AgentPhase, Repository } from './store/repository';
 
@@ -64,22 +65,44 @@ export function forceCheapModels(agents: AgentsConfig): AgentsConfig {
   return out;
 }
 
-/** Build the Agent Runner for a real, token-spending run. Throws if no repo is given. */
-export function buildRealRunner(repo: Repository, agents: AgentsConfig, config: RealRunConfig): AgentRunner {
+/** Build the `gh`/`git`-backed adapter for a real run. Exposed so the CLI can share one instance
+ * between the runner and the Reply Poller. Throws if no repo is given. */
+export function buildRealGitHub(config: RealRunConfig): GitHubCli {
   if (!config.repo) throw new Error('a real run needs a repo (owner/name); pass --repo or a start issueRef');
+  return new GitHubCli({
+    repo: config.repo,
+    workingRoot: config.workingRoot,
+    ...(config.cloneUrl ? { cloneUrl: config.cloneUrl } : {}),
+    ...(config.localRepo ? { localRepo: config.localRepo } : {}),
+  });
+}
+
+export interface BuildRealRunnerOptions {
+  /** Receives the harness's live progress (the "what is the agent doing now" feed); also persisted. */
+  onActivity?: (activity: PhaseActivity) => void;
+  /** A pre-built GitHub adapter to reuse (e.g. shared with the Reply Poller). Built from `config` if omitted. */
+  github?: GitHub;
+}
+
+/**
+ * Build the Agent Runner for a real, token-spending run. Throws if no repo is given (unless a
+ * `github` adapter is injected). Pass `onActivity` to receive the harness's live progress.
+ */
+export function buildRealRunner(
+  repo: Repository,
+  agents: AgentsConfig,
+  config: RealRunConfig,
+  options: BuildRealRunnerOptions = {},
+): AgentRunner {
   const executorOpts: SubprocessExecutorOptions = {
     extraArgs: config.permissionMode ? ['--permission-mode', config.permissionMode] : [],
   };
   if (config.frontierModel) executorOpts.modelMap = { ...DEFAULT_MODEL_MAP, frontier: config.frontierModel };
   if (config.timeoutMs !== undefined) executorOpts.timeoutMs = config.timeoutMs;
   const executor = new SubprocessStageExecutor(executorOpts);
-  const github = new GitHubCli({
-    repo: config.repo,
-    workingRoot: config.workingRoot,
-    ...(config.cloneUrl ? { cloneUrl: config.cloneUrl } : {}),
-    ...(config.localRepo ? { localRepo: config.localRepo } : {}),
-  });
+  const github = options.github ?? buildRealGitHub(config);
   const recipe = config.cheap ? forceCheapModels(agents) : agents;
-  const options: AgentRunnerOptions = { systemPrompt: createSystemPromptFn(), baseBranch: config.baseBranch };
-  return new AgentRunner(repo, executor, recipe, github, options);
+  const runnerOptions: AgentRunnerOptions = { systemPrompt: createSystemPromptFn(), baseBranch: config.baseBranch };
+  if (options.onActivity) runnerOptions.onActivity = options.onActivity;
+  return new AgentRunner(repo, executor, recipe, github, runnerOptions);
 }

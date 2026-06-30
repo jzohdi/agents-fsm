@@ -19,7 +19,7 @@
 
 import { spawn } from 'node:child_process';
 
-import { FatalExecutorError, type AgentRunRequest, type AgentRunResult, type StageExecutor } from './executor';
+import { FatalExecutorError, type AgentActivity, type AgentRunRequest, type AgentRunResult, type StageExecutor } from './executor';
 
 /** The result of running a subprocess to completion. */
 export interface ProcessResult {
@@ -28,12 +28,22 @@ export interface ProcessResult {
   stderr: string;
 }
 
+/** Options for one {@link SpawnProcess} invocation. */
+export interface SpawnOptions {
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  timeoutMs?: number;
+  /**
+   * Optional sink called once per complete stdout line *as it arrives* (newline-delimited, the
+   * separator the harness's stream-json uses). It runs alongside — not instead of — full-output
+   * buffering, so the terminal result is still parsed from the complete `stdout`. This is what lets
+   * the executor surface live progress without giving up the buffered final-result parse.
+   */
+  onStdoutLine?: (line: string) => void;
+}
+
 /** Injectable process runner: run `command args` in `cwd`, resolve with its captured output. */
-export type SpawnProcess = (
-  command: string,
-  args: string[],
-  options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs?: number },
-) => Promise<ProcessResult>;
+export type SpawnProcess = (command: string, args: string[], options: SpawnOptions) => Promise<ProcessResult>;
 
 /**
  * Default per-invocation wall-clock cap (20 min). A single stage's harness invocation can otherwise
@@ -149,7 +159,11 @@ export class SubprocessStageExecutor implements StageExecutor {
 
   async run(req: AgentRunRequest): Promise<AgentRunResult> {
     const cwd = req.workingDir ?? this.defaultWorkingDir;
-    const result = await this.spawnProcess(this.command, this.buildArgs(req), { cwd, env: process.env, timeoutMs: this.timeoutMs });
+    const options: SpawnOptions = { cwd, env: process.env, timeoutMs: this.timeoutMs };
+    // Only stream when someone is listening: parse each stream-json line and forward the activities
+    // it summarizes to. Streaming is pure observability — a throwing sink must never affect the run.
+    if (req.onActivity) options.onStdoutLine = (line) => emitActivities(line, req.onActivity!);
+    const result = await this.spawnProcess(this.command, this.buildArgs(req), options);
 
     if (result.code !== 0) {
       const detail = result.stderr.trim() || result.stdout.trim() || '(no output)';
@@ -163,6 +177,111 @@ export class SubprocessStageExecutor implements StageExecutor {
 /** The user-message text for one invocation: the structured input, JSON-encoded. */
 function userPrompt(input: unknown): string {
   return typeof input === 'string' ? input : JSON.stringify(input);
+}
+
+// --- live activity (pure, exported for direct tests) ------------------------
+
+/** Parse one stream-json line and forward every {@link AgentActivity} it yields, swallowing both
+ * JSON-parse noise and a throwing sink — live progress must never break the run. */
+function emitActivities(line: string, onActivity: (a: AgentActivity) => void): void {
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return; // non-JSON noise line; ignore (same tolerance as the result parser)
+  }
+  for (const activity of summarizeEvent(parsed)) {
+    try {
+      onActivity(activity);
+    } catch {
+      // A throwing subscriber must never wedge the harness stream; observability is best-effort.
+    }
+  }
+}
+
+/** Longest activity summary we surface; harness text is snipped to keep a log line readable. */
+const SUMMARY_MAX = 140;
+
+/**
+ * Turn one parsed stream-json event into zero or more human-readable activities. Pure and exported
+ * so the (many) harness event shapes are unit-tested directly. An `assistant` turn can carry several
+ * content blocks (text + tool calls), so this returns a list, one activity per block. Unknown event
+ * types yield nothing rather than noise.
+ */
+export function summarizeEvent(parsed: unknown): AgentActivity[] {
+  if (!isObject(parsed)) return [];
+  switch (parsed.type) {
+    case 'system':
+      return [{ kind: 'init', summary: `session ${asString(parsed.subtype) ?? 'started'}`, detail: parsed }];
+    case 'assistant':
+    case 'user':
+      return summarizeMessage(parsed);
+    case 'result':
+      return [{ kind: 'result', summary: parsed.is_error === true ? 'run errored' : 'run complete' }];
+    default:
+      return [];
+  }
+}
+
+/** Summarize the content blocks of an `assistant`/`user` message event. */
+function summarizeMessage(event: Record<string, unknown>): AgentActivity[] {
+  const message = event.message;
+  const content = isObject(message) ? message.content : undefined;
+  if (!Array.isArray(content)) return [];
+
+  const out: AgentActivity[] = [];
+  for (const block of content) {
+    if (!isObject(block)) continue;
+    switch (block.type) {
+      case 'text': {
+        const text = asString(block.text);
+        if (text && text.trim()) out.push({ kind: 'assistant', summary: `assistant: ${snip(text)}`, detail: block });
+        break;
+      }
+      case 'thinking': {
+        const thinking = asString(block.thinking);
+        out.push({ kind: 'thinking', summary: thinking ? `thinking: ${snip(thinking)}` : 'thinking…', detail: block });
+        break;
+      }
+      case 'tool_use': {
+        const name = asString(block.name) ?? 'tool';
+        const target = toolTarget(block.input);
+        out.push({ kind: 'tool_use', summary: `tool: ${name}${target ? ` ${target}` : ''}`, detail: block });
+        break;
+      }
+      case 'tool_result': {
+        out.push({ kind: 'tool_result', summary: block.is_error === true ? 'tool result: error' : 'tool result', detail: block });
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return out;
+}
+
+/** Pull a short, recognizable target from a tool's input (the file, command, or pattern it acts on). */
+function toolTarget(input: unknown): string | undefined {
+  if (!isObject(input)) return undefined;
+  const candidate = input.file_path ?? input.path ?? input.command ?? input.pattern ?? input.url ?? input.notebook_path;
+  const text = asString(candidate);
+  return text ? snip(text.split('\n')[0]!) : undefined;
+}
+
+/** First line of `text`, collapsed and truncated to {@link SUMMARY_MAX} for a tidy one-line summary. */
+function snip(text: string): string {
+  const firstLine = text.trim().split('\n')[0]!.trim();
+  return firstLine.length > SUMMARY_MAX ? `${firstLine.slice(0, SUMMARY_MAX - 1)}…` : firstLine;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
 }
 
 // --- output parsing (pure, exported for direct tests) -----------------------
@@ -322,17 +441,15 @@ function sumTokens(usage: Record<string, unknown> | undefined): number {
  * the result is marked non-zero with a timeout note, so the executor turns it into an escalation
  * rather than letting one stage run forever.
  */
-export function defaultSpawnProcess(
-  command: string,
-  args: string[],
-  options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs?: number },
-): Promise<ProcessResult> {
+export function defaultSpawnProcess(command: string, args: string[], options: SpawnOptions): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd: options.cwd, env: options.env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     let timedOut = false;
     let timer: NodeJS.Timeout | undefined;
+    // Carry any partial trailing line across chunks so the live sink only ever sees whole lines.
+    let lineBuf = '';
     if (options.timeoutMs && options.timeoutMs > 0) {
       timer = setTimeout(() => {
         timedOut = true;
@@ -340,7 +457,14 @@ export function defaultSpawnProcess(
         setTimeout(() => child.kill('SIGKILL'), 5000).unref(); // force-kill if it ignores SIGTERM
       }, options.timeoutMs);
     }
-    child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
+    child.stdout.on('data', (chunk: Buffer) => {
+      const text = chunk.toString();
+      stdout += text;
+      if (!options.onStdoutLine) return;
+      const { lines, rest } = takeCompleteLines(lineBuf + text);
+      lineBuf = rest;
+      for (const line of lines) options.onStdoutLine(line);
+    });
     child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
     child.on('error', (err) => {
       if (timer) clearTimeout(timer);
@@ -348,6 +472,7 @@ export function defaultSpawnProcess(
     });
     child.on('close', (code) => {
       if (timer) clearTimeout(timer);
+      if (options.onStdoutLine && lineBuf.length > 0) options.onStdoutLine(lineBuf); // flush a final newline-less line
       if (timedOut) {
         resolve({ code: code ?? 124, stdout, stderr: `${stderr}\n[killed: exceeded ${options.timeoutMs}ms timeout]` });
       } else {
@@ -355,4 +480,16 @@ export function defaultSpawnProcess(
       }
     });
   });
+}
+
+/**
+ * Split `buffer` into its complete (newline-terminated) lines plus the trailing remainder that has
+ * not been terminated yet. Pure and exported so the cross-chunk buffering the live stream depends on
+ * is tested directly, without timing a real subprocess. The remainder is fed back in with the next
+ * chunk; the caller flushes it as a final line on close.
+ */
+export function takeCompleteLines(buffer: string): { lines: string[]; rest: string } {
+  const parts = buffer.split('\n');
+  const rest = parts.pop() ?? ''; // the last element is the unterminated remainder ('' if buffer ended in \n)
+  return { lines: parts, rest };
 }

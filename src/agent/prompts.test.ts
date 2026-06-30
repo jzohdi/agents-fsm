@@ -17,6 +17,7 @@ import { createSystemPromptFn } from './prompts';
 const BASE = 'automated software-delivery pipeline';
 const ENVELOPE_CONTRACT = 'Output contract — work envelope';
 const VERDICT_CONTRACT = 'Output contract — review verdict';
+const TRIAGE_CONTRACT = 'Output contract — triage decision';
 const SELF_REVIEW = 'This phase: self-review (correctness)';
 const SIMPLIFY = 'This phase: fix and simplify';
 
@@ -55,6 +56,13 @@ describe('createSystemPromptFn — composition', () => {
   it('composes a distinct role per stage', () => {
     expect(systemPrompt('triage', 'produce')).toContain('## Your stage: triage');
     expect(systemPrompt('code_review', 'produce')).toContain('## Your stage: code review');
+  });
+
+  it('gives triage its own decision contract, not the work envelope or verdict', () => {
+    const prompt = systemPrompt('triage', 'produce');
+    expect(prompt).toContain(TRIAGE_CONTRACT);
+    expect(prompt).not.toContain(ENVELOPE_CONTRACT);
+    expect(prompt).not.toContain(VERDICT_CONTRACT);
   });
 
   it('throws for a stage with no role prompt (fail fast, never a half-formed prompt)', () => {

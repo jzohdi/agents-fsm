@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { parseEnvelope, parseReviewVerdict } from './envelope';
+import { parseEnvelope, parseReviewVerdict, parseTriageOutput } from './envelope';
 
 describe('parseEnvelope', () => {
   it('accepts a minimal envelope', () => {
@@ -72,5 +72,42 @@ describe('parseReviewVerdict', () => {
 
   it('rejects unknown keys (strict)', () => {
     expect(parseReviewVerdict({ acceptable: true, verdict: 'lgtm' }).ok).toBe(false);
+  });
+});
+
+describe('parseTriageOutput', () => {
+  it('accepts a bare proceed', () => {
+    expect(parseTriageOutput({ decision: 'proceed' })).toEqual({ ok: true, value: { decision: 'proceed' } });
+  });
+
+  it('accepts an issueUpdate (body required, title optional) on any decision', () => {
+    expect(parseTriageOutput({ decision: 'proceed', issueUpdate: { body: 'scoped spec' } }).ok).toBe(true);
+    expect(parseTriageOutput({ decision: 'proceed', issueUpdate: { title: 'T', body: 'B' } }).ok).toBe(true);
+    expect(parseTriageOutput({ decision: 'proceed', issueUpdate: { title: 'T' } }).ok).toBe(false); // body required
+  });
+
+  it('requires non-empty questions for clarify', () => {
+    expect(parseTriageOutput({ decision: 'clarify', questions: ['Which DB?'] }).ok).toBe(true);
+    expect(parseTriageOutput({ decision: 'clarify' }).ok).toBe(false);
+    expect(parseTriageOutput({ decision: 'clarify', questions: [] }).ok).toBe(false);
+  });
+
+  it('requires at least two subIssues for split, validating the handoff index', () => {
+    const two = [{ title: 'a', body: 'x' }, { title: 'b', body: 'y' }];
+    expect(parseTriageOutput({ decision: 'split', subIssues: two }).ok).toBe(true);
+    expect(parseTriageOutput({ decision: 'split', subIssues: two, handoff: 1 }).ok).toBe(true);
+    expect(parseTriageOutput({ decision: 'split', subIssues: [{ title: 'a', body: 'x' }] }).ok).toBe(false); // need 2+
+    expect(parseTriageOutput({ decision: 'split', subIssues: two, handoff: 2 }).ok).toBe(false); // out of range
+  });
+
+  it('rejects an unknown decision and unknown top-level keys (strict)', () => {
+    expect(parseTriageOutput({ decision: 'maybe' }).ok).toBe(false);
+    expect(parseTriageOutput({ decision: 'proceed', surprise: 1 }).ok).toBe(false);
+  });
+
+  it('reports a readable error naming the offending field', () => {
+    const r = parseTriageOutput({ decision: 'clarify' });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain('questions');
   });
 });

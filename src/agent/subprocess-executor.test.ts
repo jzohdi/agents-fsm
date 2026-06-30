@@ -9,12 +9,14 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { FatalExecutorError, type AgentRunRequest } from './executor';
+import { FatalExecutorError, type AgentActivity, type AgentRunRequest } from './executor';
 import {
   defaultSpawnProcess,
   HarnessError,
   parseHarnessOutput,
   SubprocessStageExecutor,
+  summarizeEvent,
+  takeCompleteLines,
   type ProcessResult,
   type SpawnProcess,
 } from './subprocess-executor';
@@ -262,4 +264,128 @@ describe('parseHarnessOutput', () => {
     const noCost = JSON.stringify({ type: 'result', result: '{}' });
     expect(parseHarnessOutput(noCost).usage.cost).toBeUndefined();
   });
+});
+
+describe('summarizeEvent — live activity', () => {
+  it('summarizes a session-init system event', () => {
+    expect(summarizeEvent({ type: 'system', subtype: 'init', session_id: 's1' })).toEqual([
+      { kind: 'init', summary: 'session init', detail: { type: 'system', subtype: 'init', session_id: 's1' } },
+    ]);
+  });
+
+  it('summarizes assistant text, snipping to the first line', () => {
+    const event = { type: 'assistant', message: { content: [{ type: 'text', text: 'Reading the plan\nthen editing' }] } };
+    const [activity] = summarizeEvent(event);
+    expect(activity).toMatchObject({ kind: 'assistant', summary: 'assistant: Reading the plan' });
+  });
+
+  it('describes a tool call by name and its target file', () => {
+    const event = { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Edit', input: { file_path: 'src/foo.ts' } }] } };
+    expect(summarizeEvent(event)[0]).toMatchObject({ kind: 'tool_use', summary: 'tool: Edit src/foo.ts' });
+  });
+
+  it('falls back to other input keys for the tool target (command, pattern)', () => {
+    const bash = { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'npm test' } }] } };
+    expect(summarizeEvent(bash)[0]!.summary).toBe('tool: Bash npm test');
+    const grep = { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Grep', input: { pattern: 'TODO' } }] } };
+    expect(summarizeEvent(grep)[0]!.summary).toBe('tool: Grep TODO');
+  });
+
+  it('emits one activity per content block, in order', () => {
+    const event = {
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'Editing now' }, { type: 'tool_use', name: 'Write', input: { path: 'a.md' } }] },
+    };
+    expect(summarizeEvent(event).map((a) => a.kind)).toEqual(['assistant', 'tool_use']);
+  });
+
+  it('summarizes a thinking block and tool results (incl. errors)', () => {
+    const thinking = { type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'I should check the tests' }] } };
+    expect(summarizeEvent(thinking)[0]).toMatchObject({ kind: 'thinking', summary: 'thinking: I should check the tests' });
+    const result = { type: 'user', message: { content: [{ type: 'tool_result', is_error: true }] } };
+    expect(summarizeEvent(result)[0]).toMatchObject({ kind: 'tool_result', summary: 'tool result: error' });
+  });
+
+  it('marks the terminal result event', () => {
+    expect(summarizeEvent({ type: 'result', is_error: false })).toEqual([{ kind: 'result', summary: 'run complete' }]);
+    expect(summarizeEvent({ type: 'result', is_error: true })[0]!.summary).toBe('run errored');
+  });
+
+  it('ignores empty assistant text and unknown event shapes', () => {
+    expect(summarizeEvent({ type: 'assistant', message: { content: [{ type: 'text', text: '   ' }] } })).toEqual([]);
+    expect(summarizeEvent({ type: 'mystery' })).toEqual([]);
+    expect(summarizeEvent('not an object')).toEqual([]);
+  });
+});
+
+/** A fake spawn that streams the given stdout line-by-line through `onStdoutLine`, then resolves. */
+function streamingSpawn(stdout: string, code = 0): SpawnProcess {
+  return (_command, _args, options) => {
+    if (options.onStdoutLine) for (const line of stdout.split('\n')) options.onStdoutLine(line);
+    return Promise.resolve({ code, stdout, stderr: '' });
+  };
+}
+
+describe('SubprocessStageExecutor — live activity streaming', () => {
+  it('forwards summarized activities to onActivity as lines stream in', async () => {
+    const stdout = [
+      JSON.stringify({ type: 'system', subtype: 'init' }),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: 'README.md' } }] } }),
+      JSON.stringify({ type: 'result', is_error: false, result: '{"requestedTransition":"proceed"}', usage: { input_tokens: 1 } }),
+    ].join('\n');
+    const seen: AgentActivity[] = [];
+    const exec = new SubprocessStageExecutor({ spawnProcess: streamingSpawn(stdout) });
+
+    const result = await exec.run(req({ onActivity: (a) => seen.push(a) }));
+
+    expect(seen.map((a) => a.summary)).toEqual(['session init', 'tool: Read README.md', 'run complete']);
+    // Streaming does not disturb the buffered final-result parse.
+    expect(result.output).toEqual({ requestedTransition: 'proceed' });
+  });
+
+  it('does not stream (no onStdoutLine wired) when no onActivity is given', async () => {
+    let lineSinkWired = false;
+    const spawnProcess: SpawnProcess = (_c, _a, options) => {
+      lineSinkWired = options.onStdoutLine !== undefined;
+      return Promise.resolve({ code: 0, stdout: streamJson('{}'), stderr: '' });
+    };
+    await new SubprocessStageExecutor({ spawnProcess }).run(req());
+    expect(lineSinkWired).toBe(false);
+  });
+
+  it('a throwing onActivity never breaks the run', async () => {
+    const exec = new SubprocessStageExecutor({ spawnProcess: streamingSpawn(streamJson('{"requestedTransition":"approve"}')) });
+    const result = await exec.run(req({ onActivity: () => { throw new Error('subscriber boom'); } }));
+    expect(result.output).toEqual({ requestedTransition: 'approve' });
+  });
+});
+
+describe('takeCompleteLines — cross-chunk buffering', () => {
+  it('returns complete lines and the unterminated remainder', () => {
+    expect(takeCompleteLines('a\nb\nc')).toEqual({ lines: ['a', 'b'], rest: 'c' });
+    expect(takeCompleteLines('a\nb\n')).toEqual({ lines: ['a', 'b'], rest: '' });
+    expect(takeCompleteLines('abc')).toEqual({ lines: [], rest: 'abc' });
+    expect(takeCompleteLines('')).toEqual({ lines: [], rest: '' });
+  });
+
+  it('reassembles a line split across two chunks when the remainder is fed back', () => {
+    // Simulate the data handler: chunk 1 carries a partial line, chunk 2 completes it.
+    const first = takeCompleteLines('' + 'par');
+    expect(first).toEqual({ lines: [], rest: 'par' });
+    const second = takeCompleteLines(first.rest + 'tial\ndone\n');
+    expect(second).toEqual({ lines: ['partial', 'done'], rest: '' });
+  });
+});
+
+describe('defaultSpawnProcess — line streaming', () => {
+  it('emits complete stdout lines and flushes a final newline-less fragment', async () => {
+    const lines: string[] = [];
+    const result = await defaultSpawnProcess(
+      'node',
+      ['-e', 'process.stdout.write("alpha\\nbeta\\n"); process.stdout.write("gamma")'],
+      { cwd: process.cwd(), env: process.env, onStdoutLine: (line) => lines.push(line) },
+    );
+    expect(result.code).toBe(0);
+    expect(lines).toEqual(['alpha', 'beta', 'gamma']);
+  }, 5000);
 });

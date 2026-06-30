@@ -26,12 +26,15 @@ import {
   type Comment,
   type CommitAndPushInput,
   type CommitRef,
+  type CreateIssueInput,
   type GitHub,
   type Issue,
+  type IssueComment,
   type OpenPrInput,
   type PrepareWorkingTreeInput,
   type PullRequest,
   type ReadDiffInput,
+  type UpdateIssueInput,
   type UpdatePrInput,
   type WorkingTree,
 } from './github';
@@ -100,10 +103,36 @@ export class GitHubCli implements GitHub {
   // --- GitHub API (needs network; gated behind RUN_REAL_GITHUB in tests) ------
 
   async readIssue(issueRef: string): Promise<Issue> {
-    const number = issueNumber(issueRef);
-    const json = await this.gh(['issue', 'view', String(number), '--repo', this.repo, '--json', 'number,title,body']);
-    const parsed = JSON.parse(json) as { number: number; title: string; body: string };
-    return { ref: issueRef, number: parsed.number, title: parsed.title, body: parsed.body ?? '' };
+    return this.viewIssue(issueNumber(issueRef), issueRef);
+  }
+
+  async updateIssue(input: UpdateIssueInput): Promise<Issue> {
+    const args = ['issue', 'edit', String(input.number), '--repo', this.repo];
+    if (input.title !== undefined) args.push('--title', input.title);
+    if (input.body !== undefined) args.push('--body', input.body);
+    await this.gh(args);
+    return this.viewIssue(input.number);
+  }
+
+  async createIssue(input: CreateIssueInput): Promise<Issue> {
+    // `gh issue create` prints the new issue's URL on stdout; the number is its trailing path segment.
+    const stdout = await this.gh(['issue', 'create', '--repo', this.repo, '--title', input.title, '--body', input.body]);
+    const number = issueNumberFromUrl(stdout.trim());
+    return { ref: `${this.repo}#${number}`, number, title: input.title, body: input.body };
+  }
+
+  async postIssueComment(input: { issueNumber: number; body: string }): Promise<IssueComment> {
+    // Use the REST API directly so we get the created comment's id, author, and timestamp back —
+    // the fields the reply poller anchors on.
+    const json = await this.gh(['api', `repos/${this.repo}/issues/${input.issueNumber}/comments`, '-f', `body=${input.body}`]);
+    const parsed = JSON.parse(json) as RawIssueComment;
+    return mapIssueComment(parsed, input.issueNumber, input.body);
+  }
+
+  async listIssueComments(issueNumber: number): Promise<IssueComment[]> {
+    const json = await this.gh(['api', `repos/${this.repo}/issues/${issueNumber}/comments?per_page=100`]);
+    const parsed = JSON.parse(json) as RawIssueComment[];
+    return parsed.map((c) => mapIssueComment(c, issueNumber, c.body ?? ''));
   }
 
   async findOpenPrForBranch(branch: string): Promise<PullRequest | null> {
@@ -197,6 +226,13 @@ export class GitHubCli implements GitHub {
 
   // --- helpers ----------------------------------------------------------------
 
+  /** View an issue by number, building its `ref` from the configured repo unless one is supplied. */
+  private async viewIssue(number: number, ref?: string): Promise<Issue> {
+    const json = await this.gh(['issue', 'view', String(number), '--repo', this.repo, '--json', 'number,title,body']);
+    const parsed = JSON.parse(json) as { number: number; title: string; body: string };
+    return { ref: ref ?? `${this.repo}#${parsed.number}`, number: parsed.number, title: parsed.title, body: parsed.body ?? '' };
+  }
+
   private async viewPr(prNumber: number): Promise<PullRequest> {
     const json = await this.gh([
       'pr', 'view', String(prNumber), '--repo', this.repo,
@@ -267,6 +303,25 @@ export function issueNumber(issueRef: string): number {
   const n = Number.parseInt(afterHash, 10);
   if (!Number.isInteger(n)) throw new Error(`cannot parse an issue number from ${JSON.stringify(issueRef)}`);
   return n;
+}
+
+/** The raw shape of a GitHub issue-comment object (`gh api .../comments`); extra fields ignored. */
+interface RawIssueComment {
+  id: number;
+  user: { login: string } | null;
+  body?: string;
+  created_at: string;
+}
+
+function mapIssueComment(raw: RawIssueComment, issueNumber: number, body: string): IssueComment {
+  return { id: raw.id, issueNumber, author: raw.user?.login ?? 'unknown', body, createdAt: raw.created_at };
+}
+
+/** Parse the issue number from a `gh issue create` URL like `https://github.com/o/r/issues/57`. */
+export function issueNumberFromUrl(url: string): number {
+  const m = /\/(\d+)(?:[?#].*)?\s*$/.exec(url);
+  if (!m) throw new Error(`cannot parse an issue number from created-issue output ${JSON.stringify(url)}`);
+  return Number(m[1]);
 }
 
 /** Default {@link ExecFn}: a promise wrapper over `child_process.execFile` that never rejects on

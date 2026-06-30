@@ -99,9 +99,19 @@ describe('EventLoop + real prompts + SubprocessStageExecutor (fake harness)', ()
       const where = `${stage}:${phase}`;
       expect(system, where).toContain('automated software-delivery pipeline');
       expect(system, where).toContain('## Your stage:');
-      const isReview = phase === 'self_review';
-      expect(system, where).toContain(isReview ? 'Output contract — review verdict' : 'Output contract — work envelope');
-      expect(system, where).not.toContain(isReview ? 'Output contract — work envelope' : 'Output contract — review verdict');
+      // Each (stage, phase) carries exactly its matching output contract: the triage decision contract
+      // for triage, the verdict for self_review, the work envelope otherwise.
+      const expected =
+        stage === 'triage'
+          ? 'Output contract — triage decision'
+          : phase === 'self_review'
+            ? 'Output contract — review verdict'
+            : 'Output contract — work envelope';
+      const others = ['Output contract — triage decision', 'Output contract — review verdict', 'Output contract — work envelope'].filter(
+        (c) => c !== expected,
+      );
+      expect(system, where).toContain(expected);
+      for (const other of others) expect(system, where).not.toContain(other);
       // The issue (source of intent) reached the harness input on every invocation, not just the prompt.
       expect(issue, where).toMatchObject({ number: 1 });
     }

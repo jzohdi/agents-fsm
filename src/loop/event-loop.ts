@@ -25,6 +25,13 @@ import { FatalExecutorError } from '../agent/executor';
 /** The single event type that drives the MVP loop: "advance this run's current stage." */
 export const EVENT_ADVANCE = 'advance';
 
+/**
+ * Trigger recorded on the self-transition that parks a run awaiting a human reply (triage `clarify`).
+ * Its transition `reason` carries the data the Reply Poller anchors on (issue, question comment, bot
+ * login), so the poller reads it straight from the log — no separate marker store.
+ */
+export const AWAIT_INPUT_TRIGGER = 'await_input';
+
 export interface EventLoopOptions {
   /** Called after every committed transition — the seam the CLI/dashboard stream subscribes to. */
   onTransition?: (transition: Transition, run: Run) => void;
@@ -176,6 +183,12 @@ export class EventLoop {
       this.escalate(run, event, outcome.trigger, outcome.reason);
       return;
     }
+    if (outcome.kind === 'await_input') {
+      // triage asked the human a question on the issue. Park the run; the Reply Poller re-arms it
+      // when a human replies. Like escalate, this is a loop-owned outcome the engine never sees.
+      this.parkAwaitingInput(run, event, outcome.reason);
+      return;
+    }
 
     const envelope = outcome.envelope;
     // Persisted flags + this stage's flags drive the engine's skip decisions (README §2).
@@ -245,6 +258,45 @@ export class EventLoop {
     });
 
     this.emit(transition, run.id);
+  }
+
+  /**
+   * Park a run that asked the human a question (`triage` → `clarify`). Records a self-transition that
+   * keeps the run in its current stage and sets status `awaiting_input`, and — deliberately — enqueues
+   * NO follow-up event, so the run holds no executor until re-armed. The transition is keyed to the
+   * event id like any other, so a replayed event is finalized rather than re-run (at-least-once safe).
+   * The Reply Poller calls {@link resumeAwaitingInput} when a human replies on the issue.
+   */
+  private parkAwaitingInput(run: Run, event: EventRow, reason: unknown): void {
+    const transition = this.repo.commitTransition({
+      runId: run.id,
+      fromState: run.currentState,
+      toState: run.currentState, // stays put; a human reply re-runs this same stage (triage)
+      trigger: AWAIT_INPUT_TRIGGER,
+      reason,
+      status: 'awaiting_input',
+      eventId: event.id,
+    });
+    this.emit(transition, run.id);
+  }
+
+  /**
+   * Re-arm an `awaiting_input` run after a human replied on the issue: flip it back to `running` and
+   * enqueue an advance event so the loop re-runs the stage that asked (triage), which now reads the
+   * reply from the issue thread. Re-running is safe because every triage side effect is idempotent.
+   * Called by the Reply Poller; the two writes are one transaction so the run is never `running`
+   * without a pending event to act on.
+   */
+  resumeAwaitingInput(runId: number): void {
+    const run = this.repo.getRun(runId);
+    if (!run) throw new Error(`resumeAwaitingInput: run ${runId} not found`);
+    if (run.status !== 'awaiting_input') {
+      throw new Error(`resumeAwaitingInput: run ${runId} is "${run.status}", not awaiting_input`);
+    }
+    this.repo.transaction(() => {
+      this.repo.setRunStatus(runId, 'running');
+      this.repo.enqueueEvent({ runId, type: EVENT_ADVANCE });
+    });
   }
 
   /** Force a run to the escalation state (needs_human). Used by loop-owned guards. */

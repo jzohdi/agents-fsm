@@ -43,6 +43,37 @@ export interface ReviewVerdict {
   notes?: unknown;
 }
 
+/** A proposed smaller issue when triage decides a too-large issue should be split. */
+export interface SubIssue {
+  title: string;
+  body: string;
+}
+
+/**
+ * The structured output of the `triage` stage. Triage is a router/editor, not a producer, so it
+ * returns its own contract rather than the generic {@link AgentEnvelope}: it can rewrite the issue
+ * into a well-scoped spec (`issueUpdate`) and then choose one of three routes (README §0 triage):
+ *  - `proceed` — the issue is clear; sign off and hand to `plan`.
+ *  - `clarify` — ask the human; `questions` are posted as an issue comment and the run waits for a reply.
+ *  - `split`   — the issue is too large; `subIssues` are opened as new issues. With `handoff` set,
+ *                this run continues on that child; without it, the run escalates for the operator.
+ * The runner performs the GitHub side effects (agents never touch GitHub directly) and maps the
+ * decision onto the FSM.
+ */
+export interface TriageOutput {
+  decision: 'proceed' | 'clarify' | 'split';
+  /** Optional improved issue title/body, applied before routing. `body` is required when present. */
+  issueUpdate?: { title?: string; body: string };
+  /** Required for `clarify`: the questions a human must answer, posted as one issue comment. */
+  questions?: string[];
+  /** Required for `split`: the smaller issues to open (at least two). */
+  subIssues?: SubIssue[];
+  /** Optional for `split`: index into `subIssues` of the child this run should continue on. */
+  handoff?: number;
+  /** Optional human-facing note posted as an issue comment (sign-off rationale / split summary). */
+  message?: string;
+}
+
 const artifactRefSchema = z.object({ kind: z.string(), locator: z.unknown() }).strict();
 
 const envelopeSchema = z
@@ -63,6 +94,33 @@ const reviewVerdictSchema = z
   })
   .strict();
 
+const subIssueSchema = z.object({ title: z.string().min(1), body: z.string().min(1) }).strict();
+
+const triageOutputSchema = z
+  .object({
+    decision: z.enum(['proceed', 'clarify', 'split']),
+    issueUpdate: z.object({ title: z.string().min(1).optional(), body: z.string().min(1) }).strict().optional(),
+    questions: z.array(z.string().min(1)).optional(),
+    subIssues: z.array(subIssueSchema).optional(),
+    handoff: z.number().int().nonnegative().optional(),
+    message: z.string().min(1).optional(),
+  })
+  .strict()
+  // Cross-field rules: each decision requires (only) its own payload, so a malformed decision is
+  // rejected here rather than silently doing nothing in the runner.
+  .superRefine((o, ctx) => {
+    if (o.decision === 'clarify' && (!o.questions || o.questions.length === 0)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'decision "clarify" requires a non-empty `questions` array', path: ['questions'] });
+    }
+    if (o.decision === 'split') {
+      if (!o.subIssues || o.subIssues.length < 2) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'decision "split" requires at least two `subIssues`', path: ['subIssues'] });
+      } else if (o.handoff !== undefined && o.handoff >= o.subIssues.length) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: '`handoff` must be an index into `subIssues`', path: ['handoff'] });
+      }
+    }
+  });
+
 /** A validation outcome that callers branch on, rather than a thrown error. */
 export type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
 
@@ -78,4 +136,9 @@ export function parseEnvelope(raw: unknown): Parsed<AgentEnvelope> {
 export function parseReviewVerdict(raw: unknown): Parsed<ReviewVerdict> {
   const r = reviewVerdictSchema.safeParse(raw);
   return r.success ? { ok: true, value: r.data as ReviewVerdict } : { ok: false, error: format(r.error.issues) };
+}
+
+export function parseTriageOutput(raw: unknown): Parsed<TriageOutput> {
+  const r = triageOutputSchema.safeParse(raw);
+  return r.success ? { ok: true, value: r.data as TriageOutput } : { ok: false, error: format(r.error.issues) };
 }

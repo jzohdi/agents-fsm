@@ -29,6 +29,49 @@ describe('FakeGitHub — issues', () => {
   });
 });
 
+describe('FakeGitHub — issue editing, creation, and comments', () => {
+  it('updates a seeded issue title and/or body', async () => {
+    const gh = new FakeGitHub().seedIssue('o/r#7', { number: 7, title: 'old', body: 'vague' });
+    const updated = await gh.updateIssue({ number: 7, title: 'Add OAuth', body: 'scoped' });
+    expect(updated).toMatchObject({ ref: 'o/r#7', number: 7, title: 'Add OAuth', body: 'scoped' });
+    // The change persists for later reads, and a partial update leaves other fields intact.
+    await gh.updateIssue({ number: 7, body: 'tighter' });
+    expect(await gh.readIssue('o/r#7')).toMatchObject({ title: 'Add OAuth', body: 'tighter' });
+  });
+
+  it('rejects updating a non-existent issue', async () => {
+    await expect(new FakeGitHub().updateIssue({ number: 99, body: 'x' })).rejects.toBeInstanceOf(GitHubNotFoundError);
+  });
+
+  it('creates new issues with incrementing numbers above the seeded ones', async () => {
+    const gh = new FakeGitHub({ repoRef: 'o/r' }).seedIssue('o/r#7', { number: 7 });
+    const a = await gh.createIssue({ title: 'piece A', body: 'a' });
+    const b = await gh.createIssue({ title: 'piece B', body: 'b' });
+    expect(a).toEqual({ ref: 'o/r#8', number: 8, title: 'piece A', body: 'a' });
+    expect(b.ref).toBe('o/r#9');
+    // A created issue is then readable like any other.
+    expect(await gh.readIssue('o/r#8')).toMatchObject({ title: 'piece A' });
+  });
+
+  it('posts issue comments authored by the bot login and lists them per issue', async () => {
+    const gh = new FakeGitHub({ botLogin: 'fleet[bot]' });
+    const c = await gh.postIssueComment({ issueNumber: 7, body: 'a question' });
+    expect(c).toMatchObject({ issueNumber: 7, author: 'fleet[bot]', body: 'a question' });
+    expect(c.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    // Listing is scoped to the issue.
+    await gh.postIssueComment({ issueNumber: 8, body: 'elsewhere' });
+    expect((await gh.listIssueComments(7)).map((x) => x.body)).toEqual(['a question']);
+  });
+
+  it('seedIssueComment simulates a human reply with a distinct author', async () => {
+    const gh = new FakeGitHub();
+    gh.seedIssueComment(7, { author: 'alice', body: 'Use Postgres' });
+    const comments = await gh.listIssueComments(7);
+    expect(comments[0]).toMatchObject({ author: 'alice', body: 'Use Postgres' });
+    expect(comments[0]!.author).not.toBe(gh.agentLogin());
+  });
+});
+
 describe('FakeGitHub — findOpenPrForBranch', () => {
   it('returns the open PR for a branch, or null', async () => {
     const gh = new FakeGitHub();

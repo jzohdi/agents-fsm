@@ -29,17 +29,28 @@
 import { loadDefaultConfig, type AgentsConfig } from './fsm/config';
 import { openDb } from './store/db';
 import { Repository } from './store/repository';
-import { AgentRunner } from './agent/runner';
+import { AgentRunner, type PhaseActivity } from './agent/runner';
 import { StubExecutor, goldenPathHandler, FatalExecutorError } from './agent/executor';
 import { FakeGitHub } from './integration/github-fake';
-import { buildRealRunner } from './real-run';
+import type { GitHub } from './integration/github';
+import { buildRealGitHub, buildRealRunner } from './real-run';
 import { EventLoop } from './loop/event-loop';
+import { ReplyPoller } from './loop/reply-poller';
 import { parseCliArgs, type CliArgs } from './cli-args';
 
-/** Build the Agent Runner for the selected mode (real vs. stub/fake). */
-function buildRunner(args: CliArgs, repo: Repository, agents: AgentsConfig, repoRef: string): AgentRunner {
+/** Print one live agent activity, indented under the current transition for a readable run trace. */
+function printActivity(a: PhaseActivity): void {
+  console.log(`     · [${a.stage}:${a.phase}] ${a.activity.summary}`);
+}
+
+/** Build the Agent Runner + its GitHub adapter for the selected mode (real vs. stub/fake). The
+ *  adapter is returned so the Reply Poller shares the same instance (state, in the fake's case). */
+function buildRunner(args: CliArgs, repo: Repository, agents: AgentsConfig, repoRef: string): { runner: AgentRunner; github: GitHub } {
   if (!args.real) {
-    return new AgentRunner(repo, new StubExecutor(goldenPathHandler), agents, new FakeGitHub({ autoSeedIssues: true }));
+    // The stub executor does not stream, so the live activity sink simply stays quiet here.
+    const github = new FakeGitHub({ autoSeedIssues: true });
+    const runner = new AgentRunner(repo, new StubExecutor(goldenPathHandler), agents, github, { onActivity: printActivity });
+    return { runner, github };
   }
   const config = {
     repo: args.repo ?? repoRef,
@@ -54,17 +65,40 @@ function buildRunner(args: CliArgs, repo: Repository, agents: AgentsConfig, repo
   };
   const model = config.cheap ? 'cheap (haiku, plumbing only)' : config.frontierModel ?? 'default (opus)';
   console.log(`[real mode] repo=${config.repo} base=${config.baseBranch} work=${config.workingRoot} model=${model} — spends tokens, opens a real PR.`);
-  return buildRealRunner(repo, agents, config);
+  const github = buildRealGitHub(config);
+  const runner = buildRealRunner(repo, agents, config, { onActivity: printActivity, github });
+  return { runner, github };
 }
 
-function buildLoop(args: CliArgs, repoRef: string): { repo: Repository; loop: EventLoop; version: string } {
+function buildLoop(args: CliArgs, repoRef: string): { repo: Repository; loop: EventLoop; version: string; github: GitHub } {
   const { fsm, agents, version } = loadDefaultConfig();
   const repo = new Repository(openDb(args.db));
-  const runner = buildRunner(args, repo, agents, repoRef);
+  const { runner, github } = buildRunner(args, repo, agents, repoRef);
   const loop = new EventLoop(repo, fsm, version, runner, {
     onTransition: (t) => console.log(`  ${t.fromState.padEnd(18)} --${t.trigger}-->  ${t.toState}`),
   });
-  return { repo, loop, version };
+  return { repo, loop, version, github };
+}
+
+/**
+ * Drain the loop, then — if any run is parked waiting on a human reply (triage `clarify`) — poll the
+ * issue thread for the answer and resume, until everything settles or the poll budget runs out. This
+ * is the cheap, polling-based human-in-the-loop the operator opts into via `--poll-timeout`.
+ */
+async function drainWithReplyPolling(args: CliArgs, repo: Repository, loop: EventLoop, github: GitHub): Promise<void> {
+  await loop.runUntilIdle();
+  const awaiting = repo.listRuns('awaiting_input');
+  if (awaiting.length === 0 || args.pollTimeoutMinutes <= 0) {
+    if (awaiting.length > 0) {
+      console.log(`\n⏸  ${awaiting.length} run(s) awaiting a human reply on the issue. Polling disabled (--poll-timeout 0); reply, then re-run to resume.`);
+    }
+    return;
+  }
+  console.log(
+    `\n⏳ ${awaiting.length} run(s) awaiting your reply on the issue. Polling every ${args.pollIntervalSeconds}s for up to ${args.pollTimeoutMinutes}m…`,
+  );
+  const poller = new ReplyPoller(repo, github, loop, { intervalMs: args.pollIntervalSeconds * 1000 });
+  await poller.poll({ maxWaitMs: args.pollTimeoutMinutes * 60_000, drain: () => loop.runUntilIdle() });
 }
 
 function report(repo: Repository, runId: number): void {
@@ -79,6 +113,15 @@ function report(repo: Repository, runId: number): void {
     console.log(`\n⚠️  Escalated to needs_human via "${last?.trigger ?? '?'}". Reason:`);
     console.log(indent(formatReason(last?.reason)));
     console.log(`\nFix the cause, then resume:  npm start -- resume ${runId} --real --repo <owner/name> [--model …] [--local-repo …] [--db <path>]`);
+  }
+
+  // Awaiting a human reply: triage asked a question on the issue. Tell the operator how to pick it
+  // back up after replying (the poll budget for this session has elapsed).
+  if (run?.status === 'awaiting_input') {
+    const last = repo.listTransitions(runId).at(-1);
+    console.log(`\n💬  Awaiting your reply on the issue. Triage asked:`);
+    console.log(indent(formatReason(last?.reason)));
+    console.log(`\nReply on the issue, then resume:  npm start -- resume ${runId} --real --repo <owner/name> --db <path>`);
   }
 }
 
@@ -100,26 +143,35 @@ function indent(text: string): string {
 async function start(args: CliArgs): Promise<void> {
   const issueRef = args.positionals[0] ?? 'demo/repo#1';
   const repoRef = issueRef.split('#')[0] ?? issueRef;
-  const { repo, loop, version } = buildLoop(args, repoRef);
+  const { repo, loop, version, github } = buildLoop(args, repoRef);
 
   console.log(`Config version ${version}; starting run for issue ${issueRef}`);
   loop.recover(); // no-op on a fresh DB; proves the startup sweep is wired
   const run = loop.startRun({ issueRef, repoRef });
   console.log(`Run ${run.id} created in state "${run.currentState}". Transitions:`);
 
-  await loop.runUntilIdle();
+  await drainWithReplyPolling(args, repo, loop, github);
   report(repo, run.id);
 }
 
 async function resume(args: CliArgs): Promise<void> {
   const runId = Number(args.positionals[1]);
   if (!Number.isInteger(runId)) throw new Error('usage: cli.ts resume <runId> [--real --repo o/r ...] [--db <path>]');
-  const { repo, loop } = buildLoop(args, '');
+  const { repo, loop, github } = buildLoop(args, '');
 
-  console.log(`Resuming run ${runId}. Transitions:`);
   loop.recover();
-  loop.resumeRun(runId);
-  await loop.runUntilIdle();
+  const run = repo.getRun(runId);
+  if (!run) throw new Error(`resume: run ${runId} not found (did you pass the same --db?)`);
+
+  if (run.status === 'awaiting_input') {
+    // The run is waiting on a human reply (triage clarify). Don't force a transition — just check the
+    // issue for the answer (drainWithReplyPolling polls) and let it pick back up when the reply lands.
+    console.log(`Run ${runId} is awaiting a human reply on its issue. Checking for it…`);
+  } else {
+    console.log(`Resuming run ${runId}. Transitions:`);
+    loop.resumeRun(runId);
+  }
+  await drainWithReplyPolling(args, repo, loop, github);
   report(repo, runId);
 }
 

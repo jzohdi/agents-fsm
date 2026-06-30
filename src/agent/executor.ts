@@ -28,6 +28,25 @@
 
 import type { AgentPhase } from '../store/repository';
 
+/**
+ * A live, human-readable snapshot of what the harness is doing mid-work-session.
+ *
+ * The harness streams its progress (assistant turns, tool calls, …) while it works; an executor
+ * that streams turns each event into one of these and pushes it to {@link AgentRunRequest.onActivity}.
+ * This is what powers a "what is the agent doing *right now*" view — the Agent Runner persists them
+ * to the live log stream and forwards them to the CLI/dashboard (README §3.3 Layer 6). It is
+ * deliberately a *summary*, not the raw transcript: cross-stage context still flows only through
+ * durable artifacts (README §3.3 "Artifacts are the shared memory, not transcripts").
+ */
+export interface AgentActivity {
+  /** Coarse classification of the streamed step, for filtering/iconography in a UI. */
+  kind: 'init' | 'thinking' | 'assistant' | 'tool_use' | 'tool_result' | 'result' | 'other';
+  /** A concise, human-readable description, e.g. `tool: Edit src/foo.ts` or `assistant: Looks good`. */
+  summary: string;
+  /** The parsed harness event, for a richer dashboard view. Omitted for synthesized activities. */
+  detail?: unknown;
+}
+
 /** Everything the harness needs to run one phase of one stage. */
 export interface AgentRunRequest {
   runId: number;
@@ -51,6 +70,13 @@ export interface AgentRunRequest {
    * harness's own default policy applies; the stub ignores it.
    */
   allowedTools?: string[];
+  /**
+   * Optional live-progress sink. When set, a *streaming* executor calls it as the harness works,
+   * with a concise {@link AgentActivity} per step — the data behind a "what is the agent doing right
+   * now" view. It is best-effort observability and must never change the result; the in-memory stub
+   * does not stream, so it ignores this. Absent means "do not stream progress".
+   */
+  onActivity?: (activity: AgentActivity) => void;
 }
 
 export interface AgentUsage {
@@ -147,8 +173,11 @@ function producedEnvelopeFor(stage: string): unknown {
     case 'plan_review':
     case 'code_review':
       return { requestedTransition: 'approve' };
+    case 'triage':
+      // triage has its own decision contract (not the work envelope); the golden path signs off.
+      return { decision: 'proceed' };
     default:
-      // triage, frontend, backend.
+      // frontend, backend.
       return { requestedTransition: 'proceed' };
   }
 }

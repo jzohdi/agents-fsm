@@ -46,6 +46,7 @@ export function createSystemPromptFn(options: SystemPromptOptions = {}): SystemP
   const base = read(dir, 'base.md');
   const envelopeContract = read(dir, 'envelope-contract.md');
   const verdictContract = read(dir, 'verdict-contract.md');
+  const triageContract = read(dir, 'triage-contract.md');
   const selfReview = read(dir, join('phases', 'self_review.md'));
   const simplify = read(dir, join('phases', 'simplify.md'));
   const stages = loadStages(join(dir, 'stages'));
@@ -58,7 +59,10 @@ export function createSystemPromptFn(options: SystemPromptOptions = {}): SystemP
     const parts = [base, role];
     if (phase === 'self_review') parts.push(selfReview);
     if (phase === 'simplify') parts.push(simplify);
-    parts.push(phase === 'self_review' ? verdictContract : envelopeContract);
+    // The contract is the load-bearing instruction. `triage` is a router/editor with its own decision
+    // contract (it has only a `produce` phase, so it never needs the verdict one); every other stage's
+    // produce/simplify emits the work envelope, and self_review emits the verdict.
+    parts.push(phase === 'self_review' ? verdictContract : stage === 'triage' ? triageContract : envelopeContract);
     return parts.join(SECTION_SEPARATOR);
   };
 }

@@ -20,10 +20,18 @@
 import { randomBytes } from 'node:crypto';
 
 import { recipeFor, type AgentsConfig, type StageIo } from '../fsm/config';
-import type { GitHub, Issue, PullRequest } from '../integration/github';
+import type { GitHub, Issue, IssueComment, PullRequest } from '../integration/github';
 import type { AgentPhase, Repository, Run } from '../store/repository';
-import type { AgentRunResult, StageExecutor } from './executor';
-import { parseEnvelope, parseReviewVerdict, type AgentEnvelope, type ArtifactRef, type Parsed } from './envelope';
+import type { AgentActivity, AgentRunResult, StageExecutor } from './executor';
+import {
+  parseEnvelope,
+  parseReviewVerdict,
+  parseTriageOutput,
+  type AgentEnvelope,
+  type ArtifactRef,
+  type Parsed,
+  type TriageOutput,
+} from './envelope';
 
 /** Default logical model per phase (README §3.3: frontier to produce/critique, cheaper to simplify). */
 export const DEFAULT_MODELS: Record<AgentPhase, string> = {
@@ -37,10 +45,15 @@ export const DEFAULT_BASE_BRANCH = 'main';
 /** Default number of extra attempts on malformed output before escalating (plans/milestone-4.md §3.5). */
 export const DEFAULT_MALFORMED_RETRY_CAP = 1;
 
-/** The result of running a stage: hand the envelope to the engine, or escalate. */
+/** The result of running a stage: hand the envelope to the engine, escalate, or wait on a human. */
 export type StageOutcome =
   | { kind: 'handoff'; envelope: AgentEnvelope }
-  | { kind: 'escalate'; trigger: string; reason: unknown };
+  | { kind: 'escalate'; trigger: string; reason: unknown }
+  /**
+   * `triage` asked the human a question on the issue and is now waiting for a reply. The loop parks
+   * the run in `awaiting_input` (no follow-up event); the Reply Poller re-arms it when a human replies.
+   */
+  | { kind: 'await_input'; reason: unknown };
 
 /** Builds the per-phase system prompt. The real implementation is `createSystemPromptFn`
  * (agent/prompts.ts); injected via {@link AgentRunnerOptions.systemPrompt} for real runs. */
@@ -49,12 +62,26 @@ export type SystemPromptFn = (stage: string, phase: AgentPhase) => string;
 /** Default used by stub/fake runs that don't inject real prompts (the demo CLI, most unit tests). */
 const defaultSystemPrompt: SystemPromptFn = (stage, phase) => `[${stage}:${phase}] system prompt (stub — inject createSystemPromptFn for real runs)`;
 
+/** One live activity from a running stage, carrying the run context the bare {@link AgentActivity} lacks. */
+export interface PhaseActivity {
+  runId: number;
+  stage: string;
+  phase: AgentPhase;
+  activity: AgentActivity;
+}
+
 export interface AgentRunnerOptions {
   systemPrompt?: SystemPromptFn;
   /** Base branch new working branches are cut from. Default {@link DEFAULT_BASE_BRANCH}. */
   baseBranch?: string;
   /** Extra attempts on malformed output before escalating. Default {@link DEFAULT_MALFORMED_RETRY_CAP}. */
   malformedRetryCap?: number;
+  /**
+   * Optional live-progress sink for the CLI/dashboard. The runner already persists every streamed
+   * activity to the log stream; this is the in-process push so a watcher can render it as it happens
+   * (the seam the API's WebSocket stream subscribes to, M5). Best-effort — a throwing sink is ignored.
+   */
+  onActivity?: (activity: PhaseActivity) => void;
 }
 
 /** Per-phase extras layered onto the agent input. */
@@ -78,6 +105,7 @@ export class AgentRunner {
   private readonly systemPrompt: SystemPromptFn;
   private readonly baseBranch: string;
   private readonly malformedRetryCap: number;
+  private readonly onActivity?: (activity: PhaseActivity) => void;
 
   constructor(
     private readonly repo: Repository,
@@ -89,11 +117,16 @@ export class AgentRunner {
     this.systemPrompt = options.systemPrompt ?? defaultSystemPrompt;
     this.baseBranch = options.baseBranch ?? DEFAULT_BASE_BRANCH;
     this.malformedRetryCap = options.malformedRetryCap ?? DEFAULT_MALFORMED_RETRY_CAP;
+    this.onActivity = options.onActivity;
   }
 
   /** Run the run's current stage to completion and return its outcome. */
   async runStage(run: Run): Promise<StageOutcome> {
     const recipe = recipeFor(run.currentState, this.agents);
+
+    // triage is a router/editor with its own contract and GitHub side effects (edit issue, ask the
+    // human, split), so it has a dedicated path rather than the produce/review pipeline below.
+    if (recipe.io.kind === 'triage') return this.runTriageStage(run, recipe);
 
     // 1. Prepare the stage context (issue + working tree + stage input).
     let prep: StagePrep;
@@ -117,11 +150,108 @@ export class AgentRunner {
     }
   }
 
+  // --- triage (router / issue editor) -----------------------------------------
+
+  /**
+   * Run the `triage` stage: read the issue *and its comment thread* (so a re-run after a human reply
+   * sees the answer), let the agent decide, then perform the GitHub side effects its decision implies
+   * (improve the issue, ask the human, split into smaller issues) and map it to a {@link StageOutcome}.
+   */
+  private async runTriageStage(run: Run, recipe: Recipe): Promise<StageOutcome> {
+    let issue: Issue;
+    let comments: IssueComment[];
+    try {
+      issue = await this.github.readIssue(run.issueRef);
+      comments = await this.github.listIssueComments(issue.number);
+    } catch (err) {
+      return gitError(run, 'prepare', err);
+    }
+    // The comment thread is the human↔agent conversation; pass it so triage can read the latest reply.
+    const prep: StagePrep = {
+      issue,
+      input: { issue, comments: comments.map((c) => ({ author: c.author, body: c.body, createdAt: c.createdAt })) },
+    };
+
+    // triage runs a single produce phase against its own decision contract (retry, then escalate).
+    const parsed = await this.invokeParsed(run, 'produce', recipe, prep, {}, parseTriageOutput);
+    if (!parsed.ok) return malformed('produce', parsed.error, parsed.raw);
+
+    try {
+      return await this.applyTriageDecision(run, issue, parsed.value);
+    } catch (err) {
+      return gitError(run, 'effects', err);
+    }
+  }
+
+  /**
+   * Carry out one triage decision's GitHub side effects and turn it into a {@link StageOutcome}.
+   *
+   * Idempotency note: editing the issue is idempotent, but posting comments and creating sub-issues
+   * are not. As with the review stages' PR comments, a crash in the narrow window *after* these calls
+   * but *before* the transition commits would re-run the stage and repeat them (a duplicate comment,
+   * or — worse — duplicate sub-issues). This matches the existing review-comment behavior and the
+   * MVP's accepted limits; a transactional outbox is the real fix (README Milestone 7). It does NOT
+   * affect normal operation: a clarify→reply→proceed sequence posts distinct comments by design.
+   */
+  private async applyTriageDecision(run: Run, issue: Issue, output: TriageOutput): Promise<StageOutcome> {
+    // Improve the issue first, if the agent rewrote it, so every downstream stage reads the scoped
+    // spec. Editing to the same text is harmless, which keeps a back-edge re-run idempotent.
+    let current = issue;
+    if (output.issueUpdate) {
+      current = await this.github.updateIssue({
+        number: issue.number,
+        ...(output.issueUpdate.title !== undefined ? { title: output.issueUpdate.title } : {}),
+        body: output.issueUpdate.body,
+      });
+    }
+
+    switch (output.decision) {
+      case 'proceed': {
+        // Sign off with a human-visible audit comment, then hand to plan. The FSM transition is the
+        // machine sign-off later stages key off; this comment is for people reading the issue.
+        await this.github.postIssueComment({ issueNumber: current.number, body: signoffComment(output.message) });
+        return { kind: 'handoff', envelope: { requestedTransition: 'proceed', reason: { kind: 'triage_signoff' } } };
+      }
+
+      case 'clarify': {
+        const questions = output.questions ?? [];
+        const comment = await this.github.postIssueComment({ issueNumber: current.number, body: clarifyComment(questions, output.message) });
+        // The await_input reason carries everything the Reply Poller needs to detect the human's
+        // answer — the issue, the question comment to measure replies against, and the bot login that
+        // distinguishes the agent's own comment from a human reply. The loop records it in the
+        // transition log, which is where the poller reads it from (no separate marker store).
+        return {
+          kind: 'await_input',
+          reason: { kind: 'needs_more_detail', questions, issueNumber: current.number, commentId: comment.id, botLogin: comment.author },
+        };
+      }
+
+      case 'split': {
+        const subIssues = output.subIssues ?? [];
+        const created: Issue[] = [];
+        for (const sub of subIssues) created.push(await this.github.createIssue(sub));
+        await this.github.postIssueComment({ issueNumber: current.number, body: splitComment(created, output.message) });
+
+        if (output.handoff === undefined) {
+          // No handoff: the operator starts runs for the children; this run stops with them recorded.
+          return { kind: 'escalate', trigger: 'should_split', reason: { kind: 'should_split', created: created.map(issueSummary) } };
+        }
+        // Hand off: continue THIS run on the chosen child (retarget); the siblings await the operator.
+        const chosen = created[output.handoff]!;
+        this.repo.setRunIssueRef(run.id, chosen.ref);
+        const siblings = created.filter((_, i) => i !== output.handoff).map((c) => c.ref);
+        return {
+          kind: 'handoff',
+          envelope: { requestedTransition: 'proceed', reason: { kind: 'triage_split_handoff', continuingOn: chosen.ref, siblings } },
+        };
+      }
+    }
+  }
+
   // --- stage preparation ------------------------------------------------------
 
   private async prepareStage(run: Run, io: StageIo): Promise<StagePrep> {
     const issue = await this.github.readIssue(run.issueRef);
-    if (io.kind === 'triage') return { issue, input: { issue } };
 
     // produce/review: ensure the working tree exists, creating the branch the first time.
     const branch = run.branch ?? branchName(run);
@@ -218,6 +348,7 @@ export class AgentRunner {
         model,
         system: this.systemPrompt(run.currentState, phase),
         input,
+        onActivity: (activity) => this.handleActivity(run.id, run.currentState, phase, activity),
         ...(prep.workingDir ? { workingDir: prep.workingDir } : {}),
         ...(recipe.allowedTools ? { allowedTools: recipe.allowedTools } : {}),
       });
@@ -255,11 +386,28 @@ export class AgentRunner {
     return result.output;
   }
 
+  /**
+   * Handle one streamed activity from the harness: persist it to the run's durable log stream and
+   * push it to the optional in-process watcher. Both are best-effort observability that must never
+   * disturb the work session, so a failure in either is swallowed (the harness keeps streaming).
+   */
+  private handleActivity(runId: number, stage: string, phase: AgentPhase, activity: AgentActivity): void {
+    try {
+      this.repo.recordLog({ runId, level: 'info', message: activity.summary, data: { stage, phase, kind: activity.kind } });
+    } catch {
+      // Persisting a log line is non-critical; never let it interrupt a paid, in-flight stage.
+    }
+    if (!this.onActivity) return;
+    try {
+      this.onActivity({ runId, stage, phase, activity });
+    } catch {
+      // A throwing watcher must not affect the run.
+    }
+  }
+
   // --- git/GitHub side effects ------------------------------------------------
 
   private async applyStageEffects(run: Run, io: StageIo, prep: StagePrep, envelope: AgentEnvelope): Promise<AgentEnvelope> {
-    if (io.kind === 'triage') return envelope;
-
     if (io.kind === 'review') {
       // Post review comments to the PR (if any). plan_review has no PR — its feedback travels
       // back to `plan` via the envelope's `reason`, handled by the normal back-edge mechanism.
@@ -346,6 +494,34 @@ function enrichArtifacts(artifacts: ArtifactRef[] | undefined, extra: Record<str
 
 function appendArtifact(envelope: AgentEnvelope, artifact: ArtifactRef): AgentEnvelope {
   return { ...envelope, artifacts: [...(envelope.artifacts ?? []), artifact] };
+}
+
+/** A compact, serializable summary of a created issue, for the split escalation reason. */
+function issueSummary(issue: Issue): { ref: string; number: number; title: string } {
+  return { ref: issue.ref, number: issue.number, title: issue.title };
+}
+
+/** The human-facing sign-off comment triage posts when it proceeds. */
+function signoffComment(message?: string): string {
+  const lines = ['✅ **Triage sign-off** — this issue is clear and scoped; handing it to planning.'];
+  if (message) lines.push('', message);
+  return lines.join('\n');
+}
+
+/** The comment triage posts when it needs the human to answer before work can start. */
+function clarifyComment(questions: string[], message?: string): string {
+  const lines = ['🤖 **Triage needs more detail before work can start.** Reply on this issue and I’ll pick it back up.'];
+  if (message) lines.push('', message);
+  if (questions.length > 0) lines.push('', ...questions.map((q) => `- ${q}`));
+  return lines.join('\n');
+}
+
+/** The comment triage posts on the original issue after splitting it into smaller ones. */
+function splitComment(created: Issue[], message?: string): string {
+  const lines = ['🤖 **Triage split this issue into smaller pieces:**'];
+  if (message) lines.push('', message);
+  lines.push('', ...created.map((c) => `- ${c.ref} — ${c.title}`));
+  return lines.join('\n');
 }
 
 function malformed(phase: AgentPhase, error: string, raw: unknown): StageOutcome {

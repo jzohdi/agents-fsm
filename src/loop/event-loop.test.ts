@@ -192,6 +192,31 @@ describe('crash recovery (idempotent processing)', () => {
     expect(repo.getRun(run.id)!.currentState).toBe('done');
     expect(sequence(repo, run.id)).toEqual(GOLDEN_PATH);
   });
+
+  it('recovering a post-commit crash on a triage clarify does not re-ask or duplicate the park', async () => {
+    let triageProduces = 0;
+    const { repo, loop, github } = setup((req) => {
+      if (req.stage === 'triage' && req.phase === 'produce') triageProduces += 1;
+      return req.stage === 'triage' ? { output: { decision: 'clarify', questions: ['which db?'] } } : goldenPathHandler(req);
+    });
+
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+
+    // Crash window: claim + apply (the park commits) but never finalize the event.
+    const event = repo.claimNextEvent()!;
+    await loop.applyEvent(event);
+    expect(triageProduces).toBe(1);
+    expect(repo.getRun(run.id)!.status).toBe('awaiting_input');
+    expect(repo.getTransitionByEventId(event.id)).toBeDefined();
+
+    // Restart: the reclaimed event must finalize against the existing transition, not re-run triage.
+    expect(loop.recover()).toBe(1);
+    await loop.runUntilIdle();
+
+    expect(triageProduces).toBe(1); // not re-asked
+    expect(repo.listTransitions(run.id).filter((t) => t.trigger === 'await_input')).toHaveLength(1);
+    expect((await github.listIssueComments(1)).length).toBe(1); // exactly one question comment
+  });
 });
 
 describe('loop-owned guards escalate', () => {
@@ -211,8 +236,10 @@ describe('loop-owned guards escalate', () => {
   });
 
   it('escalates when the agent requests an illegal transition (never coerced)', async () => {
+    // `plan` (not triage) is the producing stage here: it emits the generic work envelope, so an
+    // unknown `requestedTransition` exercises the engine's legality check (triage has its own contract).
     const handler: StubHandler = (req) =>
-      req.stage === 'triage' && req.phase === 'produce'
+      req.stage === 'plan' && req.phase === 'produce'
         ? { output: { requestedTransition: 'teleport' } }
         : goldenPathHandler(req);
     const { repo, loop } = setup(handler);
@@ -380,6 +407,63 @@ describe('loop-owned guards escalate', () => {
     await expect(loop.runUntilIdle()).resolves.toBeUndefined(); // a throwing subscriber must not wedge the loop
 
     expect(repo.getRun(run.id)!.currentState).toBe('done');
+  });
+});
+
+describe('triage clarify → awaiting_input → resume', () => {
+  /** A handler whose triage clarifies on the first pass, then proceeds; other stages golden-path. */
+  function clarifyOnceThenProceed(): StubHandler {
+    let clarified = false;
+    return (req) => {
+      if (req.stage === 'triage') {
+        if (!clarified) {
+          clarified = true;
+          return { output: { decision: 'clarify', questions: ['which database?'] } };
+        }
+        return { output: { decision: 'proceed' } };
+      }
+      return goldenPathHandler(req);
+    };
+  }
+
+  it('parks the run in awaiting_input via a self-transition, with no event left to dispatch', async () => {
+    const { repo, loop } = setup((req) =>
+      req.stage === 'triage' ? { output: { decision: 'clarify', questions: ['which database?'] } } : goldenPathHandler(req),
+    );
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.runUntilIdle();
+
+    const parked = repo.getRun(run.id)!;
+    expect(parked.status).toBe('awaiting_input');
+    expect(parked.currentState).toBe('triage'); // stays put; a reply re-runs triage
+    const last = repo.listTransitions(run.id).at(-1)!;
+    expect([last.fromState, last.trigger, last.toState]).toEqual(['triage', 'await_input', 'triage']);
+    expect(last.eventId).not.toBeNull(); // keyed to its event (at-least-once safe)
+    // The run holds no executor: nothing is dispatchable while it is awaiting_input.
+    expect(await loop.tick()).toBe(false);
+  });
+
+  it('resumeAwaitingInput re-arms the run and re-runs triage, which now proceeds to done', async () => {
+    const { repo, loop } = setup(clarifyOnceThenProceed());
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.runUntilIdle();
+    expect(repo.getRun(run.id)!.status).toBe('awaiting_input');
+
+    loop.resumeAwaitingInput(run.id);
+    await loop.runUntilIdle();
+
+    const final = repo.getRun(run.id)!;
+    expect(final.status).toBe('done');
+    expect(final.currentState).toBe('done');
+    // triage ran twice (clarify, then proceed); the second produced the forward transition to plan.
+    const triageProceed = repo.listTransitions(run.id).find((t) => t.fromState === 'triage' && t.toState === 'plan');
+    expect(triageProceed).toBeTruthy();
+  });
+
+  it('refuses to re-arm a run that is not awaiting_input', () => {
+    const { loop } = setup(goldenPathHandler);
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    expect(() => loop.resumeAwaitingInput(run.id)).toThrowError(/not awaiting_input/);
   });
 });
 

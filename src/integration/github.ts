@@ -49,6 +49,22 @@ export interface Comment {
   body: string;
 }
 
+/**
+ * A comment on an **issue** (as opposed to a PR). Triage uses these for its human-in-the-loop:
+ * it posts clarifying questions as an issue comment and the reply poller reads the thread to detect
+ * a human's answer. Unlike {@link Comment} it carries `author` and `createdAt`, the fields that let
+ * the poller tell the agent's own question apart from the human's reply (see the Reply Poller).
+ */
+export interface IssueComment {
+  id: number;
+  issueNumber: number;
+  /** GitHub login of the comment's author — the agent's bot login vs. a human, for reply detection. */
+  author: string;
+  body: string;
+  /** ISO-8601 creation timestamp, as GitHub reports it. */
+  createdAt: string;
+}
+
 /** The run's checked-out local working tree — where the harness runs (README §3.3 Layer 5). */
 export interface WorkingTree {
   /** Absolute path to the checkout; passed to the Stage Executor as its `workingDir`. */
@@ -73,6 +89,17 @@ export interface UpdatePrInput {
   prNumber: number;
   title?: string;
   body?: string;
+}
+
+export interface UpdateIssueInput {
+  number: number;
+  title?: string;
+  body?: string;
+}
+
+export interface CreateIssueInput {
+  title: string;
+  body: string;
 }
 
 export interface PrepareWorkingTreeInput {
@@ -104,6 +131,29 @@ export interface ReadDiffInput {
 export interface GitHub {
   /** Read an issue by reference (e.g. `owner/repo#42`). */
   readIssue(issueRef: string): Promise<Issue>;
+
+  /**
+   * Rewrite an issue's title and/or body. Triage uses this to improve a vague issue into a
+   * well-scoped spec before handing it to `plan` (README §0 triage). Returns the updated issue.
+   */
+  updateIssue(input: UpdateIssueInput): Promise<Issue>;
+
+  /**
+   * Open a brand-new issue, e.g. one of the smaller issues triage split a too-large issue into.
+   * Returns the created issue with its assigned number and `ref` so the orchestrator can record or
+   * retarget to it.
+   */
+  createIssue(input: CreateIssueInput): Promise<Issue>;
+
+  /**
+   * Post a comment on an **issue** (not a PR). Triage posts its clarifying questions and its
+   * split/sign-off notes here; the human replies in the same thread. Returns the created comment,
+   * including the `author` + `id` the reply poller anchors on.
+   */
+  postIssueComment(input: { issueNumber: number; body: string }): Promise<IssueComment>;
+
+  /** The issue's comments, oldest first — what the reply poller scans to detect a human's answer. */
+  listIssueComments(issueNumber: number): Promise<IssueComment[]>;
 
   /**
    * Ensure the run's local clone exists and the working branch is checked out, creating the

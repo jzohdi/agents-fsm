@@ -20,7 +20,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { GitHubNotFoundError } from './github';
-import { GitCommandError, GitHubCli, issueNumber, type ExecFn, type ExecResult } from './github-cli';
+import { GitCommandError, GitHubCli, issueNumber, issueNumberFromUrl, type ExecFn, type ExecResult } from './github-cli';
 
 describe('issueNumber', () => {
   it('parses the number from a ref or a bare number', () => {
@@ -31,6 +31,17 @@ describe('issueNumber', () => {
 
   it('throws on an unparseable ref', () => {
     expect(() => issueNumber('owner/repo')).toThrowError(/issue number/);
+  });
+});
+
+describe('issueNumberFromUrl', () => {
+  it('parses the number from a created-issue URL', () => {
+    expect(issueNumberFromUrl('https://github.com/o/r/issues/57')).toBe(57);
+    expect(issueNumberFromUrl('https://github.com/o/r/issues/57\n')).toBe(57);
+  });
+
+  it('throws on output with no trailing number', () => {
+    expect(() => issueNumberFromUrl('not a url')).toThrowError(/issue number/);
   });
 });
 
@@ -110,6 +121,59 @@ describe('GitHubCli — gh-backed API (injected exec)', () => {
 
     expect(comment).toEqual({ id: 9001, prNumber: 5, body: 'fix naming' });
     expect(calls[0]!.args).toEqual(['api', 'repos/o/r/issues/5/comments', '-f', 'body=fix naming']);
+  });
+
+  it('edits an issue then reads it back, sending only the provided fields', async () => {
+    const view = JSON.stringify({ number: 7, title: 'Add OAuth', body: 'scoped' });
+    const { exec, calls } = stubExec({ 'gh issue': ok(view) });
+    const gh = new GitHubCli({ repo: 'o/r', workingRoot: '/w', exec });
+
+    const issue = await gh.updateIssue({ number: 7, body: 'scoped' });
+
+    expect(issue).toMatchObject({ ref: 'o/r#7', number: 7, title: 'Add OAuth', body: 'scoped' });
+    expect(calls[0]!.args.slice(0, 4)).toEqual(['issue', 'edit', '7', '--repo']);
+    expect(calls[0]!.args).toEqual(expect.arrayContaining(['--body', 'scoped']));
+    expect(calls[0]!.args).not.toContain('--title');
+  });
+
+  it('creates an issue and parses the number from the returned URL', async () => {
+    const { exec, calls } = stubExec({ 'gh issue': ok('https://github.com/o/r/issues/58\n') });
+    const gh = new GitHubCli({ repo: 'o/r', workingRoot: '/w', exec });
+
+    const issue = await gh.createIssue({ title: 'piece', body: 'b' });
+
+    expect(issue).toEqual({ ref: 'o/r#58', number: 58, title: 'piece', body: 'b' });
+    expect(calls[0]!.args.slice(0, 3)).toEqual(['issue', 'create', '--repo']);
+    expect(calls[0]!.args).toEqual(expect.arrayContaining(['--title', 'piece', '--body', 'b']));
+  });
+
+  it('posts an issue comment via REST, returning id/author/timestamp', async () => {
+    const { exec, calls } = stubExec({
+      'gh api': ok(JSON.stringify({ id: 555, user: { login: 'fleet[bot]' }, created_at: '2026-06-29T00:00:00Z' })),
+    });
+    const gh = new GitHubCli({ repo: 'o/r', workingRoot: '/w', exec });
+
+    const c = await gh.postIssueComment({ issueNumber: 7, body: 'a question' });
+
+    expect(c).toEqual({ id: 555, issueNumber: 7, author: 'fleet[bot]', body: 'a question', createdAt: '2026-06-29T00:00:00Z' });
+    expect(calls[0]!.args).toEqual(['api', 'repos/o/r/issues/7/comments', '-f', 'body=a question']);
+  });
+
+  it('lists issue comments via REST, mapping author + timestamp', async () => {
+    const arr = JSON.stringify([
+      { id: 1, user: { login: 'fleet[bot]' }, body: 'q', created_at: '2026-06-29T00:00:00Z' },
+      { id: 2, user: { login: 'alice' }, body: 'a', created_at: '2026-06-29T01:00:00Z' },
+    ]);
+    const { exec, calls } = stubExec({ 'gh api': ok(arr) });
+    const gh = new GitHubCli({ repo: 'o/r', workingRoot: '/w', exec });
+
+    const comments = await gh.listIssueComments(7);
+
+    expect(comments).toEqual([
+      { id: 1, issueNumber: 7, author: 'fleet[bot]', body: 'q', createdAt: '2026-06-29T00:00:00Z' },
+      { id: 2, issueNumber: 7, author: 'alice', body: 'a', createdAt: '2026-06-29T01:00:00Z' },
+    ]);
+    expect(calls[0]!.args).toEqual(['api', 'repos/o/r/issues/7/comments?per_page=100']);
   });
 
   it('findOpenPrForBranch returns an open PR, or null when none / closed', async () => {

@@ -166,7 +166,7 @@ describe('AgentRunner — harness request', () => {
     const { runner, run } = setup(
       (req) => {
         seen.push(req);
-        return { output: { requestedTransition: 'proceed' } };
+        return { output: { decision: 'proceed' } }; // triage's own decision contract
       },
       { triage: { phases: ['produce'], io: { kind: 'triage' } } },
       {},
@@ -206,6 +206,53 @@ describe('AgentRunner — harness request', () => {
     const after = repo.getRun(run.id)!;
     expect(after.tokensUsed).toBe(15);
     expect(after.costUsed).toBeCloseTo(0.03);
+  });
+});
+
+describe('AgentRunner — live activity', () => {
+  /** A stub executor that streams two activities (as a real harness would) before returning. */
+  function streamingHandler(output: unknown): StageExecutor {
+    return {
+      run: (r) => {
+        r.onActivity?.({ kind: 'tool_use', summary: 'tool: Read README.md' });
+        r.onActivity?.({ kind: 'assistant', summary: 'assistant: done' });
+        return Promise.resolve({ output, usage: { tokens: 1 } });
+      },
+    };
+  }
+
+  it('persists each streamed activity to the run log and forwards it with run context', async () => {
+    const repo = new Repository(openDb(':memory:'));
+    const forwarded: Array<{ stage: string; phase: string; summary: string }> = [];
+    const runner = new AgentRunner(repo, streamingHandler({ requestedTransition: 'proceed' }), { plan: { phases: ['produce'] } }, new FakeGitHub({ autoSeedIssues: true }), {
+      onActivity: (a) => forwarded.push({ stage: a.stage, phase: a.phase, summary: a.activity.summary }),
+    });
+    const run = repo.createRun({ issueRef: 'o/r#1', repoRef: 'o/r', initialState: 'plan', fsmConfigVersion: 'v1' });
+
+    await runner.runStage(run);
+
+    // Persisted to the durable log stream, in order, with stage/phase/kind in the structured data.
+    const logs = repo.listLogs(run.id);
+    expect(logs.map((l) => l.message)).toEqual(['tool: Read README.md', 'assistant: done']);
+    expect(logs[0]!.data).toMatchObject({ stage: 'plan', phase: 'produce', kind: 'tool_use' });
+    // Forwarded in-process to the watcher with the run context the bare activity lacks.
+    expect(forwarded).toEqual([
+      { stage: 'plan', phase: 'produce', summary: 'tool: Read README.md' },
+      { stage: 'plan', phase: 'produce', summary: 'assistant: done' },
+    ]);
+  });
+
+  it('persists activity even with no in-process watcher, and a throwing watcher never breaks the run', async () => {
+    const repo = new Repository(openDb(':memory:'));
+    const runner = new AgentRunner(repo, streamingHandler({ requestedTransition: 'proceed' }), { plan: { phases: ['produce'] } }, new FakeGitHub({ autoSeedIssues: true }), {
+      onActivity: () => { throw new Error('watcher boom'); },
+    });
+    const run = repo.createRun({ issueRef: 'o/r#1', repoRef: 'o/r', initialState: 'plan', fsmConfigVersion: 'v1' });
+
+    const outcome = await runner.runStage(run);
+
+    expect(outcome.kind).toBe('handoff');
+    expect(repo.listLogs(run.id)).toHaveLength(2); // persistence is independent of the watcher
   });
 });
 

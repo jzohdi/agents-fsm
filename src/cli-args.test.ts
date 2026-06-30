@@ -16,6 +16,15 @@ describe('parseCliArgs', () => {
     expect(args.base).toBe('main');
     expect(args.work).toBe('./.agent-work');
     expect(args.positionals).toEqual(['owner/repo#1']);
+    // Reply polling is on by default with sane cadence/budget.
+    expect(args.pollTimeoutMinutes).toBe(30);
+    expect(args.pollIntervalSeconds).toBe(15);
+  });
+
+  it('reads the reply-poll overrides', () => {
+    const args = parseCliArgs(['owner/repo#1', '--poll-timeout', '5', '--poll-interval=30']);
+    expect(args.pollTimeoutMinutes).toBe(5);
+    expect(args.pollIntervalSeconds).toBe(30);
   });
 
   it('reads the real-mode flags and config (both --key value and --key=value)', () => {

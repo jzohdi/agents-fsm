@@ -292,6 +292,27 @@ describe('agent_runs + artifacts', () => {
   });
 });
 
+describe('logs (the live activity stream)', () => {
+  it('appends structured log lines and lists them oldest-first', () => {
+    const run = newRun();
+    repo.recordLog({ runId: run.id, message: 'tool: Read README.md', data: { stage: 'triage', phase: 'produce', kind: 'tool_use' } });
+    repo.recordLog({ runId: run.id, level: 'warn', message: 'assistant: hmm' });
+
+    const logs = repo.listLogs(run.id);
+    expect(logs.map((l) => l.message)).toEqual(['tool: Read README.md', 'assistant: hmm']);
+    expect(logs[0]).toMatchObject({ level: 'info', data: { stage: 'triage', phase: 'produce', kind: 'tool_use' } });
+    expect(logs[1]).toMatchObject({ level: 'warn', data: null });
+  });
+
+  it('scopes listing to the run', () => {
+    const a = newRun();
+    const b = newRun();
+    repo.recordLog({ runId: a.id, message: 'for a' });
+    repo.recordLog({ runId: b.id, message: 'for b' });
+    expect(repo.listLogs(a.id).map((l) => l.message)).toEqual(['for a']);
+  });
+});
+
 describe('foreign keys', () => {
   it('rejects a transition referencing a non-existent run', () => {
     expect(() =>

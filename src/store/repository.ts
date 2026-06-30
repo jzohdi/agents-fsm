@@ -12,7 +12,7 @@ import type { Db } from './db';
 
 const NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
-export type RunStatus = 'running' | 'paused' | 'blocked' | 'done' | 'needs_human';
+export type RunStatus = 'running' | 'paused' | 'blocked' | 'awaiting_input' | 'done' | 'needs_human';
 export type AgentPhase = 'produce' | 'self_review' | 'simplify';
 
 export interface Run {
@@ -112,6 +112,15 @@ export interface AgentRunRecord {
   tokens: number;
   durationMs: number | null;
   success: boolean;
+  createdAt: string;
+}
+
+export interface LogRecord {
+  id: number;
+  runId: number | null;
+  level: string;
+  message: string;
+  data: unknown;
   createdAt: string;
 }
 
@@ -278,6 +287,16 @@ export class Repository {
   /** Record the run's working branch, created when `plan` begins (README §3.1). */
   setRunBranch(id: number, branch: string): void {
     this.db.prepare(`UPDATE runs SET branch = ?, updated_at = ${NOW} WHERE id = ?`).run(branch, id);
+  }
+
+  /**
+   * Retarget the run to a different issue. Used when `triage` splits a too-large issue and hands
+   * this run off to continue on one of the smaller children (README §0 triage): from here on the run
+   * reads and closes that child issue. Only safe before any branch/PR exists (i.e. still in triage),
+   * which is the only place that calls it.
+   */
+  setRunIssueRef(id: number, issueRef: string): void {
+    this.db.prepare(`UPDATE runs SET issue_ref = ?, updated_at = ${NOW} WHERE id = ?`).run(issueRef, id);
   }
 
   /** Record the PR number, set when `tdd` opens the PR — separate from the branch, which exists earlier. */
@@ -499,6 +518,36 @@ export class Repository {
       tokens: r.tokens,
       durationMs: r.duration_ms,
       success: r.success !== 0,
+      createdAt: r.created_at,
+    }));
+  }
+
+  // --- logs (the live activity stream) -----------------------------------------
+
+  /**
+   * Append a structured log line for a run — the durable backing of the live "what is the agent
+   * doing right now" stream (README §3.3 Layer 6 / schema `logs`). The Agent Runner writes one per
+   * streamed agent activity, so the dashboard can replay a run's progress and the API (M5) can tail
+   * it live. Cheap and append-only; never on the critical path of a transition.
+   */
+  recordLog(input: { runId?: number | null; level?: string; message: string; data?: unknown }): number {
+    const info = this.db
+      .prepare('INSERT INTO logs (run_id, level, message, data) VALUES (?, ?, ?, ?)')
+      .run(input.runId ?? null, input.level ?? 'info', input.message, toJson(input.data));
+    return Number(info.lastInsertRowid);
+  }
+
+  /** A run's log lines, oldest first (the per-run activity feed). */
+  listLogs(runId: number): LogRecord[] {
+    const rows = this.db
+      .prepare('SELECT id, run_id, level, message, data, created_at FROM logs WHERE run_id = ? ORDER BY id ASC')
+      .all(runId) as Array<{ id: number; run_id: number | null; level: string; message: string; data: string | null; created_at: string }>;
+    return rows.map((r) => ({
+      id: r.id,
+      runId: r.run_id,
+      level: r.level,
+      message: r.message,
+      data: parseJson(r.data),
       createdAt: r.created_at,
     }));
   }

@@ -16,12 +16,15 @@ import {
   type Comment,
   type CommitAndPushInput,
   type CommitRef,
+  type CreateIssueInput,
   type GitHub,
   type Issue,
+  type IssueComment,
   type OpenPrInput,
   type PrepareWorkingTreeInput,
   type PullRequest,
   type ReadDiffInput,
+  type UpdateIssueInput,
   type UpdatePrInput,
   type WorkingTree,
 } from './github';
@@ -46,6 +49,12 @@ export interface FakeGitHubOptions {
    * the strict default (reject unknown, like the real API) stays the norm.
    */
   autoSeedIssues?: boolean;
+  /** Repo new issues (`createIssue`) belong to; their `ref` is `${repoRef}#${number}`. Default `demo/repo`. */
+  repoRef?: string;
+  /** Login attributed to comments the orchestrator posts — the "agent" author the poller filters out. Default `agent-fleet[bot]`. */
+  botLogin?: string;
+  /** Injectable clock for deterministic comment timestamps in tests. Default `Date.now`. */
+  now?: () => number;
 }
 
 /**
@@ -56,6 +65,8 @@ export class FakeGitHub implements GitHub {
   private readonly issues = new Map<string, Issue>();
   private readonly prs: PullRequest[] = [];
   private readonly comments: Comment[] = [];
+  /** Issue comments (newest last), across all issues; filtered by issue number on read. */
+  private readonly issueComments: IssueComment[] = [];
   /** Commits recorded per working-tree path (newest last). */
   private readonly commits = new Map<string, CommitEntry[]>();
   /** Explicit diff overrides keyed by `base...branch`; falls back to a synthesized summary. */
@@ -64,13 +75,20 @@ export class FakeGitHub implements GitHub {
   private readonly workingTrees = new Map<number, WorkingTree>();
   private readonly workingRoot: string;
   private readonly autoSeedIssues: boolean;
+  private readonly repoRef: string;
+  private readonly botLogin: string;
+  private readonly now: () => number;
   private prCounter = 0;
   private commentCounter = 0;
   private commitCounter = 0;
+  private issueCounter = 0;
 
   constructor(options: FakeGitHubOptions = {}) {
     this.workingRoot = options.workingRoot ?? '/tmp/agent-fleet-fake';
     this.autoSeedIssues = options.autoSeedIssues ?? false;
+    this.repoRef = options.repoRef ?? 'demo/repo';
+    this.botLogin = options.botLogin ?? 'agent-fleet[bot]';
+    this.now = options.now ?? Date.now;
   }
 
   // --- test seeding -----------------------------------------------------------
@@ -83,7 +101,30 @@ export class FakeGitHub implements GitHub {
       title: issue.title ?? `Issue ${issue.number}`,
       body: issue.body ?? '',
     });
+    this.issueCounter = Math.max(this.issueCounter, issue.number);
     return this;
+  }
+
+  /**
+   * Seed a comment on an issue (newest last). Tests use this to simulate a **human reply** to the
+   * agent's clarifying questions — pass an `author` other than the bot login (the default here) so
+   * the reply poller recognizes it as a human's answer.
+   */
+  seedIssueComment(issueNumber: number, comment: { author: string; body: string; createdAt?: string }): IssueComment {
+    const created: IssueComment = {
+      id: ++this.commentCounter,
+      issueNumber,
+      author: comment.author,
+      body: comment.body,
+      createdAt: comment.createdAt ?? new Date(this.now()).toISOString(),
+    };
+    this.issueComments.push(created);
+    return { ...created };
+  }
+
+  /** The bot login this fake attributes to orchestrator-posted comments (test introspection). */
+  agentLogin(): string {
+    return this.botLogin;
   }
 
   /** Seed an explicit diff for a `base...branch` range (otherwise it is synthesized from commits). */
@@ -126,6 +167,31 @@ export class FakeGitHub implements GitHub {
       return { ref: issueRef, number, title: `Issue ${number}`, body: '' };
     }
     throw new GitHubNotFoundError(`issue not found: ${issueRef}`);
+  }
+
+  async updateIssue(input: UpdateIssueInput): Promise<Issue> {
+    const issue = this.requireIssueByNumber(input.number);
+    if (input.title !== undefined) issue.title = input.title;
+    if (input.body !== undefined) issue.body = input.body;
+    return { ...issue };
+  }
+
+  async createIssue(input: CreateIssueInput): Promise<Issue> {
+    const number = ++this.issueCounter;
+    const ref = `${this.repoRef}#${number}`;
+    const issue: Issue = { ref, number, title: input.title, body: input.body };
+    this.issues.set(ref, issue);
+    return { ...issue };
+  }
+
+  async postIssueComment(input: { issueNumber: number; body: string }): Promise<IssueComment> {
+    // Mirror the real adapter: a comment is authored by the orchestrator's bot login, which is what
+    // the reply poller filters out when it looks for a *human's* reply.
+    return this.seedIssueComment(input.issueNumber, { author: this.botLogin, body: input.body });
+  }
+
+  async listIssueComments(issueNumber: number): Promise<IssueComment[]> {
+    return this.issueComments.filter((c) => c.issueNumber === issueNumber).map((c) => ({ ...c }));
   }
 
   async findOpenPrForBranch(branch: string): Promise<PullRequest | null> {
@@ -201,6 +267,11 @@ export class FakeGitHub implements GitHub {
     const pr = this.prs.find((p) => p.number === prNumber);
     if (!pr) throw new GitHubNotFoundError(`PR not found: #${prNumber}`);
     return pr;
+  }
+
+  private requireIssueByNumber(number: number): Issue {
+    for (const issue of this.issues.values()) if (issue.number === number) return issue;
+    throw new GitHubNotFoundError(`issue not found: #${number}`);
   }
 }
 
