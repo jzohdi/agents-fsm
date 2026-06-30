@@ -38,9 +38,17 @@ import type { AgentPhase } from '../store/repository';
  * deliberately a *summary*, not the raw transcript: cross-stage context still flows only through
  * durable artifacts (README §3.3 "Artifacts are the shared memory, not transcripts").
  */
+/**
+ * The streamed steps we surface, split by how the dashboard renders them: `thinking`/`assistant` are
+ * the agent's *words* (the live "model thinking" stream), `tool_use`/`tool_result` are its *actions*
+ * (the activity wire). Harness-session lifecycle events (session init, per-phase run-complete) are
+ * deliberately NOT surfaced — they are infrastructure noise, not "what the agent is doing".
+ */
+export type AgentActivityKind = 'thinking' | 'assistant' | 'tool_use' | 'tool_result';
+
 export interface AgentActivity {
-  /** Coarse classification of the streamed step, for filtering/iconography in a UI. */
-  kind: 'init' | 'thinking' | 'assistant' | 'tool_use' | 'tool_result' | 'result' | 'other';
+  /** Coarse classification of the streamed step, for routing/iconography in a UI. */
+  kind: AgentActivityKind;
   /** A concise, human-readable description, e.g. `tool: Edit src/foo.ts` or `assistant: Looks good`. */
   summary: string;
   /** The parsed harness event, for a richer dashboard view. Omitted for synthesized activities. */

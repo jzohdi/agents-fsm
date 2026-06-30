@@ -196,6 +196,52 @@ export function stepperModel(fsm: Partial<FsmConfig> | null | undefined, current
   }));
 }
 
+// --- GitHub deep links (open the issue / PR / branch in a new tab) -------------
+
+/** `owner/repo` shape guard for building github.com URLs. */
+const REPO_REF = /^[\w.-]+\/[\w.-]+$/;
+
+/** The github.com URL for an issue ref (`owner/repo#N`), or `null` if it isn't a parseable ref. */
+export function issueUrl(issueRef: string | null | undefined): string | null {
+  const m = /^([\w.-]+\/[\w.-]+)#(\d+)$/.exec(issueRef ?? '');
+  return m ? `https://github.com/${m[1]}/issues/${m[2]}` : null;
+}
+
+/** The github.com URL for a run's PR, or `null` when there is no PR / the repo ref is unusable. */
+export function prUrl(repoRef: string | null | undefined, prNumber: number | null | undefined): string | null {
+  return prNumber != null && REPO_REF.test(repoRef ?? '') ? `https://github.com/${repoRef}/pull/${prNumber}` : null;
+}
+
+/** The github.com URL for a run's branch, or `null` when there is no branch / the repo ref is unusable. */
+export function branchUrl(repoRef: string | null | undefined, branch: string | null | undefined): string | null {
+  if (!branch || !REPO_REF.test(repoRef ?? '')) return null;
+  // Branch names contain `/` (e.g. agent/run-1-abc); keep those as path separators, encode within segments.
+  return `https://github.com/${repoRef}/tree/${branch.split('/').map(encodeURIComponent).join('/')}`;
+}
+
+// --- scroll areas (auto-stick-to-bottom feeds) --------------------------------
+
+/**
+ * Whether a scroll container is at (or within `threshold` px of) its bottom — the test the auto-scroll
+ * feeds use to decide if they should stay pinned to the latest item. A small threshold makes "scroll
+ * back near the end" resume auto-scrolling, and absorbs sub-pixel rounding. Pure, so it is unit-tested.
+ */
+export function isAtBottom(scrollTop: number, clientHeight: number, scrollHeight: number, threshold = 24): boolean {
+  return scrollHeight - (scrollTop + clientHeight) <= threshold;
+}
+
+// --- activity routing (split the two RunDetail panels so they aren't redundant) ----
+
+/**
+ * Which RunDetail panel an activity line belongs to, so the two feeds show *different* things instead
+ * of duplicating one stream: the agent's **words** (`thinking`/`assistant`) flow to the live "model
+ * thinking" stream, its **actions** (`tool_use`/`tool_result`) to the activity wire. A line with an
+ * unknown/missing kind defaults to the wire (the durable record), so nothing is silently lost.
+ */
+export function activityLane(kind: string | undefined): 'thinking' | 'wire' {
+  return kind === 'thinking' || kind === 'assistant' ? 'thinking' : 'wire';
+}
+
 // --- escalation inspector (needs_human UX, README Milestone 7) -----------------
 
 export interface EscalationModel {

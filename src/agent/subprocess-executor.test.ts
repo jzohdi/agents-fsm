@@ -267,10 +267,12 @@ describe('parseHarnessOutput', () => {
 });
 
 describe('summarizeEvent — live activity', () => {
-  it('summarizes a session-init system event', () => {
-    expect(summarizeEvent({ type: 'system', subtype: 'init', session_id: 's1' })).toEqual([
-      { kind: 'init', summary: 'session init', detail: { type: 'system', subtype: 'init', session_id: 's1' } },
-    ]);
+  it('drops harness-lifecycle noise (system + result events) so only agent work is surfaced', () => {
+    // These crowd out the real activity in the dashboard and carry no "what is the agent doing" value.
+    expect(summarizeEvent({ type: 'system', subtype: 'init', session_id: 's1' })).toEqual([]);
+    expect(summarizeEvent({ type: 'system', subtype: 'thinking_tokens' })).toEqual([]);
+    expect(summarizeEvent({ type: 'result', is_error: false })).toEqual([]);
+    expect(summarizeEvent({ type: 'result', is_error: true })).toEqual([]);
   });
 
   it('summarizes assistant text, snipping to the first line', () => {
@@ -306,11 +308,6 @@ describe('summarizeEvent — live activity', () => {
     expect(summarizeEvent(result)[0]).toMatchObject({ kind: 'tool_result', summary: 'tool result: error' });
   });
 
-  it('marks the terminal result event', () => {
-    expect(summarizeEvent({ type: 'result', is_error: false })).toEqual([{ kind: 'result', summary: 'run complete' }]);
-    expect(summarizeEvent({ type: 'result', is_error: true })[0]!.summary).toBe('run errored');
-  });
-
   it('ignores empty assistant text and unknown event shapes', () => {
     expect(summarizeEvent({ type: 'assistant', message: { content: [{ type: 'text', text: '   ' }] } })).toEqual([]);
     expect(summarizeEvent({ type: 'mystery' })).toEqual([]);
@@ -338,7 +335,8 @@ describe('SubprocessStageExecutor — live activity streaming', () => {
 
     const result = await exec.run(req({ onActivity: (a) => seen.push(a) }));
 
-    expect(seen.map((a) => a.summary)).toEqual(['session init', 'tool: Read README.md', 'run complete']);
+    // Only the agent-work activity surfaces; the surrounding system + result lifecycle events are dropped.
+    expect(seen.map((a) => a.summary)).toEqual(['tool: Read README.md']);
     // Streaming does not disturb the buffered final-result parse.
     expect(result.output).toEqual({ requestedTransition: 'proceed' });
   });

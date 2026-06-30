@@ -6,8 +6,13 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  activityLane,
+  branchUrl,
   escalationModel,
   escapeHtml,
+  isAtBottom,
+  issueUrl,
+  prUrl,
   fmtCost,
   fmtDuration,
   fmtTokens,
@@ -119,6 +124,54 @@ describe('stepperModel', () => {
   });
   it('leaves nothing current when the state is off the spine (escalation)', () => {
     expect(stepperModel(FSM, 'needs_human').every((n) => n.status === 'todo')).toBe(true);
+  });
+});
+
+describe('GitHub deep links', () => {
+  it('builds an issue URL from owner/repo#N', () => {
+    expect(issueUrl('jzohdi/tmux-speedrun#31')).toBe('https://github.com/jzohdi/tmux-speedrun/issues/31');
+    expect(issueUrl('bad ref')).toBeNull();
+    expect(issueUrl(undefined)).toBeNull();
+  });
+  it('builds a PR URL from the repo ref + number, or null without one', () => {
+    expect(prUrl('jzohdi/tmux-speedrun', 33)).toBe('https://github.com/jzohdi/tmux-speedrun/pull/33');
+    expect(prUrl('jzohdi/tmux-speedrun', null)).toBeNull();
+    expect(prUrl('', 5)).toBeNull();
+  });
+  it('builds a branch URL, preserving slashes in the branch name', () => {
+    expect(branchUrl('o/r', 'agent/run-1-abc')).toBe('https://github.com/o/r/tree/agent/run-1-abc');
+    expect(branchUrl('o/r', null)).toBeNull();
+    expect(branchUrl(undefined, 'main')).toBeNull();
+  });
+});
+
+describe('isAtBottom', () => {
+  it('is true exactly at the bottom and within the threshold', () => {
+    expect(isAtBottom(900, 100, 1000)).toBe(true); // 900 + 100 === 1000
+    expect(isAtBottom(880, 100, 1000)).toBe(true); // 20px from bottom, within default 24
+  });
+  it('is false when scrolled up beyond the threshold', () => {
+    expect(isAtBottom(700, 100, 1000)).toBe(false); // 200px from bottom
+    expect(isAtBottom(0, 100, 1000)).toBe(false);
+  });
+  it('honors a custom threshold', () => {
+    expect(isAtBottom(880, 100, 1000, 10)).toBe(false); // 20px from bottom, threshold 10
+    expect(isAtBottom(880, 100, 1000, 30)).toBe(true);
+  });
+});
+
+describe('activityLane', () => {
+  it('routes the agent\'s words to the thinking stream', () => {
+    expect(activityLane('thinking')).toBe('thinking');
+    expect(activityLane('assistant')).toBe('thinking');
+  });
+  it('routes the agent\'s actions to the activity wire', () => {
+    expect(activityLane('tool_use')).toBe('wire');
+    expect(activityLane('tool_result')).toBe('wire');
+  });
+  it('defaults an unknown/missing kind to the wire (so nothing is lost)', () => {
+    expect(activityLane(undefined)).toBe('wire');
+    expect(activityLane('mystery')).toBe('wire');
   });
 });
 

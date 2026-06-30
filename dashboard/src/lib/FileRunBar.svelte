@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { startRun, banner, fetchSuggestions } from './store.svelte';
+  import { startRun, fetchSuggestions } from './store.svelte';
   import type { IssueSuggestion } from './types';
 
   let value = $state('');
@@ -7,6 +7,9 @@
   let activeIdx = $state(-1);
   let busy = $state(false);
   let suggestions = $state<IssueSuggestion[]>([]);
+  // The last failed start's message, shown inline until the operator edits the input (so the daemon's
+  // reason — a malformed ref, or a cross-repo / wrong-repo mismatch — is never silently swallowed).
+  let error = $state<string | null>(null);
 
   // Debounced, race-guarded fetch of GitHub suggestions for the current query.
   let debounce: ReturnType<typeof setTimeout> | undefined;
@@ -40,12 +43,15 @@
     const ref = value.trim();
     if (!ref || busy) return;
     busy = true;
+    error = null;
     try {
       await startRun(ref);
       value = '';
       open = false;
     } catch (err) {
-      banner(`Could not start run: ${(err as Error).message}`, 'err');
+      // Show the daemon's reason inline and close the suggestions so it isn't hidden behind them.
+      error = (err as Error).message;
+      open = false;
     } finally {
       busy = false;
     }
@@ -82,7 +88,7 @@
     <input
       bind:value
       onfocus={() => { open = true; refresh(); }}
-      oninput={() => { open = true; refresh(); }}
+      oninput={() => { open = true; error = null; refresh(); }}
       onkeydown={onKeydown}
       placeholder="owner/repo#123 — start typing to search your repos &amp; issues"
       autocomplete="off"
@@ -90,6 +96,10 @@
     />
     <button type="submit" class="file-btn" disabled={!value.trim() || busy}>{busy ? 'Starting…' : 'Start run'}</button>
   </form>
+
+  {#if error}
+    <div class="af-runerr" role="alert">✖ {error}</div>
+  {/if}
 
   {#if open && value.trim() !== ''}
     <div class="af-ac">

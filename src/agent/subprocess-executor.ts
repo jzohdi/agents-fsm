@@ -212,17 +212,11 @@ const SUMMARY_MAX = 140;
  */
 export function summarizeEvent(parsed: unknown): AgentActivity[] {
   if (!isObject(parsed)) return [];
-  switch (parsed.type) {
-    case 'system':
-      return [{ kind: 'init', summary: `session ${asString(parsed.subtype) ?? 'started'}`, detail: parsed }];
-    case 'assistant':
-    case 'user':
-      return summarizeMessage(parsed);
-    case 'result':
-      return [{ kind: 'result', summary: parsed.is_error === true ? 'run errored' : 'run complete' }];
-    default:
-      return [];
-  }
+  // Only the agent's own work (assistant/user message content) is surfaced. `system` (session init,
+  // e.g. `session thinking_tokens`) and `result` (per-phase run boundary) are harness lifecycle noise —
+  // they crowd out the real activity, so they are deliberately dropped (the final result is parsed from
+  // the buffered output separately, see `parseHarnessOutput`).
+  return parsed.type === 'assistant' || parsed.type === 'user' ? summarizeMessage(parsed) : [];
 }
 
 /** Summarize the content blocks of an `assistant`/`user` message event. */

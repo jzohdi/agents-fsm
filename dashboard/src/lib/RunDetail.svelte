@@ -1,10 +1,15 @@
 <script lang="ts">
   import { ui, control, revertRun } from './store.svelte';
-  import { telemetryModel, escalationModel, fmtCost, fmtDuration, fmtTokens, escapeHtml, humanizeState } from './render';
+  import { telemetryModel, escalationModel, activityLane, issueUrl, prUrl, branchUrl, fmtCost, fmtDuration, fmtTokens, escapeHtml, humanizeState } from './render';
   import StateMachine from './StateMachine.svelte';
+  import ScrollArea from './ScrollArea.svelte';
 
   const detail = $derived(ui.detail);
   const run = $derived(detail?.run ?? null);
+  // GitHub deep links for the header (open in a new tab); null when not applicable.
+  const issueHref = $derived(issueUrl(run?.issueRef));
+  const branchHref = $derived(branchUrl(run?.repoRef, run?.branch));
+  const prHref = $derived(prUrl(run?.repoRef, run?.prNumber));
   // The escalation inspector (needs_human UX, README M7): why the run escalated + operator guidance.
   const escalation = $derived(
     run && run.status === 'needs_human'
@@ -29,13 +34,18 @@
     if (revertable.length && !revertable.includes(revertTo)) revertTo = revertable[0]!;
   });
 
+  // Split the one activity stream into two non-redundant feeds: the agent's actions (tool calls) go to
+  // the activity wire; its words (thinking + narration) go to the live "model thinking" stream.
+  const wireLines = $derived(ui.logs.filter((l) => activityLane(l.kind) === 'wire'));
+  const thinkingLines = $derived(ui.logs.filter((l) => activityLane(l.kind) === 'thinking'));
+
   // live "model thinking" tail — auto-scroll to the newest line as the stream appends
   let streamEl = $state<HTMLDivElement | undefined>(undefined);
   $effect(() => {
-    void ui.logs.length;
+    void thinkingLines.length;
     if (streamEl) streamEl.scrollTop = streamEl.scrollHeight;
   });
-  const liveTail = $derived(ui.logs.slice(-14));
+  const liveTail = $derived(thinkingLines.slice(-14));
 
   function reasonText(reason: unknown): string {
     return typeof reason === 'string' ? reason : JSON.stringify(reason);
@@ -70,10 +80,15 @@
     <div>
       <h1>Run {run.id} · {run.issueRef}</h1>
       <div class="sub">
-        {#if run.branch}<span>branch <a href={`#`}>{run.branch}</a></span><span class="sep">·</span>{/if}
-        {#if run.prNumber}<span>PR #{run.prNumber}</span><span class="sep">·</span>{/if}
+        {#if run.branch}
+          <span>branch {#if branchHref}<a href={branchHref} target="_blank" rel="noopener">{run.branch}</a>{:else}{run.branch}{/if}</span><span class="sep">·</span>
+        {/if}
         <span>{run.agentRunsCount} agent runs</span><span class="sep">·</span>
         <span class="af-statline af-stat-{run.status}"><span class="pip"></span>{run.status.replace('_', ' ')}</span>
+      </div>
+      <div class="af-open">
+        {#if issueHref}<a class="af-openbtn" href={issueHref} target="_blank" rel="noopener">Open issue ↗</a>{/if}
+        {#if prHref}<a class="af-openbtn" href={prHref} target="_blank" rel="noopener">Open PR #{run.prNumber} ↗</a>{/if}
       </div>
     </div>
     <div class="af-controls">
@@ -120,56 +135,62 @@
     <div class="af-wrap af-triptych">
     <div class="af-col">
       <span class="af-eyebrow">Telemetry</span>
-      <table class="af-kv">
-        <thead><tr><th>stage</th><th class="num">runs</th><th class="num">tokens</th><th class="num">time</th></tr></thead>
-        <tbody>
-          {#if tel.stages.length === 0}
-            <tr><td colspan="4" class="af-empty">No agent runs yet.</td></tr>
-          {/if}
-          {#each tel.stages as s (s.stage)}
-            <tr><td>{s.stage}</td><td class="num">{s.invocations}</td><td class="num">{fmtTokens(s.tokens)}</td><td class="num">{fmtDuration(s.durationMs)}</td></tr>
-          {/each}
-        </tbody>
-        <tfoot>
-          <tr><td>total · {fmtCost(run.costUsed)}</td><td class="num">{tel.totals.invocations}</td><td class="num">{fmtTokens(tel.totals.tokens)}</td><td class="num">{fmtDuration(tel.totals.durationMs)}</td></tr>
-        </tfoot>
-      </table>
+      <ScrollArea resetKey={run.id}>
+        <table class="af-kv">
+          <thead><tr><th>stage</th><th class="num">runs</th><th class="num">tokens</th><th class="num">time</th></tr></thead>
+          <tbody>
+            {#if tel.stages.length === 0}
+              <tr><td colspan="4" class="af-empty">No agent runs yet.</td></tr>
+            {/if}
+            {#each tel.stages as s (s.stage)}
+              <tr><td>{s.stage}</td><td class="num">{s.invocations}</td><td class="num">{fmtTokens(s.tokens)}</td><td class="num">{fmtDuration(s.durationMs)}</td></tr>
+            {/each}
+          </tbody>
+          <tfoot>
+            <tr><td>total · {fmtCost(run.costUsed)}</td><td class="num">{tel.totals.invocations}</td><td class="num">{fmtTokens(tel.totals.tokens)}</td><td class="num">{fmtDuration(tel.totals.durationMs)}</td></tr>
+          </tfoot>
+        </table>
+      </ScrollArea>
     </div>
 
     <div class="af-col">
       <span class="af-eyebrow">Artifacts</span>
-      {#if detail && detail.artifacts.length}
-        {#each detail.artifacts as a, i (i)}
-          <div class="af-art">
-            <span class="k">{a.kind}</span>
-            <span class="v">
-              {#if artifactUrl(a.locator)}
-                <a href={artifactUrl(a.locator)} target="_blank" rel="noopener">{artifactUrl(a.locator)}</a>
-              {:else}
-                {reasonText(a.locator)}
-              {/if}
-            </span>
-          </div>
-        {/each}
-      {:else}
-        <p class="af-empty">No artifacts yet.</p>
-      {/if}
+      <ScrollArea resetKey={run.id}>
+        {#if detail && detail.artifacts.length}
+          {#each detail.artifacts as a, i (i)}
+            <div class="af-art">
+              <span class="k">{a.kind}</span>
+              <span class="v">
+                {#if artifactUrl(a.locator)}
+                  <a href={artifactUrl(a.locator)} target="_blank" rel="noopener">{artifactUrl(a.locator)}</a>
+                {:else}
+                  {reasonText(a.locator)}
+                {/if}
+              </span>
+            </div>
+          {/each}
+        {:else}
+          <p class="af-empty">No artifacts yet.</p>
+        {/if}
+      </ScrollArea>
     </div>
 
     <div class="af-col">
       <span class="af-eyebrow">Transitions</span>
-      {#if detail && detail.transitions.length}
-        {#each detail.transitions as t (t.id)}
-          <div class="af-tr" class:back={t.backEdge}>
-            <span class="f">{t.fromState}</span>
-            <span class="ar">{t.backEdge ? '↩' : '→'}</span>
-            <span class="to">{t.toState} <span class="trig">{t.trigger}</span></span>
-            {#if t.reason}<span class="why">{reasonText(t.reason)}</span>{/if}
-          </div>
-        {/each}
-      {:else}
-        <p class="af-empty">No transitions yet.</p>
-      {/if}
+      <ScrollArea resetKey={run.id}>
+        {#if detail && detail.transitions.length}
+          {#each detail.transitions as t (t.id)}
+            <div class="af-tr" class:back={t.backEdge}>
+              <span class="f">{t.fromState}</span>
+              <span class="ar">{t.backEdge ? '↩' : '→'}</span>
+              <span class="to">{t.toState} <span class="trig">{t.trigger}</span></span>
+              {#if t.reason}<span class="why">{reasonText(t.reason)}</span>{/if}
+            </div>
+          {/each}
+        {:else}
+          <p class="af-empty">No transitions yet.</p>
+        {/if}
+      </ScrollArea>
     </div>
   </div>
 </section>
@@ -177,19 +198,21 @@
 <section class="af-sec" style="border-bottom:0">
   <div class="af-wrap af-actgrid">
     <div class="wirecol">
-      <span class="af-eyebrow"><span>Activity wire</span><span style="color:var(--ink4)">{ui.logs.length} events</span></span>
-      <div class="af-wire">
-        {#if ui.logs.length === 0}
-          <p class="af-empty">No activity yet.</p>
-        {/if}
-        {#each ui.logs as line, i (i)}
-          <div class="ln" class:warn={line.level === 'warn' || line.level === 'error'}>
-            <span class="stg">{line.stage ?? '—'}</span>
-            <!-- eslint-disable-next-line svelte/no-at-html-tags — formatWire escapes input then promotes `code`/**mark** -->
-            <span class="msg">{@html formatWire(line.message)}</span>
-          </div>
-        {/each}
-      </div>
+      <span class="af-eyebrow"><span>Activity wire</span><span style="color:var(--ink4)">{wireLines.length} actions</span></span>
+      <ScrollArea height="300px" resetKey={run.id}>
+        <div class="af-wire">
+          {#if wireLines.length === 0}
+            <p class="af-empty">No actions yet.</p>
+          {/if}
+          {#each wireLines as line, i (i)}
+            <div class="ln" class:warn={line.level === 'warn' || line.level === 'error'}>
+              <span class="stg">{line.stage ?? '—'}</span>
+              <!-- eslint-disable-next-line svelte/no-at-html-tags — formatWire escapes input then promotes `code`/**mark** -->
+              <span class="msg">{@html formatWire(line.message)}</span>
+            </div>
+          {/each}
+        </div>
+      </ScrollArea>
     </div>
 
     <div class="livecol">

@@ -91,6 +91,8 @@ export interface LogLine {
   message: string;
   stage?: string;
   level: string;
+  /** Activity kind (`thinking`/`assistant`/`tool_use`/`tool_result`), used to route it to a panel. */
+  kind?: string;
 }
 
 /** An open issue suggested by the daemon for the new-run autocomplete (`GET /suggestions`). */

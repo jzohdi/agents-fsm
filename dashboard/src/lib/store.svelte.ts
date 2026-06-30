@@ -86,8 +86,11 @@ function upsertRun(run: Run): void {
 }
 
 function toLogLine(level: string, message: string, data: unknown): LogLine {
-  const stage = data && typeof data === 'object' && 'stage' in data ? String((data as { stage: unknown }).stage) : undefined;
-  return stage ? { level, message, stage } : { level, message };
+  const d = data && typeof data === 'object' ? (data as Record<string, unknown>) : undefined;
+  const line: LogLine = { level, message };
+  if (typeof d?.stage === 'string') line.stage = d.stage;
+  if (typeof d?.kind === 'string') line.kind = d.kind;
+  return line;
 }
 
 export async function loadConfig(): Promise<void> {
@@ -168,9 +171,9 @@ export function connectStream(): void {
   es.addEventListener('transition', onRunEvent);
   es.addEventListener('status', onRunEvent);
   es.addEventListener('activity', (e: MessageEvent) => {
-    const data = JSON.parse(e.data) as { activity: { runId: number; stage: string; activity: { summary: string } } };
+    const data = JSON.parse(e.data) as { activity: { runId: number; stage: string; activity: { summary: string; kind?: string } } };
     if (data.activity.runId === ui.selectedId) {
-      ui.logs.push(toLogLine('info', data.activity.activity.summary, { stage: data.activity.stage }));
+      ui.logs.push(toLogLine('info', data.activity.activity.summary, { stage: data.activity.stage, kind: data.activity.activity.kind }));
     }
   });
 }

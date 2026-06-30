@@ -24,17 +24,25 @@ import type { AgentActivity } from './agent/executor';
 const PORT = Number(process.env.PORT ?? 4319);
 
 // Generic so they read sensibly whichever running run the dashboard auto-selects.
-const THOUGHTS = [
-  're-reading the failing assertion from the last test run',
-  'narrowing the change to the smallest safe diff',
-  'checking callers of the function under edit … 6 references',
-  'editing the target module (+18 −6)',
-  'edge case: the error path must clean up state',
-  'adding a regression test for the boundary condition',
-  'running the test suite `vitest`',
-  '**all tests passing** — no regressions',
-  'reviewing the diff once more before handoff',
-  'summarizing the change for the review stage',
+// A coherent work loop, alternating the agent's words (thinking/assistant → the live stream) and its
+// actions (tool_use/tool_result → the activity wire), so the preview exercises both split panels.
+const STEPS: AgentActivity[] = [
+  { kind: 'thinking', summary: 'thinking: re-reading the failing assertion from the last test run' },
+  { kind: 'tool_use', summary: 'tool: Read `src/checkout/session.ts`' },
+  { kind: 'tool_result', summary: 'tool result' },
+  { kind: 'thinking', summary: 'thinking: narrowing the change to the smallest safe diff' },
+  { kind: 'tool_use', summary: 'tool: Grep `refreshToken`' },
+  { kind: 'tool_result', summary: 'tool result' },
+  { kind: 'assistant', summary: 'assistant: the error path must also clear the pending timer' },
+  { kind: 'tool_use', summary: 'tool: Edit `src/checkout/session.ts`' },
+  { kind: 'tool_result', summary: 'tool result' },
+  { kind: 'thinking', summary: 'thinking: adding a regression test for the boundary condition' },
+  { kind: 'tool_use', summary: 'tool: Bash `npm test`' },
+  { kind: 'tool_result', summary: 'tool result: error' },
+  { kind: 'assistant', summary: 'assistant: one case still failing — fixing the off-by-one' },
+  { kind: 'tool_use', summary: 'tool: Bash `npm test`' },
+  { kind: 'tool_result', summary: 'tool result' },
+  { kind: 'thinking', summary: 'thinking: **all tests passing** — reviewing the diff before handoff' },
 ];
 
 function main(): void {
@@ -60,7 +68,7 @@ function main(): void {
   // Stream synthetic "model thinking" for the running run so the live feed animates like real work.
   let i = 0;
   const ticker = setInterval(() => {
-    const activity: AgentActivity = { kind: 'thinking', summary: THOUGHTS[i % THOUGHTS.length]! };
+    const activity = STEPS[i % STEPS.length]!;
     i += 1;
     broadcaster.publish({ type: 'activity', activity: { runId: runningId, stage: 'frontend', phase: 'produce', activity } });
   }, 1600);

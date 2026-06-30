@@ -107,6 +107,11 @@ input, textarea, button, select { font: inherit; }
 .af-ac .opt .t { color: var(--ink2); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .af-ac .opt .tag { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--ink3); flex: 0 0 auto; padding-left: 12px; }
 .af-ac .none { padding: 14px 32px; color: var(--ink3); font-size: 13px; }
+/* Inline start-run error: a clear, persistent row under the input (not occluded by the dropdown). */
+.af-runerr {
+  padding: 11px 32px; background: var(--rose-soft); color: var(--rose);
+  font-family: var(--mono); font-size: 12.5px; border-bottom: 1px solid var(--rule);
+}
 
 /* --- banner --- */
 .af-banner { padding: 10px 32px; font-size: 13px; border-bottom: 1px solid var(--rule); }
@@ -138,7 +143,7 @@ input, textarea, button, select { font: inherit; }
 /* --- pipeline buckets (no sidebar, no cards) --- */
 .af-buckets { display: flex; align-items: stretch; overflow-x: auto; overflow-y: hidden; padding-bottom: 4px; scrollbar-width: thin; }
 .af-bucket { flex: 0 0 244px; border-right: 1px solid var(--rule); display: flex; flex-direction: column; min-height: 140px; }
-.af-bucket.is-empty { flex: 0 0 108px; }            /* empty lanes shrink (req 3) */
+.af-bucket.is-empty { flex: 0 0 auto; }             /* empty lanes shrink to fit their (single-line) label */
 .af-bucket:first-child { padding-left: 0; }
 .af-bucket.last { border-right: 0; }
 .af-bucket .pad { padding: 0 16px; }
@@ -150,7 +155,7 @@ input, textarea, button, select { font: inherit; }
 }
 .af-bucket:first-child .af-b-head { padding-left: 0; }
 .af-b-head .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
-.af-b-head .nm { font-size: 12.5px; font-weight: 700; }
+.af-b-head .nm { font-size: 12.5px; font-weight: 700; white-space: nowrap; } /* labels stay on one line so all bucket headers are the same height */
 .af-b-head .ct { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--ink3); }
 .af-b-body { overflow-y: auto; max-height: 416px; padding: 0 16px; }   /* per-lane vertical scroll (req 5) */
 .af-bucket:first-child .af-b-body { padding-left: 0; }
@@ -182,6 +187,13 @@ input, textarea, button, select { font: inherit; }
 .af-dhead { display: flex; align-items: flex-start; gap: 20px; flex-wrap: wrap; margin-bottom: 4px; }
 .af-dhead h1 { font-size: 28px; font-weight: 800; letter-spacing: -0.03em; margin: 0; line-height: 1.08; }
 .af-dhead .sub { color: var(--ink3); font-size: 13.5px; margin-top: 8px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+/* Open-in-GitHub buttons (issue / PR) — a new tab each. */
+.af-open { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+.af-openbtn {
+  display: inline-flex; align-items: center; border: 1px solid var(--accent-line); background: var(--accent-soft);
+  color: var(--accent); font-size: 12.5px; font-weight: 600; padding: 6px 14px; border-radius: 6px; white-space: nowrap;
+}
+.af-openbtn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
 .af-dhead .sep { color: var(--ink4); }
 .af-statline { display: inline-flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
 .af-statline .pip { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
@@ -236,6 +248,20 @@ input, textarea, button, select { font: inherit; }
 .af-kv .num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .af-kv tfoot td { border-top: 1.5px solid var(--rule2); font-weight: 700; color: var(--ink); }
 .af-kv tfoot .num { color: var(--accent); }
+/* Keep the header + total visible while the stage rows scroll inside the ScrollArea. */
+.af-scrollarea .af-kv thead th { position: sticky; top: 0; background: var(--paper); z-index: 1; }
+.af-scrollarea .af-kv tfoot td { position: sticky; bottom: 0; background: var(--paper); }
+
+/* --- ScrollArea: fixed-height, auto-stick-to-bottom feed with a jump-to-latest button --- */
+.af-scrollarea { position: relative; }
+.af-sa-body { height: var(--af-sa-h, 260px); overflow-y: auto; overflow-x: hidden; }
+.af-sa-jump {
+  position: absolute; right: 8px; bottom: 8px; display: flex; align-items: center; gap: 5px;
+  border: 1px solid var(--accent-line); background: var(--accent-soft); color: var(--accent);
+  font-family: var(--mono); font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 999px;
+  cursor: pointer; box-shadow: 0 6px 16px -8px rgba(40, 35, 20, 0.5);
+}
+.af-sa-jump:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
 .af-art { display: flex; gap: 12px; align-items: baseline; padding: 9px 0; border-top: 1px solid var(--rule); }
 .af-art:first-of-type { border-top: 0; }
 .af-art .k { font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink3); min-width: 60px; }
@@ -255,10 +281,12 @@ input, textarea, button, select { font: inherit; }
 .af-actgrid .wirecol { padding-right: 34px; border-right: 1px solid var(--rule); }
 .af-actgrid .livecol { padding-left: 34px; }
 .af-actgrid .af-eyebrow { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-.af-wire { font-family: var(--mono); font-size: 12.5px; max-height: 300px; overflow: auto; }
-.af-wire .ln { display: grid; grid-template-columns: 56px 1fr; gap: 14px; padding: 9px 0; border-top: 1px solid var(--rule); align-items: baseline; }
+.af-wire { font-family: var(--mono); font-size: 12.5px; }
+/* Label column is wide enough for the longest stage id (e.g. INTERFACE_DESIGN); the ellipsis is a
+   safety net so an unusually long custom stage clips instead of overlapping the message (the bug). */
+.af-wire .ln { display: grid; grid-template-columns: 116px 1fr; gap: 14px; padding: 9px 0; border-top: 1px solid var(--rule); align-items: baseline; }
 .af-wire .ln:first-child { border-top: 0; }
-.af-wire .stg { font-weight: 600; font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink3); }
+.af-wire .stg { font-weight: 600; font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink3); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .af-wire .ln.warn { background: linear-gradient(90deg, var(--rose-soft), transparent 70%); margin: 0 -10px; padding: 9px 10px; }
 .af-wire .ln.warn .stg { color: var(--rose); }
 .af-wire .msg code { background: var(--ink); color: var(--paper); padding: 1px 6px; border-radius: 3px; font-size: 11.5px; }
@@ -313,7 +341,7 @@ input, textarea, button, select { font: inherit; }
   .af-filebar .lab { display: none; }
   /* condensed pipeline lanes (req 2 — mobile variant) */
   .af-bucket { flex: 0 0 200px; }
-  .af-bucket.is-empty { flex: 0 0 92px; }
+  .af-bucket.is-empty { flex: 0 0 auto; }
   .af-unit { padding-top: 11px; padding-bottom: 11px; }
   .af-unit .ttl { display: none; }
   .af-b-body { max-height: 340px; }
