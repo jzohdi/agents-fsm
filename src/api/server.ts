@@ -13,6 +13,7 @@
  *   POST /runs                  GET /runs            GET /runs/:id
  *   POST /runs/:id/pause        POST /runs/:id/resume
  *   POST /runs/:id/stop         POST /runs/:id/revert
+ *   POST /runs/:id/archive      POST /runs/:id/unarchive
  *   GET  /config                PUT /config
  *   GET  /suggestions[?q=]
  *   GET  /stream[?runId=]       GET /health
@@ -82,7 +83,7 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
   const runMatch = /^\/runs\/(\d+)$/.exec(path);
   if (runMatch && method === 'GET') return sendJson(res, 200, orch.getRunDetail(Number(runMatch[1])));
 
-  const actionMatch = /^\/runs\/(\d+)\/(pause|resume|stop|revert)$/.exec(path);
+  const actionMatch = /^\/runs\/(\d+)\/(pause|resume|stop|revert|archive|unarchive)$/.exec(path);
   if (actionMatch && method === 'POST') {
     const id = Number(actionMatch[1]);
     switch (actionMatch[2]) {
@@ -92,6 +93,10 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
         return sendJson(res, 200, orch.resume(id));
       case 'stop':
         return sendJson(res, 200, orch.stop(id));
+      case 'archive':
+        return sendJson(res, 200, orch.archive(id));
+      case 'unarchive':
+        return sendJson(res, 200, orch.unarchive(id));
       case 'revert': {
         const body = await readJson(req);
         return sendJson(res, 200, orch.revert(id, str(body, 'toState'), body.reason));

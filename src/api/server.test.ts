@@ -111,6 +111,20 @@ describe('HTTP API', () => {
     expect(revertBad.status).toBe(400);
   });
 
+  it('archives a terminal run and unarchives it (and 409s a live run)', async () => {
+    const { base, orchestrator } = await start();
+    const run = (await (await fetch(`${base}/runs`, { method: 'POST', body: JSON.stringify({ issueRef: 'o/r#1' }) })).json()) as { id: number };
+    await orchestrator.settle(); // → done
+
+    const archived = (await (await fetch(`${base}/runs/${run.id}/archive`, { method: 'POST' })).json()) as { archivedAt: string | null };
+    expect(archived.archivedAt).toBeTruthy();
+    const restored = (await (await fetch(`${base}/runs/${run.id}/unarchive`, { method: 'POST' })).json()) as { archivedAt: string | null };
+    expect(restored.archivedAt).toBeNull();
+
+    // archiving a missing run → 404 (the terminal-only 409 is covered deterministically in the orchestrator unit test)
+    expect((await fetch(`${base}/runs/99999/archive`, { method: 'POST' })).status).toBe(404);
+  });
+
   it('gets the config and rejects an invalid update (read-only without a config path)', async () => {
     const { base } = await start();
     const config = (await (await fetch(`${base}/config`)).json()) as { version: string; fsm: { initial: string } };

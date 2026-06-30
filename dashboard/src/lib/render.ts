@@ -100,6 +100,7 @@ export interface PipelineRow {
   tokens: number;
   cost: number;
   resolved: boolean; // terminal (done/stopped) — eligible for archiving
+  archived: boolean; // archived server-side (Run.archivedAt set)
 }
 export interface PipelineColumn {
   key: string;
@@ -127,6 +128,7 @@ function pipelineRow(r: Run): PipelineRow {
     tokens: r.tokensUsed ?? 0,
     cost: r.costUsed ?? 0,
     resolved,
+    archived: r.archivedAt != null,
   };
 }
 
@@ -134,15 +136,15 @@ function pipelineRow(r: Run): PipelineRow {
  * Bucket runs into pipeline columns: the FSM's `forwardOrder` (minus terminal states) as flow lanes,
  * then a `needs_human` escalation lane and a single `Resolved` lane (done + stopped). A run sits in
  * the escalation lane if its status is `needs_human`, in Resolved if terminal, else in its
- * `currentState` lane. Archived run ids are dropped from Resolved unless `showArchived` (their count
- * is returned so the UI can offer to reveal them). Pure — the board view-model the dashboard renders.
+ * `currentState` lane. Server-archived runs (`Run.archivedAt` set) are dropped from Resolved unless
+ * `showArchived` (their count is returned so the UI can offer to reveal them). Pure — the board
+ * view-model the dashboard renders.
  */
 export function pipelineModel(
   runs: Run[] | undefined,
   fsm: Partial<FsmConfig> | null | undefined,
-  opts: { archived?: ReadonlySet<number>; showArchived?: boolean } = {},
+  opts: { showArchived?: boolean } = {},
 ): PipelineModel {
-  const archived = opts.archived ?? new Set<number>();
   const states = fsm?.states ?? {};
   const escalation = fsm?.escalationState ?? 'needs_human';
   const flow = (fsm?.forwardOrder ?? []).filter((s) => !states[s]?.terminal);
@@ -158,7 +160,7 @@ export function pipelineModel(
     if (r.status === 'needs_human') {
       needsHuman.runs.push(row);
     } else if (row.resolved) {
-      if (archived.has(r.id)) {
+      if (row.archived) {
         archivedCount += 1;
         if (opts.showArchived) resolved.runs.push(row);
       } else {

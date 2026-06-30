@@ -15,6 +15,8 @@ export interface Run {
   costUsed: number;
   agentRunsCount: number;
   flags: Record<string, boolean>;
+  /** When the run was archived out of the Resolved lane (ISO), or `null`. */
+  archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }

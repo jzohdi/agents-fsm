@@ -31,6 +31,8 @@ interface RunSpec {
   escalateFrom?: string;
   /** Adds a final operator `stop` transition from `currentState`. */
   stopped?: boolean;
+  /** Pre-archive this resolved run (so the dashboard's "Show archived" affordance appears on load). */
+  archived?: boolean;
   logs: { level: string; message: string; stage: string }[];
   artifacts: { kind: string; locator: unknown }[];
 }
@@ -132,7 +134,7 @@ const SPECS: RunSpec[] = [
   resolved(88, 'acme/infra', 'Rotate staging TLS certificates', 120000, 2.41, 'af/88-tls', 90),
   resolved(84, 'acme/infra', 'Bump node base image to 20-slim', 96000, 1.88, 'af/84-imagebump', 86),
   resolved(79, 'acme/web', 'Add dark-mode toggle to settings', 71000, 1.42, 'af/79-darkmode', 81),
-  resolved(70, 'acme/api', 'Cache the org settings lookup', 64000, 1.27, 'af/70-cache', 72),
+  { ...resolved(70, 'acme/api', 'Cache the org settings lookup', 64000, 1.27, 'af/70-cache', 72), archived: true },
   {
     issue: 66, repo: 'acme/web', title: 'Promo banner flickers on first paint', currentState: 'frontend',
     status: 'stopped', tokens: 18000, cost: 0.39, branch: 'af/66-banner', stopped: true,
@@ -210,6 +212,7 @@ export function seedRuns(repo: Repository, version: string): number[] {
     repo.addRunUsage(id, { tokens: s.tokens, cost: s.cost, agentRuns });
     repo.setRunState(id, s.currentState);
     if (s.status !== 'running') repo.setRunStatus(id, s.status);
+    if (s.archived) repo.setRunArchived(id, true);
   }
   return ids;
 }

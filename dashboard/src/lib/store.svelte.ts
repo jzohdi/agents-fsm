@@ -9,17 +9,6 @@
 import { request } from './api';
 import type { IssueSuggestion, LoadedConfig, LogLine, Run, RunDetail } from './types';
 
-const ARCHIVE_KEY = 'af-archived-runs';
-function loadArchived(): number[] {
-  try {
-    const raw = localStorage.getItem(ARCHIVE_KEY);
-    const arr = raw ? (JSON.parse(raw) as unknown) : [];
-    return Array.isArray(arr) ? arr.filter((n): n is number => typeof n === 'number') : [];
-  } catch {
-    return [];
-  }
-}
-
 export const ui = $state({
   runs: [] as Run[], // newest first
   selectedId: null as number | null,
@@ -29,30 +18,25 @@ export const ui = $state({
   logs: [] as LogLine[], // the selected run's activity feed (persisted logs + live stream)
   view: 'run' as 'run' | 'editor',
   banner: null as { msg: string; kind: 'ok' | 'err' } | null,
-  // Archiving resolved runs is client-side only for now — the M5 control plane has no archive
-  // endpoint yet (deferred). We hide archived ids from the Resolved lane and persist the choice.
-  archived: loadArchived() as number[],
+  // `showArchived` is a client-side view preference; whether a run *is* archived lives on the server
+  // (Run.archivedAt), set via the archive/unarchive endpoints below.
   showArchived: false,
 });
 
-function persistArchived(): void {
+/** Archive a resolved (done/stopped) run server-side so it drops out of the Resolved lane. */
+export async function archiveRun(id: number): Promise<void> {
   try {
-    localStorage.setItem(ARCHIVE_KEY, JSON.stringify(ui.archived));
-  } catch {
-    /* private mode / quota — archiving just won't persist across reloads */
+    upsertRun(await request<Run>('POST', `/runs/${id}/archive`));
+  } catch (err) {
+    banner(`Archive failed: ${(err as Error).message}`, 'err');
   }
 }
-
-/** Archive a resolved (done/stopped) run so it drops out of the Resolved lane. */
-export function archiveRun(id: number): void {
-  if (!ui.archived.includes(id)) {
-    ui.archived = [...ui.archived, id];
-    persistArchived();
+export async function unarchiveRun(id: number): Promise<void> {
+  try {
+    upsertRun(await request<Run>('POST', `/runs/${id}/unarchive`));
+  } catch (err) {
+    banner(`Restore failed: ${(err as Error).message}`, 'err');
   }
-}
-export function unarchiveRun(id: number): void {
-  ui.archived = ui.archived.filter((n) => n !== id);
-  persistArchived();
 }
 export function toggleShowArchived(): void {
   ui.showArchived = !ui.showArchived;

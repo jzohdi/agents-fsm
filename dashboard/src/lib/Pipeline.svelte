@@ -9,8 +9,7 @@
     needs_human: '#b0443a', __resolved__: '#928c80',
   };
 
-  const archivedSet = $derived(new Set(ui.archived));
-  const model = $derived(pipelineModel(ui.runs, ui.config?.fsm, { archived: archivedSet, showArchived: ui.showArchived }));
+  const model = $derived(pipelineModel(ui.runs, ui.config?.fsm, { showArchived: ui.showArchived }));
   const total = $derived(ui.runs.length);
   const active = $derived(ui.runs.filter((r) => r.status === 'running' || r.status === 'paused').length);
   const awaiting = $derived(ui.runs.filter((r) => r.status === 'needs_human' || r.status === 'awaiting_input' || r.status === 'blocked').length);
@@ -55,7 +54,7 @@
               <div class="af-unit" class:sel={r.id === ui.selectedId} onclick={() => open(r.id)} role="button" tabindex="0"
                 onkeydown={(e) => { if (e.key === 'Enter') open(r.id); }}>
                 {#if r.resolved}
-                  {#if archivedSet.has(r.id)}
+                  {#if r.archived}
                     <button type="button" class="archive" title="Restore from archive"
                       onclick={(e) => { e.stopPropagation(); unarchiveRun(r.id); }}>restore</button>
                   {:else}

@@ -230,6 +230,27 @@ describe('Orchestrator — revert', () => {
   });
 });
 
+describe('Orchestrator — archive', () => {
+  it('archives a terminal run, refuses a live one (409), and unarchives anything', async () => {
+    const { orchestrator, repo, events } = setup();
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle(); // → done (terminal)
+
+    const archived = orchestrator.archive(run.id);
+    expect(archived.archivedAt).toBeTruthy();
+    expect(repo.getRun(run.id)!.archivedAt).toBeTruthy();
+    expect(events.at(-1)).toMatchObject({ type: 'status', runId: run.id }); // broadcast for live clients
+
+    const restored = orchestrator.unarchive(run.id);
+    expect(restored.archivedAt).toBeNull();
+
+    const live = orchestrator.start({ issueRef: 'o/r#2' }); // fresh run, not yet drained
+    expectApiError(() => orchestrator.archive(live.id), 409);
+    expectApiError(() => orchestrator.archive(99999), 404);
+    await orchestrator.settle();
+  });
+});
+
 describe('Orchestrator — config', () => {
   it('returns the live config', () => {
     const { orchestrator } = setup();

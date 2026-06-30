@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS runs (
   cost_used          REAL    NOT NULL DEFAULT 0,
   agent_runs_count   INTEGER NOT NULL DEFAULT 0,
   flags              TEXT    NOT NULL DEFAULT '{}',     -- JSON skip flags (needs_frontend/…), set by `plan`, read on every FORWARD
+  archived_at        TEXT,                              -- when an operator archived this (terminal) run out of the dashboard's Resolved lane; NULL = not archived
   created_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );

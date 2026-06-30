@@ -180,6 +180,31 @@ export class Orchestrator {
     return run;
   }
 
+  /**
+   * Archive a terminal (done/stopped) run so the dashboard drops it from the Resolved lane. Refuses
+   * (`409`) a non-terminal run — you don't hide work that's still in flight. Publishes a `status`
+   * event (status unchanged) so connected dashboards update live.
+   */
+  archive(runId: number): Run {
+    const existing = this.requireRun(runId);
+    if (!TERMINAL_STATUSES.has(existing.status)) {
+      throw new ApiError(409, `cannot archive a "${existing.status}" run — only done/stopped runs can be archived`);
+    }
+    this.repo.setRunArchived(runId, true);
+    const run = this.requireRun(runId);
+    this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
+    return run;
+  }
+
+  /** Restore an archived run to the Resolved lane. Allowed regardless of status (it's a no-op undo). */
+  unarchive(runId: number): Run {
+    this.requireRun(runId); // 404 if missing
+    this.repo.setRunArchived(runId, false);
+    const run = this.requireRun(runId);
+    this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
+    return run;
+  }
+
   // --- queries -----------------------------------------------------------------
 
   getRun(runId: number): Run {

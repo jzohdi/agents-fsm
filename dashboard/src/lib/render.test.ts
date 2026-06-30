@@ -33,7 +33,7 @@ const FSM: FsmConfig = {
 
 const run = (over: Partial<Run> = {}): Run => ({
   id: 1, issueRef: 'o/r#1', repoRef: 'o/r', currentState: 'plan', status: 'running', fsmConfigVersion: 'v',
-  prNumber: null, branch: null, tokensUsed: 10, costUsed: 0.5, agentRunsCount: 0, flags: {}, createdAt: '', updatedAt: '', ...over,
+  prNumber: null, branch: null, tokensUsed: 10, costUsed: 0.5, agentRunsCount: 0, flags: {}, archivedAt: null, createdAt: '', updatedAt: '', ...over,
 });
 
 describe('formatting', () => {
@@ -99,12 +99,16 @@ describe('pipelineModel', () => {
     expect(m.columns.find((c) => c.key === '__resolved__')!.runs.map((r) => r.id)).toEqual([3, 4]);
   });
 
-  it('hides archived resolved runs unless showArchived, reporting the hidden count', () => {
-    const runs = [run({ id: 3, currentState: 'done', status: 'done' }), run({ id: 5, currentState: 'done', status: 'done' })];
-    const archived = new Set([5]);
-    expect(pipelineModel(runs, FSM, { archived }).columns.at(-1)!.runs.map((r) => r.id)).toEqual([3]);
-    expect(pipelineModel(runs, FSM, { archived }).archivedCount).toBe(1);
-    expect(pipelineModel(runs, FSM, { archived, showArchived: true }).columns.at(-1)!.runs.map((r) => r.id)).toEqual([3, 5]);
+  it('hides server-archived resolved runs unless showArchived, reporting the hidden count', () => {
+    const runs = [
+      run({ id: 3, currentState: 'done', status: 'done' }),
+      run({ id: 5, currentState: 'done', status: 'done', archivedAt: '2026-06-30T00:00:00Z' }),
+    ];
+    expect(pipelineModel(runs, FSM).columns.at(-1)!.runs.map((r) => r.id)).toEqual([3]);
+    expect(pipelineModel(runs, FSM).archivedCount).toBe(1);
+    const shown = pipelineModel(runs, FSM, { showArchived: true }).columns.at(-1)!.runs;
+    expect(shown.map((r) => r.id)).toEqual([3, 5]);
+    expect(shown.find((r) => r.id === 5)!.archived).toBe(true);
   });
 });
 

@@ -29,6 +29,8 @@ export interface Run {
   agentRunsCount: number;
   /** Skip flags (`needs_frontend`/`needs_backend`, …) emitted by `plan`, read on every FORWARD. */
   flags: Record<string, boolean>;
+  /** When an operator archived this (terminal) run out of the dashboard's Resolved lane; `null` = not archived. */
+  archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -139,6 +141,7 @@ interface RunRow {
   cost_used: number;
   agent_runs_count: number;
   flags: string;
+  archived_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -197,6 +200,7 @@ function mapRun(r: RunRow): Run {
     costUsed: r.cost_used,
     agentRunsCount: r.agent_runs_count,
     flags: JSON.parse(r.flags) as Record<string, boolean>,
+    archivedAt: r.archived_at,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -302,6 +306,12 @@ export class Repository {
   /** Record the PR number, set when `tdd` opens the PR — separate from the branch, which exists earlier. */
   setRunPr(id: number, prNumber: number): void {
     this.db.prepare(`UPDATE runs SET pr_number = ?, updated_at = ${NOW} WHERE id = ?`).run(prNumber, id);
+  }
+
+  /** Archive (stamp `archived_at`) or unarchive (clear it) a run — the dashboard's Resolved-lane tidy-up. */
+  setRunArchived(id: number, archived: boolean): void {
+    const value = archived ? `${NOW}` : 'NULL';
+    this.db.prepare(`UPDATE runs SET archived_at = ${value}, updated_at = ${NOW} WHERE id = ?`).run(id);
   }
 
   /**
