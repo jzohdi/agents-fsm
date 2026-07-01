@@ -37,7 +37,7 @@ import { parseIssueRef } from './integration/refs';
 import { EventLoop } from './loop/event-loop';
 import { ReplyPoller } from './loop/reply-poller';
 import { parseCliArgs, type CliArgs } from './cli-args';
-import { buildRunner } from './build-runner';
+import { buildRunner, resolveDefaultHarness } from './build-runner';
 import { serve } from './serve';
 
 /** Print one live agent activity, indented under the current transition for a readable run trace. */
@@ -149,9 +149,14 @@ async function start(args: CliArgs): Promise<void> {
   }
   const { repo, loop, version, resolver } = buildLoop(args, repoRef);
 
-  console.log(`Config version ${version}; starting run for issue ${issueRef}`);
+  // The one-shot CLI bypasses the Orchestrator, so it resolves + stamps the harness itself (else the run
+  // would silently take the column default and ignore `--harness`/`FLEET_HARNESS`). A bad flag throws here
+  // and is caught by `main` (prints the remedy, exits non-zero) — fail fast, per plan §5.2/§6.4.
+  const harness = resolveDefaultHarness(args, repo);
+
+  console.log(`Config version ${version}; starting run for issue ${issueRef} on harness ${harness}`);
   loop.recover(); // no-op on a fresh DB; proves the startup sweep is wired
-  const run = loop.startRun({ issueRef, repoRef });
+  const run = loop.startRun({ issueRef, repoRef, harness });
   console.log(`Run ${run.id} created in state "${run.currentState}". Transitions:`);
 
   await drainWithReplyPolling(args, repo, loop, resolver);

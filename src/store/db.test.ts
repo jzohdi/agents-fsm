@@ -161,4 +161,22 @@ describe('migrate', () => {
     expect(userVersion(db)).toBe(LATEST_VERSION);
     db.close();
   });
+
+  it('retrofits a database created before the settings store existed', () => {
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, flags TEXT NOT NULL DEFAULT '{}', archived_at TEXT)`);
+    db.pragma('user_version = 6'); // past migrations 1–6; only migration 7 (settings) should run
+    expect(tableExists(db, 'settings')).toBe(false);
+
+    runMigrations(db); // the migration creates the KV store on a pre-existing DB
+
+    expect(tableExists(db, 'settings')).toBe(true);
+    expect(userVersion(db)).toBe(LATEST_VERSION);
+
+    // Drift guard: a retrofitted settings table must be schema-identical to a fresh DB's.
+    const fresh = openDb();
+    expect(columns(db, 'settings')).toEqual(columns(fresh, 'settings'));
+    fresh.close();
+    db.close();
+  });
 });

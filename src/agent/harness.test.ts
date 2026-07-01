@@ -29,7 +29,8 @@ describe('isHarnessId', () => {
   it('accepts every known id and rejects anything else', () => {
     for (const id of HARNESS_IDS) expect(isHarnessId(id)).toBe(true);
     expect(isHarnessId('claude-code')).toBe(true); // the shipped default
-    expect(isHarnessId('cursor')).toBe(false); // not registered yet (a later PR adds it)
+    expect(isHarnessId('cursor')).toBe(true); // the second registered harness
+    expect(isHarnessId('gemini')).toBe(false); // not a known harness
     expect(isHarnessId('')).toBe(false);
     expect(isHarnessId(undefined)).toBe(false);
     expect(isHarnessId(42)).toBe(false);

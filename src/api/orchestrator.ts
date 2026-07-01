@@ -34,6 +34,7 @@ import type {
 import type { Suggestion } from '../integration/github';
 import type { SuggestionSource } from '../integration/github-account';
 import { catalogHasModel, type HarnessCatalog } from '../agent/harness-models';
+import { DEFAULT_HARNESS, isHarnessId, type HarnessId } from '../agent/harness';
 import type { RepoResolver } from '../integration/github-resolver';
 import { parseIssueRef, parseRepoRef, type ParsedIssueRef } from '../integration/refs';
 import { Broadcaster, type StreamListener } from './stream';
@@ -106,10 +107,17 @@ export interface OrchestratorOptions {
   /** Called when a background drain throws (e.g. a `FatalExecutorError`). Default: log to stderr. */
   onError?: (err: unknown) => void;
   /**
-   * The active harness's selectable models — the source of `GET /models` and the allow-list `setModel`
-   * validates against (the dashboard's model dropdown). Omit → model selection is unavailable (empty list).
+   * The harness a run gets when {@link Orchestrator.start} receives no explicit one (its precedence —
+   * flag/env > persisted > default — is resolved upstream in `build-runner`). Also selects the catalog
+   * `GET /models` reports. Defaults to the shipped {@link DEFAULT_HARNESS}.
    */
-  modelCatalog?: HarnessCatalog;
+  defaultHarness?: HarnessId;
+  /**
+   * Resolves a harness id to its selectable-model catalog (the dashboard's model dropdown). `getModels`
+   * asks for the *default* harness's catalog; `setModel` for the *run's* — so the allow-list always
+   * matches the harness that will run. Omit → model selection is unavailable (empty list).
+   */
+  catalogFor?: (harness: string) => HarnessCatalog | undefined;
   /** The model a run uses when it has no override — what the dropdown shows as "Default". */
   defaultModel?: string;
 }
@@ -128,7 +136,8 @@ export class Orchestrator {
   private readonly defaultWorkingRoot?: string;
   private readonly concurrency: number;
   private readonly costCeiling?: number;
-  private readonly modelCatalog?: HarnessCatalog;
+  private readonly defaultHarness: HarnessId;
+  private readonly catalogFor?: (harness: string) => HarnessCatalog | undefined;
   private readonly defaultModel?: string;
   private readonly prFeedbackPoller: PrFeedbackPoller;
   private config: LoadedConfig;
@@ -150,7 +159,8 @@ export class Orchestrator {
     this.defaultWorkingRoot = options.defaultWorkingRoot;
     this.concurrency = options.concurrency ?? 1; // the requested cap; `EventLoop.drain` clamps it to a valid ≥ 1
     this.costCeiling = options.costCeiling;
-    this.modelCatalog = options.modelCatalog;
+    this.defaultHarness = options.defaultHarness ?? DEFAULT_HARNESS;
+    this.catalogFor = options.catalogFor;
     this.defaultModel = options.defaultModel;
     this.onError = options.onError ?? ((err) => console.error(`[orchestrator] drain pump error: ${String(err)}`));
     this.loop = new EventLoop(this.repo, this.config.fsm, this.config.version, this.runner, {
@@ -177,7 +187,7 @@ export class Orchestrator {
 
   /** Start a run for an issue and begin advancing it. Returns the created run immediately (the drain
    *  runs in the background; watch the stream for progress). */
-  start(input: { issueRef: string; repoRef?: string }): Run {
+  start(input: { issueRef: string; repoRef?: string; harness?: string }): Run {
     if (!input.issueRef) throw new ApiError(400, 'issueRef is required');
     // Accept any form the operator pastes (owner/repo#N, a browser issue URL, …) and normalize to the
     // canonical ref the adapter expects (see integration/refs); a malformed ref is a 400, not a run.
@@ -188,6 +198,16 @@ export class Orchestrator {
       throw new ApiError(400, err instanceof Error ? err.message : String(err));
     }
     const repoRef = input.repoRef ?? parsed.repo;
+    // Harness selection (plan §6.5): absent or empty → the daemon default; a present-but-unknown id is a
+    // 400 (never silently coerced to the default). Validated before any side effect (cost/enrollment).
+    let harness: HarnessId;
+    if (input.harness === undefined || input.harness === '') {
+      harness = this.defaultHarness;
+    } else if (isHarnessId(input.harness)) {
+      harness = input.harness;
+    } else {
+      throw new ApiError(400, `unknown harness "${input.harness}"`);
+    }
     // Global cost ceiling (M8 B3): refuse to admit a *new* run while active spend is at/over the
     // ceiling — a currently-executing stage is never interrupted, but no new work is started. The
     // operator lets in-flight runs finish (freeing headroom) or raises the ceiling. Existing runs park
@@ -223,7 +243,7 @@ export class Orchestrator {
         throw new ApiError(400, err instanceof Error ? err.message : String(err));
       }
     }
-    const run = this.loop.startRun({ issueRef: parsed.ref, repoRef });
+    const run = this.loop.startRun({ issueRef: parsed.ref, repoRef, harness });
     this.kick();
     return run;
   }
@@ -357,8 +377,13 @@ export class Orchestrator {
     if (TERMINAL_STATUSES.has(existing.status)) {
       throw new ApiError(409, `cannot set the model for a "${existing.status}" run — it has no further stages`);
     }
-    if (model !== null && (!this.modelCatalog || !catalogHasModel(this.modelCatalog, model))) {
-      throw new ApiError(400, `unknown model "${model}" for the ${this.modelCatalog?.harness ?? 'active'} harness`);
+    // Validate against the *run's* harness catalog — a run stamped `cursor` must accept Cursor's models,
+    // not the default harness's — so the allow-list matches what will actually run.
+    if (model !== null) {
+      const catalog = this.catalogFor?.(existing.harness);
+      if (!catalog || !catalogHasModel(catalog, model)) {
+        throw new ApiError(400, `unknown model "${model}" for the ${existing.harness} harness`);
+      }
     }
     this.repo.setRunModelOverride(runId, model);
     const run = this.requireRun(runId);
@@ -475,14 +500,15 @@ export class Orchestrator {
   }
 
   /**
-   * The active harness's selectable models + the daemon's default model (what a run without an override
-   * uses) — powers the dashboard's per-run model dropdown (`GET /models`). With no catalog configured the
-   * model list is empty.
+   * The default harness's selectable models + the daemon's default model (what a run without an override
+   * uses) — powers the dashboard's per-run model dropdown (`GET /models`). Resolves the catalog for the
+   * default harness; with no catalog configured (or resolver) the model list is empty.
    */
   getModels(): { harness: string | null; models: HarnessCatalog['models']; defaultModel: string | null } {
+    const catalog = this.catalogFor?.(this.defaultHarness);
     return {
-      harness: this.modelCatalog?.harness ?? null,
-      models: this.modelCatalog?.models ?? [],
+      harness: catalog?.harness ?? null,
+      models: catalog?.models ?? [],
       defaultModel: this.defaultModel ?? null,
     };
   }

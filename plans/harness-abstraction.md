@@ -47,11 +47,37 @@ Two things changed since the plan below was first written; read this first.
      contract's "structured result out" (Cursor's missing token usage → `tokens: 0`, which the contract
      allows). Full suite stays green.
 
-**Next PR (register + select Cursor):** add `cursor` to `HARNESS_IDS` + register its executor in
-`real-run` (with per-harness daemon config, since `--model`/`--permission-mode` are Claude-shaped), add its
-`HarnessCatalog` + generalize `getModels`/`setModel` to the run's harness catalog, then the `POST /runs`
-harness param + settings default (§5) + dashboard selector (§7). Everything below is the design for that
-work; the §8.1 fleet-abort finding and the strict-registry decision are already honored.
+4. **PR 3 (stacked on `harness-selection-foundation`) — register + select Cursor.** Cursor is now a
+   registered, selectable harness; the behavior-preserving default stays `claude-code`. Delivers:
+   - `cursor` added to `HarnessId`/`HARNESS_IDS`. The Cursor executor is registered in
+     [`real-run.ts`](../src/real-run.ts) alongside Claude Code via the new exported `buildHarnessRegistry`
+     — each harness gets its own `SubprocessStageExecutor`; the Claude-shaped daemon flags
+     (`--permission-mode`, `--model`/`frontierModel`) ride only on the Claude executor (Cursor has no
+     `--permission-mode`, and its models come from `CURSOR_MODEL_MAP`).
+   - `CURSOR_CATALOG` + a `HARNESS_CATALOGS`/`catalogForHarness` resolver in
+     [`harness-models.ts`](../src/agent/harness-models.ts). `Orchestrator` now takes `defaultHarness` +
+     `catalogFor` (replacing the single fixed `modelCatalog`): `getModels` resolves the *default*
+     harness's catalog, `setModel` the *run's*, so a per-run model override is validated against the
+     harness that will actually run it.
+   - `POST /runs` accepts an optional `harness` (absent/empty → default; present-but-unknown → 400 via
+     `isHarnessId`), threaded `Orchestrator.start` → `loop.startRun` → `createRun`. Both run-creation
+     entry points stamp the harness: the daemon (`buildOrchestrator`) and the one-shot CLI
+     ([`cli.ts`](../src/cli.ts) `start()`).
+   - Default-harness resolution + persistence (§5): `resolveDefaultHarness(args, repo)` (precedence
+     `--harness`/`FLEET_HARNESS` > persisted setting > `claude-code`; fail-fast on an invalid flag,
+     defensive read of a stale persisted value) + a tiny `settings` KV (migration 7 + `schema.sql` +
+     `Repository.getSetting`/`setSetting`) for the persisted default. `Orchestrator` gets a
+     `defaultHarness` option used by `start`; `--harness`/`FLEET_HARNESS` is a new CLI arg.
+   - Tests: `CURSOR_CATALOG`/`catalogForHarness` + a map↔catalog drift guard; `buildHarnessRegistry`
+     registration + Claude-flag withholding + per-harness model resolution; `resolveDefaultHarness`
+     precedence (incl. stale/garbage persisted → default and invalid-flag throw); settings round-trip +
+     migration-7 backfill; orchestrator harness passthrough/default/400 + per-run-catalog `setModel`
+     validation; `POST /runs` harness passthrough/400; `--harness` parsing. Full suite stays green (545).
+
+**Next PR (dashboard selector):** the only remaining piece is §7 — the dashboard's harness `<select>` +
+persistence + run-card badge, and its backing HTTP settings routes (§6.5: `GET /settings` /
+`PUT /settings/default-harness` writing `settings.default_harness`, the currently write-less persisted
+default). The §8.1 fleet-abort finding and the strict-registry decision remain honored.
 
 ## 0. Goal & scope
 

@@ -101,7 +101,13 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
     }
     if (method === 'POST') {
       const body = await readJson(req);
-      return sendJson(res, 201, orch.start({ issueRef: str(body, 'issueRef'), repoRef: optStr(body, 'repoRef') }));
+      // `harness` is optional: absent/empty → the daemon default; a present-but-unknown id → 400 (in
+      // `orch.start` via isHarnessId). We only transport it here, keeping validation in the orchestrator.
+      return sendJson(res, 201, orch.start({
+        issueRef: str(body, 'issueRef'),
+        repoRef: optStr(body, 'repoRef'),
+        harness: optStr(body, 'harness'),
+      }));
     }
     return sendError(res, new ApiError(405, `method ${method} not allowed on /runs`));
   }

@@ -24,7 +24,7 @@ import {
 } from '../agent/executor';
 import { FakeGitHub } from '../integration/github-fake';
 import type { GitHub } from '../integration/github';
-import { CLAUDE_CODE_CATALOG } from '../agent/harness-models';
+import { catalogForHarness } from '../agent/harness-models';
 import { EnrolledRepoResolver, singleRepoResolver, type RepoResolver } from '../integration/github-resolver';
 import { ApiError, Orchestrator } from './orchestrator';
 import { Broadcaster, type StreamEvent } from './stream';
@@ -67,7 +67,7 @@ function setup(
     broadcaster,
     suggestionSource: { suggest: (q: string) => github.suggestIssues(q) },
     resolver,
-    modelCatalog: CLAUDE_CODE_CATALOG,
+    catalogFor: catalogForHarness,
     defaultModel: 'opus',
     ...(opts.defaultWorkingRoot ? { defaultWorkingRoot: opts.defaultWorkingRoot } : {}),
     ...(opts.configPath ? { configPath: opts.configPath } : {}),
@@ -255,8 +255,38 @@ describe('Orchestrator — queries', () => {
     const broadcaster = new Broadcaster();
     const runner = new AgentRunner(repo, new StubExecutor(goldenPathHandler), loaded.agents, new FakeGitHub());
     const resolver = singleRepoResolver({ github: new FakeGitHub(), baseBranch: 'main' });
-    const noCatalog = new Orchestrator({ repo, runner, config: loaded, broadcaster, resolver }); // modelCatalog omitted
+    const noCatalog = new Orchestrator({ repo, runner, config: loaded, broadcaster, resolver }); // catalogFor omitted
     expect(noCatalog.getModels()).toEqual({ harness: null, models: [], defaultModel: null });
+  });
+});
+
+describe('Orchestrator — harness selection', () => {
+  it('stamps the requested harness, defaults when omitted, and 400s an unknown one', () => {
+    const { orchestrator } = setup();
+
+    expect(orchestrator.start({ issueRef: 'o/r#1' }).harness).toBe('claude-code'); // omitted → default
+    expect(orchestrator.start({ issueRef: 'o/r#2', harness: '' }).harness).toBe('claude-code'); // empty → default
+    expect(orchestrator.start({ issueRef: 'o/r#3', harness: 'cursor' }).harness).toBe('cursor'); // explicit
+
+    try {
+      orchestrator.start({ issueRef: 'o/r#4', harness: 'gemini' });
+      throw new Error('expected an unknown harness to be rejected');
+    } catch (err) {
+      expect((err as ApiError).status).toBe(400);
+      expect((err as ApiError).message).toMatch(/unknown harness "gemini"/);
+    }
+  });
+
+  it('validates a model override against the run\'s own harness catalog', async () => {
+    const { orchestrator, repo } = setup();
+    const cursorRun = orchestrator.start({ issueRef: 'o/r#1', harness: 'cursor' });
+
+    // A cursor model is accepted for a cursor run; a Claude-only model is a 400 (wrong harness).
+    orchestrator.setModel(cursorRun.id, 'sonnet-4.5');
+    expect(repo.getRun(cursorRun.id)!.modelOverride).toBe('sonnet-4.5');
+    expect(() => orchestrator.setModel(cursorRun.id, 'opus')).toThrow(/unknown model "opus" for the cursor harness/);
+
+    await orchestrator.settle();
   });
 });
 

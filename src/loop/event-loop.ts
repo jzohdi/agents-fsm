@@ -90,13 +90,15 @@ export class EventLoop {
     this.version = version;
   }
 
-  /** Create a run in the initial state and enqueue its first event. Returns the run. */
-  startRun(input: { issueRef: string; repoRef: string }): Run {
+  /** Create a run in the initial state and enqueue its first event. Returns the run. The run's `harness`
+   *  is pinned here (like the FSM config version); omitted → the store's column default (`claude-code`). */
+  startRun(input: { issueRef: string; repoRef: string; harness?: string }): Run {
     const run = this.repo.createRun({
       issueRef: input.issueRef,
       repoRef: input.repoRef,
       initialState: this.fsm.initial,
       fsmConfigVersion: this.version,
+      ...(input.harness !== undefined ? { harness: input.harness } : {}),
     });
     this.repo.enqueueEvent({ runId: run.id, type: EVENT_ADVANCE });
     return run;

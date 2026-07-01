@@ -128,6 +128,14 @@ describe('runs', () => {
     expect(repo.getRun(chosen.id)!.harness).toBe('cursor'); // pinned per-run, round-trips through the store
   });
 
+  it('round-trips a setting and upserts on a repeated key', () => {
+    expect(repo.getSetting('default_harness')).toBeUndefined(); // never set → undefined
+    repo.setSetting('default_harness', 'cursor');
+    expect(repo.getSetting('default_harness')).toBe('cursor');
+    repo.setSetting('default_harness', 'claude-code'); // upsert, not a second row
+    expect(repo.getSetting('default_harness')).toBe('claude-code');
+  });
+
   it('persists the branch (at plan) independently of the PR number (at tdd)', () => {
     const run = newRun();
     // Branch is created when `plan` begins, before any PR exists.

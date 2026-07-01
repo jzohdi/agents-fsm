@@ -368,6 +368,21 @@ export class Repository {
     return rows.map(mapRepo);
   }
 
+  // --- settings (a tiny key/value store) ---------------------------------------
+
+  /** Read a daemon setting by key (e.g. `default_harness`), or `undefined` if it was never set. */
+  getSetting(key: string): string | undefined {
+    const row = this.db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined;
+    return row?.value;
+  }
+
+  /** Set (upsert) a daemon setting — the persisted default harness the dashboard's selector writes. */
+  setSetting(key: string, value: string): void {
+    this.db
+      .prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run(key, value);
+  }
+
   // --- runs --------------------------------------------------------------------
 
   createRun(input: CreateRunInput): Run {

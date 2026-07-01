@@ -11,7 +11,15 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { loadDefaultConfig } from './fsm/config';
 import { parseCliArgs } from './cli-args';
-import { buildOrchestrator, buildRunner, loadRunConfig, resolveConcurrency, resolveCostCeiling } from './build-runner';
+import {
+  SETTING_DEFAULT_HARNESS,
+  buildOrchestrator,
+  buildRunner,
+  loadRunConfig,
+  resolveConcurrency,
+  resolveCostCeiling,
+  resolveDefaultHarness,
+} from './build-runner';
 import { openDb } from './store/db';
 import { Repository } from './store/repository';
 
@@ -21,6 +29,18 @@ describe('buildOrchestrator (stub/fake mode)', () => {
   it('assembles a working orchestrator that drives a run to done', async () => {
     const { orchestrator } = buildOrchestrator(parseCliArgs(['o/r#1', '--mock']));
     const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle();
+    expect(orchestrator.getRun(run.id).status).toBe('done');
+  });
+
+  it('reports the default harness catalog and runs a cursor-selected run through the stub (mock)', async () => {
+    const { orchestrator } = buildOrchestrator(parseCliArgs(['o/r#1', '--mock']));
+    // The model dropdown defaults to the shipped harness's catalog.
+    expect(orchestrator.getModels().harness).toBe('claude-code');
+    // Selecting the second harness exercises the full selection path with no tokens/network (the stub
+    // executor is resolved for any id), and the run is stamped with the chosen harness.
+    const run = orchestrator.start({ issueRef: 'o/r#1', harness: 'cursor' });
+    expect(run.harness).toBe('cursor');
     await orchestrator.settle();
     expect(orchestrator.getRun(run.id).status).toBe('done');
   });
@@ -130,6 +150,60 @@ describe('resolveCostCeiling (global cost ceiling: --cost-ceiling → FLEET_COST
     expect(resolveCostCeiling(argsWith())).toBeUndefined();
     process.env.FLEET_COST_CEILING = 'nonsense';
     expect(resolveCostCeiling(argsWith())).toBeUndefined();
+  });
+});
+
+describe('resolveDefaultHarness (default harness: --harness → FLEET_HARNESS → persisted → claude-code)', () => {
+  const originalEnv = process.env.FLEET_HARNESS;
+  afterEach(() => {
+    if (originalEnv === undefined) delete process.env.FLEET_HARNESS;
+    else process.env.FLEET_HARNESS = originalEnv;
+  });
+
+  const repo = (): Repository => new Repository(openDb(':memory:'));
+  const argsWith = (harness?: string): ReturnType<typeof parseCliArgs> => ({
+    ...parseCliArgs(['serve']),
+    ...(harness !== undefined ? { harness } : {}),
+  });
+
+  it('falls back to claude-code when nothing is configured', () => {
+    delete process.env.FLEET_HARNESS;
+    expect(resolveDefaultHarness(argsWith(), repo())).toBe('claude-code');
+  });
+
+  it('prefers the --harness flag over the env var and the persisted setting', () => {
+    process.env.FLEET_HARNESS = 'claude-code';
+    const r = repo();
+    r.setSetting(SETTING_DEFAULT_HARNESS, 'claude-code');
+    expect(resolveDefaultHarness(argsWith('cursor'), r)).toBe('cursor');
+  });
+
+  it('falls back to FLEET_HARNESS when the flag is absent, over the persisted setting', () => {
+    process.env.FLEET_HARNESS = 'cursor';
+    const r = repo();
+    r.setSetting(SETTING_DEFAULT_HARNESS, 'claude-code');
+    expect(resolveDefaultHarness(argsWith(), r)).toBe('cursor');
+  });
+
+  it('reads the persisted setting when neither the flag nor the env var is set', () => {
+    delete process.env.FLEET_HARNESS;
+    const r = repo();
+    r.setSetting(SETTING_DEFAULT_HARNESS, 'cursor');
+    expect(resolveDefaultHarness(argsWith(), r)).toBe('cursor');
+  });
+
+  it('reads a stale/garbage persisted value defensively, falling back to claude-code', () => {
+    delete process.env.FLEET_HARNESS;
+    const r = repo();
+    r.setSetting(SETTING_DEFAULT_HARNESS, 'gemini'); // a removed/unknown id must not wedge boot
+    expect(resolveDefaultHarness(argsWith(), r)).toBe('claude-code');
+  });
+
+  it('fails fast on an invalid flag/env value (a typo is operator error, not a silent fallthrough)', () => {
+    delete process.env.FLEET_HARNESS;
+    expect(() => resolveDefaultHarness(argsWith('gemini'), repo())).toThrow(/invalid --harness/);
+    process.env.FLEET_HARNESS = 'nonsense';
+    expect(() => resolveDefaultHarness(argsWith(), repo())).toThrow(/invalid --harness/);
   });
 });
 

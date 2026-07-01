@@ -4,8 +4,9 @@
  * The dashboard's per-run model dropdown needs to know which models the *current harness* accepts. That
  * list is harness-specific — Claude Code's `--model` tags differ from whatever a future harness exposes —
  * so it lives behind a small {@link HarnessCatalog} abstraction rather than being hardcoded in the UI or
- * the API. Today there is exactly one real harness (Claude Code, {@link ./subprocess-executor}); adding
- * another means adding its catalog here and wiring it in `build-runner`, with no change above Layer 6.
+ * the API. Two harnesses ship a catalog today — Claude Code ({@link ./subprocess-executor}) and Cursor
+ * ({@link ./cursor-profile}); adding another means adding its catalog here and registering it in {@link
+ * HARNESS_CATALOGS}, with no change above Layer 6.
  *
  * A model's `id` is passed verbatim to the harness (Claude Code's `--model`), so it must be a value the
  * harness accepts. Keep this list current with the harness's supported tags (README model catalog).
@@ -49,6 +50,34 @@ export const CLAUDE_CODE_CATALOG: HarnessCatalog = {
     { id: 'claude-fable-5', label: 'Fable 5', group: 'Pinned versions' },
   ],
 };
+
+/**
+ * Cursor's selectable `--model` tags. Cursor exposes models from several providers under its own tags;
+ * the two below are the ones {@link CURSOR_MODEL_MAP} resolves the recipe's logical names to (frontier /
+ * cheap). Keep in sync with `cursor-agent --list-models`; a model's `id` is passed verbatim to Cursor.
+ */
+export const CURSOR_CATALOG: HarnessCatalog = {
+  harness: 'cursor',
+  models: [
+    { id: 'sonnet-4.5', label: 'Claude Sonnet 4.5' },
+    { id: 'gpt-5', label: 'GPT-5' },
+  ],
+};
+
+/** Every harness's catalog, keyed by harness id — the source {@link catalogForHarness} resolves against. */
+export const HARNESS_CATALOGS: Record<string, HarnessCatalog> = {
+  [CLAUDE_CODE_CATALOG.harness]: CLAUDE_CODE_CATALOG,
+  [CURSOR_CATALOG.harness]: CURSOR_CATALOG,
+};
+
+/**
+ * The selectable-model catalog for a harness id (the per-run model dropdown's source), or `undefined`
+ * for an unknown harness. `getModels` resolves the *default* harness's catalog; `setModel` resolves the
+ * *run's* — so the model allow-list always matches the harness that will actually run.
+ */
+export function catalogForHarness(harness: string): HarnessCatalog | undefined {
+  return HARNESS_CATALOGS[harness];
+}
 
 /** Whether `modelId` is one of the catalog's selectable models — the validation the API applies before
  *  storing a per-run override, so a typo can't set a model the harness would later reject. */

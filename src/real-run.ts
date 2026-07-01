@@ -11,7 +11,8 @@
  */
 
 import { createSystemPromptFn } from './agent/prompts';
-import { DEFAULT_HARNESS, HarnessRegistry } from './agent/harness';
+import { HarnessRegistry } from './agent/harness';
+import { CURSOR_PROFILE } from './agent/cursor-profile';
 import { AgentRunner, type AgentRunnerOptions, type PhaseActivity } from './agent/runner';
 import { DEFAULT_MODEL_MAP, SubprocessStageExecutor, type SubprocessExecutorOptions } from './agent/subprocess-executor';
 import { GitHubCli } from './integration/github-cli';
@@ -81,6 +82,32 @@ export function buildRealGitHub(config: RealRunConfig): GitHubCli {
   });
 }
 
+/**
+ * Build the harness registry for a real run — one entry per selectable harness, each its own
+ * {@link SubprocessStageExecutor} behind that harness's profile. A run's pinned `harness` id resolves
+ * here (the runner does the lookup per phase). Harness-neutral options (wall-clock cap, rate-limit
+ * retry) apply to every executor; Claude-shaped flags (`--permission-mode`, `--model`/`frontierModel`)
+ * ride only on the Claude executor — they mean nothing to Cursor (no `--permission-mode`; its models
+ * come from CURSOR_MODEL_MAP). Exported so the registration is unit-testable without spawning anything.
+ */
+export function buildHarnessRegistry(config: RealRunConfig): HarnessRegistry {
+  const sharedOpts: SubprocessExecutorOptions = {};
+  if (config.timeoutMs !== undefined) sharedOpts.timeoutMs = config.timeoutMs;
+  if (config.maxRetries !== undefined) sharedOpts.maxRetries = config.maxRetries;
+
+  const claudeOpts: SubprocessExecutorOptions = {
+    ...sharedOpts,
+    extraArgs: config.permissionMode ? ['--permission-mode', config.permissionMode] : [],
+  };
+  if (config.frontierModel) claudeOpts.modelMap = { ...DEFAULT_MODEL_MAP, frontier: config.frontierModel };
+  const claudeExec = new SubprocessStageExecutor(claudeOpts);
+
+  // Cursor gets only the harness-neutral options; the Claude-shaped flags above are deliberately withheld.
+  const cursorExec = new SubprocessStageExecutor({ ...sharedOpts, profile: CURSOR_PROFILE });
+
+  return new HarnessRegistry({ 'claude-code': claudeExec, cursor: cursorExec });
+}
+
 export interface BuildRealRunnerOptions {
   /** Receives the harness's live progress (the "what is the agent doing now" feed); also persisted. */
   onActivity?: (activity: PhaseActivity) => void;
@@ -101,19 +128,11 @@ export function buildRealRunner(
   config: RealRunConfig,
   options: BuildRealRunnerOptions = {},
 ): AgentRunner {
-  const executorOpts: SubprocessExecutorOptions = {
-    extraArgs: config.permissionMode ? ['--permission-mode', config.permissionMode] : [],
-  };
-  if (config.frontierModel) executorOpts.modelMap = { ...DEFAULT_MODEL_MAP, frontier: config.frontierModel };
-  if (config.timeoutMs !== undefined) executorOpts.timeoutMs = config.timeoutMs;
-  if (config.maxRetries !== undefined) executorOpts.maxRetries = config.maxRetries;
-  const executor = new SubprocessStageExecutor(executorOpts);
   const github = options.github ?? buildRealGitHub(config);
   const recipe = config.cheap ? forceCheapModels(agents) : agents;
   const runnerOptions: AgentRunnerOptions = { systemPrompt: createSystemPromptFn(), baseBranch: config.baseBranch };
   if (options.onActivity) runnerOptions.onActivity = options.onActivity;
-  // Register the Claude Code executor under the default harness id. A run's `harness` selects here; a
-  // second harness is one more entry (its executor), with no change to the runner/loop/store.
-  const harnesses = new HarnessRegistry({ [DEFAULT_HARNESS]: executor });
-  return new AgentRunner(repo, harnesses, recipe, github, runnerOptions);
+  // Register every selectable harness. A run's `harness` selects here; a third harness is one more entry
+  // (its executor + profile) in the registry, with no change to the runner/loop/store.
+  return new AgentRunner(repo, buildHarnessRegistry(config), recipe, github, runnerOptions);
 }

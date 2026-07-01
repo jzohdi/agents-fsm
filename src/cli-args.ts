@@ -28,6 +28,12 @@ export interface CliArgs {
   permissionMode?: string;
   /** Concrete model for produce/self-review phases (e.g. `sonnet`); default is opus — `--model`. */
   model?: string;
+  /**
+   * Session override for the default harness a new run gets (`claude-code` | `cursor`) — `--harness`.
+   * Takes precedence over the persisted default (see `resolveDefaultHarness`) but does not clobber it.
+   * Undefined here → falls back to `FLEET_HARNESS`, then the persisted setting, then `claude-code`.
+   */
+  harness?: string;
   /** Per-invocation wall-clock cap in **minutes** — `--timeout`. */
   timeoutMinutes?: number;
   /** How many times to retry a rate-limited harness invocation before escalating — `--max-retries`. */
@@ -73,6 +79,7 @@ export function parseCliArgs(argv: string[]): CliArgs {
       'local-repo': { type: 'string' },
       'permission-mode': { type: 'string' },
       model: { type: 'string' },
+      harness: { type: 'string' },
       timeout: { type: 'string' },
       'max-retries': { type: 'string' },
       'poll-timeout': { type: 'string' },
@@ -105,6 +112,7 @@ export function parseCliArgs(argv: string[]): CliArgs {
     localRepo: values['local-repo'],
     permissionMode: values['permission-mode'],
     model: values.model,
+    harness: values.harness,
     timeoutMinutes: values.timeout !== undefined ? Number(values.timeout) : undefined,
     ...(values['max-retries'] !== undefined ? { maxRetries: Number(values['max-retries']) } : {}),
     pollTimeoutMinutes: values['poll-timeout'] !== undefined ? Number(values['poll-timeout']) : 30,

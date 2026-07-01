@@ -87,6 +87,20 @@ export const MIGRATIONS: Migration[] = [
     // would make a fresh DB (schema.sql) diverge from a migrated one; the valid set is app-validated.
     apply: (db) => addColumnIfMissing(db, 'runs', 'harness', "TEXT NOT NULL DEFAULT 'claude-code'"),
   },
+  {
+    version: 7,
+    name: 'create settings kv',
+    // A tiny key/value store for the persisted default harness (multi-harness support). Mirrors
+    // schema.sql; `CREATE TABLE IF NOT EXISTS` makes this a no-op on a fresh DB the baseline already
+    // provisioned and a retrofit on a pre-existing one.
+    apply: (db) =>
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS settings (
+           key   TEXT PRIMARY KEY,
+           value TEXT NOT NULL
+         );`,
+      ),
+  },
 ];
 
 /** The schema version a fully-migrated database reports — the highest defined migration. */

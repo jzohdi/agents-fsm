@@ -145,6 +145,15 @@ CREATE TABLE IF NOT EXISTS repos (
   created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
+-- A tiny key/value store for daemon-level settings that must survive restarts (multi-harness support).
+-- One row today: `default_harness` — the harness a new run gets when the request omits one, remembered
+-- across boots (the dashboard's harness selector writes it; `resolveDefaultHarness` reads it). Kept
+-- deliberately generic so future single-value settings need no new table.
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_transitions_run ON transitions(run_id, id);
 CREATE INDEX IF NOT EXISTS idx_events_status ON events(status, id);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_run ON agent_runs(run_id, id);

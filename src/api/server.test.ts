@@ -16,7 +16,7 @@ import { openDb } from '../store/db';
 import { Repository } from '../store/repository';
 import { AgentRunner } from '../agent/runner';
 import { StubExecutor, goldenPathHandler, type StubHandler } from '../agent/executor';
-import { CLAUDE_CODE_CATALOG } from '../agent/harness-models';
+import { catalogForHarness } from '../agent/harness-models';
 import { FakeGitHub } from '../integration/github-fake';
 import { singleRepoResolver } from '../integration/github-resolver';
 import { Orchestrator } from './orchestrator';
@@ -46,7 +46,7 @@ async function start(opts: { publicDir?: string; handler?: StubHandler } = {}): 
     suggestionSource: { suggest: (q: string) => github.suggestIssues(q) },
     resolver,
     defaultWorkingRoot: './w',
-    modelCatalog: CLAUDE_CODE_CATALOG,
+    catalogFor: catalogForHarness,
     defaultModel: 'opus',
   });
   const server = createApiServer(orchestrator, opts.publicDir ? { publicDir: opts.publicDir } : {});
@@ -95,6 +95,35 @@ describe('HTTP API', () => {
     expect(Array.isArray(detail.agentRuns)).toBe(true);
     expect(Array.isArray(detail.artifacts)).toBe(true);
     expect(Array.isArray(detail.logs)).toBe(true);
+  });
+
+  it('threads an optional harness on POST /runs, defaulting when absent and 400ing an unknown one', async () => {
+    const { base } = await start();
+
+    // Absent → the daemon default.
+    const def = await (await fetch(`${base}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ issueRef: 'o/r#1' }),
+    })).json();
+    expect((def as { harness: string }).harness).toBe('claude-code');
+
+    // Explicit → stamped on the run.
+    const chosen = await fetch(`${base}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ issueRef: 'o/r#2', harness: 'cursor' }),
+    });
+    expect(chosen.status).toBe(201);
+    expect((await chosen.json() as { harness: string }).harness).toBe('cursor');
+
+    // Unknown → 400 (validated in the orchestrator via isHarnessId).
+    const bad = await fetch(`${base}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ issueRef: 'o/r#3', harness: 'gemini' }),
+    });
+    expect(bad.status).toBe(400);
   });
 
   it('maps command errors to status codes', async () => {

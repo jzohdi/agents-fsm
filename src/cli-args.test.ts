@@ -45,7 +45,7 @@ describe('parseCliArgs', () => {
     const args = parseCliArgs([
       'owner/repo#1', '--mock', '--cheap', '--repo', 'o/r', '--base=develop', '--work', '/tmp/w',
       '--clone-url', 'git@github.com:o/r.git', '--local-repo', '/home/me/o-r', '--permission-mode=acceptEdits',
-      '--model', 'sonnet', '--max-retries', '2',
+      '--model', 'sonnet', '--max-retries', '2', '--harness', 'cursor',
     ]);
     expect(args.mock).toBe(true);
     expect(args.cheap).toBe(true);
@@ -57,6 +57,7 @@ describe('parseCliArgs', () => {
     expect(args.permissionMode).toBe('acceptEdits');
     expect(args.model).toBe('sonnet');
     expect(args.maxRetries).toBe(2);
+    expect(args.harness).toBe('cursor');
   });
 
   it('keeps the resume subcommand and run id as positionals', () => {

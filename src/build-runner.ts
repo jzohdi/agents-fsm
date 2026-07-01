@@ -19,7 +19,8 @@ import { FatalExecutorError, StubExecutor, goldenPathHandler } from './agent/exe
 import { FakeGitHub } from './integration/github-fake';
 import type { GitHub } from './integration/github';
 import { GitHubCliAccount, type SuggestionSource } from './integration/github-account';
-import { CLAUDE_CODE_CATALOG } from './agent/harness-models';
+import { catalogForHarness } from './agent/harness-models';
+import { DEFAULT_HARNESS, HARNESS_IDS, isHarnessId, type HarnessId } from './agent/harness';
 import { DEFAULT_MODEL_MAP } from './agent/subprocess-executor';
 import { EnrolledRepoResolver, singleRepoResolver, type RepoResolver } from './integration/github-resolver';
 import { buildRealGitHub, buildRealRunner } from './real-run';
@@ -139,6 +140,32 @@ export function resolveCostCeiling(args: CliArgs): number | undefined {
   return candidate !== undefined && Number.isFinite(candidate) && candidate >= 0 ? candidate : undefined;
 }
 
+/** The settings key the persisted default harness is stored under (the dashboard selector writes it). */
+export const SETTING_DEFAULT_HARNESS = 'default_harness';
+
+/**
+ * Resolve the harness a new run gets when the request omits one (plan §5.2), precedence: the
+ * `--harness` flag → the `FLEET_HARNESS` env → the persisted `settings.default_harness` → the shipped
+ * {@link DEFAULT_HARNESS}. Shared by both entry points (the daemon and the one-shot CLI) so the default
+ * can't drift between them.
+ *
+ * A present-but-invalid **flag/env** value is operator error → we throw so the process fails fast at
+ * boot (a typo shouldn't silently fall through to another harness). A stale/garbage **persisted** value
+ * is read defensively — it falls back to the default rather than wedging boot (a bad settings row must
+ * never stop the daemon).
+ */
+export function resolveDefaultHarness(args: CliArgs, repo: Repository): HarnessId {
+  const flag = args.harness ?? process.env.FLEET_HARNESS;
+  if (flag !== undefined && flag !== '') {
+    if (!isHarnessId(flag)) {
+      throw new Error(`invalid --harness/FLEET_HARNESS value "${flag}" (choose one of: ${HARNESS_IDS.join(', ')})`);
+    }
+    return flag;
+  }
+  const persisted = repo.getSetting(SETTING_DEFAULT_HARNESS);
+  return persisted !== undefined && isHarnessId(persisted) ? persisted : DEFAULT_HARNESS;
+}
+
 /**
  * Build the daemon's {@link Orchestrator} and its dependencies. The runner's live activities are wired
  * into the shared {@link Broadcaster}, so the SSE stream sees them alongside transitions and status
@@ -158,6 +185,9 @@ export function buildOrchestrator(args: CliArgs): {
   const { runner, github, resolver, suggestionSource } = buildRunner(args, repo, loaded.agents, repoRef, {
     onActivity: (activity) => broadcaster.publish({ type: 'activity', activity }),
   });
+  // Effective default harness for runs that omit one (flag/env > persisted > claude-code). Resolved once
+  // at boot; a bad flag throws here (fail fast). Also selects the catalog `GET /models` shows.
+  const defaultHarness = resolveDefaultHarness(args, repo);
   const orchestrator = new Orchestrator({
     repo,
     runner,
@@ -166,11 +196,16 @@ export function buildOrchestrator(args: CliArgs): {
     suggestionSource, // powers the new-run autocomplete (GET /suggestions)
     resolver, // per-repo adapter resolution + the start-time enrollment check (Milestone 8)
     defaultWorkingRoot: args.work, // a POST /repos enrollment defaults its working root to the daemon's --work
-    // Model selection (the dashboard's per-run model dropdown). We target Claude Code; the `--model` flag
-    // (or the executor default `opus`) is what a run without an override uses. Mock mode reuses the same
-    // catalog for UI parity — the stub executor just ignores the chosen model.
-    modelCatalog: CLAUDE_CODE_CATALOG,
-    defaultModel: args.model ?? DEFAULT_MODEL_MAP.frontier,
+    // Harness + model selection. `defaultHarness` is what a run without an explicit harness gets, and
+    // which harness's catalog `GET /models` shows; `catalogFor` resolves each harness to its selectable
+    // models (per-run for `setModel`, the default for `getModels`). Mock mode reuses the real catalogs
+    // for UI parity — the stub executor ignores the chosen harness/model.
+    defaultHarness,
+    catalogFor: catalogForHarness,
+    // The concrete model a run uses when it has no override — the dropdown's "Default". Only meaningful
+    // for Claude Code (its `--model` flag); other harnesses drive the model from the recipe's logical
+    // names, so there's no single concrete default to show.
+    ...(defaultHarness === DEFAULT_HARNESS ? { defaultModel: args.model ?? DEFAULT_MODEL_MAP.frontier } : {}),
     concurrency: resolveConcurrency(args), // global cap for the parallel drain pump (Milestone 8 Phase B)
     feedbackReentryState: args.feedbackReentryState, // stage a run re-enters on PR feedback (default plan)
     feedbackMarker: args.feedbackMarker, // marker a PR comment must start with to count as feedback (default `feedback:`)

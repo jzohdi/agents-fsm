@@ -9,13 +9,20 @@
 
 import { describe, expect, it } from 'vitest';
 
+import type { AgentRunRequest } from './agent/executor';
+import { SubprocessStageExecutor } from './agent/subprocess-executor';
 import { AgentRunner } from './agent/runner';
 import { loadDefaultConfig } from './fsm/config';
-import { buildRealRunner, forceCheapModels } from './real-run';
+import { buildHarnessRegistry, buildRealRunner, forceCheapModels } from './real-run';
 import { openDb } from './store/db';
 import { Repository } from './store/repository';
 
 const { agents } = loadDefaultConfig();
+
+/** A minimal phase request for exercising an executor's pure `buildArgs`/`resolveModel`. */
+function req(overrides: Partial<AgentRunRequest> = {}): AgentRunRequest {
+  return { runId: 1, stage: 'plan', phase: 'produce', model: 'frontier', system: 'SYS', input: { a: 1 }, ...overrides };
+}
 
 describe('forceCheapModels', () => {
   it('pins every stage and phase to the cheap model', () => {
@@ -38,6 +45,43 @@ describe('forceCheapModels', () => {
     const before = JSON.stringify(agents);
     forceCheapModels(agents);
     expect(JSON.stringify(agents)).toBe(before);
+  });
+});
+
+describe('buildHarnessRegistry', () => {
+  const base = { repo: 'o/r', baseBranch: 'main', workingRoot: '/tmp/work' };
+
+  it('registers both selectable harnesses', () => {
+    expect(buildHarnessRegistry(base).available()).toEqual(['claude-code', 'cursor']);
+  });
+
+  it('gives Cursor its own profile and withholds Claude-shaped flags (--permission-mode)', () => {
+    const registry = buildHarnessRegistry({ ...base, permissionMode: 'acceptEdits', frontierModel: 'sonnet' });
+
+    const claude = registry.for('claude-code') as SubprocessStageExecutor;
+    const cursor = registry.for('cursor') as SubprocessStageExecutor;
+
+    // The Claude executor carries the Claude-shaped daemon flags…
+    const claudeArgs = claude.buildArgs(req());
+    expect(claudeArgs).toContain('--permission-mode');
+    expect(claudeArgs).toContain('acceptEdits');
+    expect(claudeArgs).toContain('--append-system-prompt'); // Claude profile shape
+
+    // …while the Cursor executor gets neither the flag nor Claude's argv shape.
+    const cursorArgs = cursor.buildArgs(req());
+    expect(cursorArgs).not.toContain('--permission-mode');
+    expect(cursorArgs).not.toContain('--append-system-prompt');
+    expect(cursorArgs).not.toContain('--allowedTools');
+    expect(cursorArgs).toContain('--force'); // Cursor profile shape
+  });
+
+  it('resolves the logical frontier model per harness — Claude honors frontierModel, Cursor its own map', () => {
+    const registry = buildHarnessRegistry({ ...base, frontierModel: 'sonnet' });
+    const claude = registry.for('claude-code') as SubprocessStageExecutor;
+    const cursor = registry.for('cursor') as SubprocessStageExecutor;
+
+    expect(claude.resolveModel('frontier')).toBe('sonnet'); // the daemon override
+    expect(cursor.resolveModel('frontier')).toBe('sonnet-4.5'); // CURSOR_MODEL_MAP, not the Claude override
   });
 });
 

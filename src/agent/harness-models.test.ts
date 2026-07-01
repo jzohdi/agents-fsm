@@ -2,7 +2,14 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { CLAUDE_CODE_CATALOG, catalogHasModel, type HarnessCatalog } from './harness-models';
+import { CURSOR_MODEL_MAP } from './cursor-profile';
+import {
+  CLAUDE_CODE_CATALOG,
+  CURSOR_CATALOG,
+  catalogForHarness,
+  catalogHasModel,
+  type HarnessCatalog,
+} from './harness-models';
 
 describe('CLAUDE_CODE_CATALOG', () => {
   it('exposes the claude-code harness with unique, non-empty model ids', () => {
@@ -16,6 +23,35 @@ describe('CLAUDE_CODE_CATALOG', () => {
     }
     // The everyday aliases must be selectable.
     expect(ids).toEqual(expect.arrayContaining(['opus', 'sonnet', 'haiku']));
+  });
+});
+
+describe('CURSOR_CATALOG', () => {
+  it('exposes the cursor harness with unique, non-empty model ids', () => {
+    expect(CURSOR_CATALOG.harness).toBe('cursor');
+    expect(CURSOR_CATALOG.models.length).toBeGreaterThan(0);
+    const ids = CURSOR_CATALOG.models.map((m) => m.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const m of CURSOR_CATALOG.models) {
+      expect(m.id).toBeTruthy();
+      expect(m.label).toBeTruthy();
+    }
+  });
+
+  it('lists every concrete model the recipe-facing model map resolves to', () => {
+    // Drift guard: a logical name the profile maps must be a selectable model, else the dropdown could
+    // never reproduce the harness's own default choice.
+    const ids = CURSOR_CATALOG.models.map((m) => m.id);
+    expect(ids).toEqual(expect.arrayContaining(Object.values(CURSOR_MODEL_MAP)));
+  });
+});
+
+describe('catalogForHarness', () => {
+  it('resolves each known harness to its catalog and returns undefined otherwise', () => {
+    expect(catalogForHarness('claude-code')).toBe(CLAUDE_CODE_CATALOG);
+    expect(catalogForHarness('cursor')).toBe(CURSOR_CATALOG);
+    expect(catalogForHarness('gemini')).toBeUndefined();
+    expect(catalogForHarness('')).toBeUndefined();
   });
 });
 

@@ -7,18 +7,19 @@
  * mirrors the per-repo {@link RepoResolver} pattern (Milestone 8): resolve a per-run dependency by a key
  * carried on the run.
  *
- * Today only Claude Code is registered ({@link ./subprocess-executor}); a second harness is a new entry
- * here plus its executor, with no change above Layer 5. The selectable-model side of a harness lives
- * separately in {@link ./harness-models}; the ids here match a catalog's `harness` field.
+ * Two harnesses are registered today — Claude Code ({@link ./subprocess-executor}) and Cursor
+ * ({@link ./cursor-profile}); a third is a new entry here plus its executor, with no change above
+ * Layer 5. The selectable-model side of a harness lives separately in {@link ./harness-models}; the ids
+ * here match a catalog's `harness` field.
  */
 
 import type { StageExecutor } from './executor';
 
 /** Identifier for a selectable harness. Matches the `harness` field of its {@link HarnessCatalog}. */
-export type HarnessId = 'claude-code';
+export type HarnessId = 'claude-code' | 'cursor';
 
 /** Every harness id the system knows about — the source of truth for validation + the selectable list. */
-export const HARNESS_IDS: readonly HarnessId[] = ['claude-code'];
+export const HARNESS_IDS: readonly HarnessId[] = ['claude-code', 'cursor'];
 
 /** The harness a run uses when none is chosen: the shipped default (Claude Code). */
 export const DEFAULT_HARNESS: HarnessId = 'claude-code';
