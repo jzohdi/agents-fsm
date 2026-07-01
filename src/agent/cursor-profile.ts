@@ -51,9 +51,7 @@ export function isCursorAuthFailure(text: string): boolean {
 
 /** The Cursor CLI profile — a second selectable harness alongside {@link CLAUDE_PROFILE}. */
 export const CURSOR_PROFILE: HarnessProfile = {
-  id: 'cursor',
   command: 'cursor-agent',
-  label: 'cursor-agent',
   modelMap: CURSOR_MODEL_MAP,
   buildArgs(req, model) {
     // Cursor has no --append-system-prompt: fold the system prompt into the single prompt string. No

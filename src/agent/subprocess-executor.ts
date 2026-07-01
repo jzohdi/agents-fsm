@@ -176,12 +176,9 @@ function isClaudeAuthFailure(text: string): boolean {
  * change to the runner, loop, or store. See {@link CLAUDE_PROFILE} and the Cursor profile.
  */
 export interface HarnessProfile {
-  /** Stable id, matching the run's `harness` and the harness's model catalog. */
-  id: string;
-  /** Default CLI binary (overridable per-executor via `command`). */
+  /** Default CLI binary, also the harness name shown in error messages (e.g. `claude` / `cursor-agent`).
+   *  The spawn target is overridable per-executor via `command`, but messages always name the profile's. */
   command: string;
-  /** Short name used in error messages, e.g. `claude` / `cursor-agent`. */
-  label: string;
   /** Logical → concrete model map (overridable per-executor via `modelMap`). */
   modelMap: Record<string, string>;
   /** Build the argv for one invocation, given the already-resolved concrete model. The executor
@@ -205,9 +202,9 @@ export interface HarnessProfile {
  * {@link HarnessError}. Shared by the non-zero-exit path and the `is_error` result path so both classify
  * identically.
  */
-export function classifyFailure(profile: HarnessProfile, detail: string, message: string): HarnessError {
+export function classifyFailure(profile: HarnessProfile, detail: string, message: string): HarnessError | FatalExecutorError {
   if (profile.isAuthFailure(detail)) {
-    const authMessage = `${profile.label} is not authenticated: ${detail}`;
+    const authMessage = `${profile.command} is not authenticated: ${detail}`;
     // Fatal → a FatalExecutorError the loop propagates (drain aborts). Non-fatal → a plain HarnessError
     // the loop escalates as executor_error, with the remedy folded into the message for the run's log.
     return profile.authFatal
@@ -220,9 +217,7 @@ export function classifyFailure(profile: HarnessProfile, detail: string, message
 
 /** The Claude Code profile — the default harness; preserves the pre-profile behavior exactly. */
 export const CLAUDE_PROFILE: HarnessProfile = {
-  id: 'claude-code',
   command: 'claude',
-  label: 'claude',
   modelMap: DEFAULT_MODEL_MAP,
   buildArgs(req, model) {
     const args = [
@@ -317,7 +312,7 @@ export class SubprocessStageExecutor implements StageExecutor {
     const result = await this.spawnProcess(this.command, this.buildArgs(req), options);
     if (result.code !== 0) {
       const detail = result.stderr.trim() || result.stdout.trim() || '(no output)';
-      throw classifyFailure(this.profile, detail, `${this.profile.label} exited with code ${result.code}`);
+      throw classifyFailure(this.profile, detail, `${this.profile.command} exited with code ${result.code}`);
     }
     return parseHarnessOutput(result.stdout, this.profile);
   }
@@ -451,7 +446,7 @@ export function parseHarnessOutput(stdout: string, profile: HarnessProfile = CLA
   const event = findResultEvent(stdout);
   if (!event) throw new HarnessError('harness produced no result event');
   if (event.is_error) {
-    throw classifyFailure(profile, event.result ?? '(no detail)', 'harness reported an error result');
+    throw classifyFailure(profile, event.result ?? '(no detail)', `${profile.command} reported an error result`);
   }
 
   const usage: AgentRunResult['usage'] = { tokens: sumTokens(event.usage) };

@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest';
 import { FatalExecutorError, type AgentActivity, type AgentRunRequest } from './executor';
 import {
   backoffMs,
+  classifyFailure,
   defaultSpawnProcess,
   HarnessError,
   isRateLimit,
@@ -20,9 +21,60 @@ import {
   SubprocessStageExecutor,
   summarizeEvent,
   takeCompleteLines,
+  type HarnessProfile,
   type ProcessResult,
   type SpawnProcess,
 } from './subprocess-executor';
+
+/** A synthetic profile so `classifyFailure` is tested in isolation, independent of any real harness. */
+function testProfile(overrides: Partial<HarnessProfile> = {}): HarnessProfile {
+  return {
+    command: 'test-harness',
+    modelMap: {},
+    buildArgs: () => [],
+    summarize: () => [],
+    isAuthFailure: (t) => /unauth/i.test(t),
+    isRateLimit: (t) => /rate/i.test(t),
+    authRemedy: 'run the auth fix',
+    authFatal: true,
+    ...overrides,
+  };
+}
+
+describe('classifyFailure — the per-profile error policy', () => {
+  it('fatal-auth profile → a FatalExecutorError carrying the harness remedy (aborts the drain)', () => {
+    const err = classifyFailure(testProfile({ authFatal: true }), 'unauth: bad key', 'test-harness exited with code 1');
+    expect(err).toBeInstanceOf(FatalExecutorError);
+    expect(err).toMatchObject({ remedy: 'run the auth fix' });
+    expect(err.message).toContain('test-harness is not authenticated');
+  });
+
+  it('non-fatal-auth profile → a recoverable HarnessError with the remedy in the message (escalates one run)', () => {
+    const err = classifyFailure(testProfile({ authFatal: false }), 'unauthorized', 'ctx');
+    expect(err).toBeInstanceOf(HarnessError);
+    expect(err).not.toBeInstanceOf(FatalExecutorError);
+    expect(err.message).toContain('run the auth fix'); // remedy travels in the escalation reason
+  });
+
+  it('rate-limit detail → a retryable RateLimitError', () => {
+    const err = classifyFailure(testProfile(), 'rate limit hit', 'test-harness exited with code 1');
+    expect(err).toBeInstanceOf(RateLimitError);
+    expect(err.message).toContain('rate limit hit');
+  });
+
+  it('anything else → a generic HarnessError with the caller-supplied context message', () => {
+    const err = classifyFailure(testProfile(), 'boom', 'test-harness exited with code 2');
+    expect(err).toBeInstanceOf(HarnessError);
+    expect(err).not.toBeInstanceOf(RateLimitError);
+    expect(err.message).toBe('test-harness exited with code 2: boom');
+  });
+
+  it('checks auth before rate-limit, so an auth failure is never mis-retried', () => {
+    // A detail that matches both predicates classifies as auth (more specific, and not retryable).
+    const err = classifyFailure(testProfile({ authFatal: false }), 'unauth rate', 'ctx');
+    expect(err).not.toBeInstanceOf(RateLimitError);
+  });
+});
 
 /** A fake spawn that always resolves with the given result and records how it was called. */
 function fakeSpawn(result: ProcessResult): { spawnProcess: SpawnProcess; calls: Array<{ command: string; args: string[]; cwd: string }> } {
