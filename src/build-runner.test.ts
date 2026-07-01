@@ -44,6 +44,14 @@ describe('buildOrchestrator (stub/fake mode)', () => {
     await orchestrator.settle();
     expect(orchestrator.getRun(run.id).status).toBe('done');
   });
+
+  it('threads --harness through to the default harness (getModels catalog + a run that omits one)', () => {
+    // Proves the whole default-harness wiring: resolveDefaultHarness → Orchestrator.defaultHarness →
+    // both getModels (which catalog the dropdown shows) and start (what a harness-less run is stamped).
+    const { orchestrator } = buildOrchestrator(parseCliArgs(['o/r#1', '--mock', '--harness', 'cursor']));
+    expect(orchestrator.getModels().harness).toBe('cursor');
+    expect(orchestrator.start({ issueRef: 'o/r#1' }).harness).toBe('cursor'); // omitted → the daemon default
+  });
 });
 
 describe('buildRunner (real mode — boot-time enrollment, Milestone 8)', () => {

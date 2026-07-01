@@ -10,6 +10,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { AgentRunRequest } from './agent/executor';
+import { HARNESS_IDS } from './agent/harness';
 import { SubprocessStageExecutor } from './agent/subprocess-executor';
 import { AgentRunner } from './agent/runner';
 import { loadDefaultConfig } from './fsm/config';
@@ -51,8 +52,10 @@ describe('forceCheapModels', () => {
 describe('buildHarnessRegistry', () => {
   const base = { repo: 'o/r', baseBranch: 'main', workingRoot: '/tmp/work' };
 
-  it('registers both selectable harnesses', () => {
-    expect(buildHarnessRegistry(base).available()).toEqual(['claude-code', 'cursor']);
+  it('registers exactly the known harness ids (drift guard against a new id with no executor)', () => {
+    // A run's `harness` is validated against HARNESS_IDS (isHarnessId), then resolved here. If the two
+    // drift, an admitted run would escalate to needs_human for want of an executor — assert they match.
+    expect(new Set(buildHarnessRegistry(base).available())).toEqual(new Set<string>(HARNESS_IDS));
   });
 
   it('gives Cursor its own profile and withholds Claude-shaped flags (--permission-mode)', () => {

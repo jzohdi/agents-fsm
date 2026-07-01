@@ -180,14 +180,15 @@ export function buildOrchestrator(args: CliArgs): {
 } {
   const { loaded, configPath } = loadRunConfig(args);
   const repo = new Repository(openDb(args.db));
+  // Effective default harness for runs that omit one (flag/env > persisted > claude-code). Resolved up
+  // front so a bad `--harness`/`FLEET_HARNESS` fails fast — before we build executors or enroll a repo.
+  // Also selects the catalog `GET /models` shows.
+  const defaultHarness = resolveDefaultHarness(args, repo);
   const broadcaster = new Broadcaster();
   const repoRef = args.repo ?? args.positionals[1]?.split('#')[0] ?? '';
   const { runner, github, resolver, suggestionSource } = buildRunner(args, repo, loaded.agents, repoRef, {
     onActivity: (activity) => broadcaster.publish({ type: 'activity', activity }),
   });
-  // Effective default harness for runs that omit one (flag/env > persisted > claude-code). Resolved once
-  // at boot; a bad flag throws here (fail fast). Also selects the catalog `GET /models` shows.
-  const defaultHarness = resolveDefaultHarness(args, repo);
   const orchestrator = new Orchestrator({
     repo,
     runner,

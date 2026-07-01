@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { HARNESS_IDS } from './harness';
 import { CURSOR_MODEL_MAP } from './cursor-profile';
 import {
   CLAUDE_CODE_CATALOG,
@@ -52,6 +53,16 @@ describe('catalogForHarness', () => {
     expect(catalogForHarness('cursor')).toBe(CURSOR_CATALOG);
     expect(catalogForHarness('gemini')).toBeUndefined();
     expect(catalogForHarness('')).toBeUndefined();
+  });
+
+  it('has a catalog for every known harness id, each self-labelled with that id (drift guard)', () => {
+    // If a later PR adds a harness to HARNESS_IDS but forgets its catalog, `getModels`/`setModel` would
+    // silently offer no models for it — catch that here rather than in a live run.
+    for (const id of HARNESS_IDS) {
+      const catalog = catalogForHarness(id);
+      expect(catalog, `no catalog registered for harness "${id}"`).toBeDefined();
+      expect(catalog!.harness).toBe(id);
+    }
   });
 });
 

@@ -72,7 +72,8 @@ Two things changed since the plan below was first written; read this first.
      registration + Claude-flag withholding + per-harness model resolution; `resolveDefaultHarness`
      precedence (incl. stale/garbage persisted → default and invalid-flag throw); settings round-trip +
      migration-7 backfill; orchestrator harness passthrough/default/400 + per-run-catalog `setModel`
-     validation; `POST /runs` harness passthrough/400; `--harness` parsing. Full suite stays green (545).
+     validation; `POST /runs` harness passthrough/400; `--harness` parsing; plus catalog↔registry↔
+     HarnessId drift guards so a future harness can't be half-added. Full suite stays green (547 passing).
 
 **Next PR (dashboard selector):** the only remaining piece is §7 — the dashboard's harness `<select>` +
 persistence + run-card badge, and its backing HTTP settings routes (§6.5: `GET /settings` /
