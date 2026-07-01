@@ -20,13 +20,10 @@ import { ReplyPoller } from './loop/reply-poller';
 import type { CliArgs } from './cli-args';
 
 export async function serve(args: CliArgs): Promise<void> {
-  // Single-repo MVP: the real adapter is pinned to one repo at startup (and `buildRealGitHub` requires
-  // it). Catch the missing-repo case here with actionable guidance rather than an eager stack trace.
-  if (!args.mock && !args.repo) {
-    console.error('Real mode needs a target repo. Start with `--repo owner/name`, or `--mock` for no-cost runs (single-repo MVP).');
-    process.exitCode = 1;
-    return;
-  }
+  // The daemon no longer needs to be pinned to a repo at startup. It boots with whatever repos are
+  // already enrolled (none, on a fresh DB); you add repos from the dashboard, and filing a run on a new
+  // repo auto-enrolls it (Orchestrator.start). `--repo` still works as a convenience: it bootstrap-
+  // enrolls that one repo. The autocomplete is user-scoped (the logged-in `gh` account), not repo-bound.
   const { orchestrator, repo, resolver } = buildOrchestrator(args);
   orchestrator.recover(); // reclaim crash-stranded events and resume any queued work on startup
 
@@ -39,6 +36,14 @@ export async function serve(args: CliArgs): Promise<void> {
       ? '  ⚠ state: in-memory — runs are LOST on shutdown. Pass --db <path> to persist across restarts.'
       : `  state: ${args.db} (persists across restarts; the daemon recovers queued work on startup)`,
   );
+  if (!args.mock) {
+    const repos = orchestrator.listRepos();
+    console.log(
+      repos.length === 0
+        ? '  repos: none enrolled — add one from the dashboard, or just file a run (its repo auto-enrolls). Autocomplete uses your `gh` login.'
+        : `  repos: ${repos.map((r) => r.repoRef).join(', ')} (file a run on any other repo to auto-enroll it)`,
+    );
+  }
   console.log('  POST /runs · GET /runs · GET /runs/:id · POST /runs/:id/{pause,resume,stop,revert,archive,unarchive,cost-override} · GET|POST /repos · GET /cost · GET|PUT /config · GET /stream');
   if (!existsSync(DEFAULT_PUBLIC_DIR)) {
     console.warn('  ⚠ dashboard not built — run `npm run build:dashboard` (or `npm run dev:dashboard` for HMR). The API works regardless.');

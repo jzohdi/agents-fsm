@@ -37,7 +37,15 @@ async function start(opts: { publicDir?: string } = {}): Promise<{ base: string;
     onActivity: (activity) => broadcaster.publish({ type: 'activity', activity }),
   });
   const resolver = singleRepoResolver({ github, baseBranch: 'main' });
-  const orchestrator = new Orchestrator({ repo, runner, config: loaded, broadcaster, github, resolver, defaultWorkingRoot: './w' });
+  const orchestrator = new Orchestrator({
+    repo,
+    runner,
+    config: loaded,
+    broadcaster,
+    suggestionSource: { suggest: (q: string) => github.suggestIssues(q) },
+    resolver,
+    defaultWorkingRoot: './w',
+  });
   const server = createApiServer(orchestrator, opts.publicDir ? { publicDir: opts.publicDir } : {});
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -159,13 +167,13 @@ describe('HTTP API', () => {
     expect((await fetch(`${base}/health`)).status).toBe(200);
   });
 
-  it('serves new-run suggestions for ?q= from the GitHub adapter', async () => {
+  it('serves new-run suggestions for ?q= from the suggestion source', async () => {
     const { base, github } = await start();
     github.seedIssue('acme/web#318', { number: 318, title: 'Checkout token refresh' });
 
     const res = await fetch(`${base}/suggestions?q=checkout`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual([{ ref: 'acme/web#318', repo: 'acme/web', number: 318, title: 'Checkout token refresh' }]);
+    expect(await res.json()).toEqual([{ kind: 'issue', ref: 'acme/web#318', repo: 'acme/web', number: 318, title: 'Checkout token refresh' }]);
 
     expect(await (await fetch(`${base}/suggestions`)).json()).toEqual(
       expect.arrayContaining([expect.objectContaining({ ref: 'acme/web#318' })]),

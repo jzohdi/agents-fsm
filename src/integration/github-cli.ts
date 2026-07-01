@@ -30,7 +30,6 @@ import {
   type GitHub,
   type Issue,
   type IssueComment,
-  type IssueSuggestion,
   type OpenPrInput,
   type PrepareWorkingTreeInput,
   type PullRequest,
@@ -47,8 +46,10 @@ export interface ExecResult {
   stderr: string;
 }
 
-/** Injectable child-process runner: run `file args` in `cwd`, resolve with captured output. */
-export type ExecFn = (file: string, args: string[], options: { cwd?: string }) => Promise<ExecResult>;
+/** Injectable child-process runner: run `file args` in `cwd`, resolve with captured output. `timeoutMs`
+ *  (0/undefined = unbounded) kills a hung child — used for the best-effort autocomplete `gh` calls, not
+ *  for run operations like `git clone` that can legitimately take a while. */
+export type ExecFn = (file: string, args: string[], options: { cwd?: string; timeoutMs?: number }) => Promise<ExecResult>;
 
 export interface GitHubCliOptions {
   /** Target repo as `owner/name`, used for every `gh` call (single MVP repo — README §1). */
@@ -108,32 +109,6 @@ export class GitHubCli implements GitHub {
 
   async readIssue(issueRef: string): Promise<Issue> {
     return this.viewIssue(issueNumber(issueRef), issueRef);
-  }
-
-  /**
-   * Open issues for the new-run autocomplete, via `gh search issues`. With a query we free-text
-   * search the user's accessible issues; without one we default to open issues assigned to the
-   * logged-in user (`--assignee @me`). Best-effort: any `gh` failure yields an empty list rather
-   * than breaking the dashboard's type-ahead.
-   */
-  async suggestIssues(query: string): Promise<IssueSuggestion[]> {
-    const q = query.trim();
-    const args = ['search', 'issues', '--state', 'open', '--limit', '25', '--json', 'repository,number,title'];
-    if (q) args.push(q);
-    else args.push('--assignee', '@me');
-    try {
-      const parsed = JSON.parse(await this.gh(args)) as RawSearchIssue[];
-      return parsed
-        .filter((i) => i.repository?.nameWithOwner && typeof i.number === 'number')
-        .map((i) => ({
-          ref: `${i.repository.nameWithOwner}#${i.number}`,
-          repo: i.repository.nameWithOwner,
-          number: i.number,
-          title: i.title ?? `Issue ${i.number}`,
-        }));
-    } catch {
-      return []; // best-effort: a search miss or auth hiccup must not break type-ahead
-    }
   }
 
   async updateIssue(input: UpdateIssueInput): Promise<Issue> {
@@ -305,13 +280,6 @@ export class GitHubCli implements GitHub {
   }
 }
 
-/** The raw shape of a `gh search issues --json repository,number,title` element; extra fields ignored. */
-interface RawSearchIssue {
-  repository: { nameWithOwner: string };
-  number: number;
-  title?: string;
-}
-
 interface RawPr {
   number: number;
   headRefName: string;
@@ -362,12 +330,15 @@ export function issueNumberFromUrl(url: string): number {
 }
 
 /** Default {@link ExecFn}: a promise wrapper over `child_process.execFile` that never rejects on
- * a non-zero exit (we branch on `code` instead), with a large buffer for diffs. */
-function defaultExec(file: string, args: string[], options: { cwd?: string }): Promise<ExecResult> {
+ * a non-zero exit (we branch on `code` instead), with a large buffer for diffs. Exported so the
+ * repo-less {@link ./github-account.GitHubCliAccount} can reuse the same runner. */
+export function defaultExec(file: string, args: string[], options: { cwd?: string; timeoutMs?: number }): Promise<ExecResult> {
   return new Promise((resolve, reject) => {
-    execFile(file, args, { cwd: options.cwd, maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => {
+    // `timeout: 0` (the default when `timeoutMs` is undefined) means no limit, so run operations are
+    // unaffected; a positive value kills a hung child with SIGTERM (surfaced below as a rejection).
+    execFile(file, args, { cwd: options.cwd, timeout: options.timeoutMs ?? 0, maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error && typeof (error as { code?: unknown }).code !== 'number') {
-        reject(error); // spawn failure (e.g. binary not on PATH), not a non-zero exit
+        reject(error); // spawn failure (binary not on PATH) or a timeout kill (code is null) — not a non-zero exit
         return;
       }
       const code = error ? ((error as { code?: number }).code ?? 1) : 0;

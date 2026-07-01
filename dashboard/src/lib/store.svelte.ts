@@ -7,7 +7,7 @@
  */
 
 import { request } from './api';
-import type { IssueSuggestion, LoadedConfig, LogLine, Repo, Run, RunDetail } from './types';
+import type { LoadedConfig, LogLine, Repo, Run, RunDetail, Suggestion } from './types';
 
 export const ui = $state({
   runs: [] as Run[], // newest first
@@ -72,29 +72,29 @@ export function toggleShowArchived(): void {
 }
 
 /**
- * Autocomplete suggestions for the new-run bar. The daemon's `GET /suggestions?q=` searches the
- * logged-in user's open GitHub issues (real mode) or its seeded issues (stub). If that request fails
+ * Autocomplete suggestions for the new-run bar. The daemon's `GET /suggestions?q=` returns the logged-in
+ * user's own repos + their open issues (real mode) or its seeded issues (stub). If that request fails
  * (e.g. an older daemon without the route, or `gh` unauthenticated) we fall back to the issue refs of
  * runs already on screen so type-ahead still does something useful.
  */
-export async function fetchSuggestions(query: string): Promise<IssueSuggestion[]> {
+export async function fetchSuggestions(query: string): Promise<Suggestion[]> {
   try {
-    return await request<IssueSuggestion[]>('GET', `/suggestions?q=${encodeURIComponent(query)}`);
+    return await request<Suggestion[]>('GET', `/suggestions?q=${encodeURIComponent(query)}`);
   } catch {
     return localSuggestions(query);
   }
 }
 
-function localSuggestions(query: string): IssueSuggestion[] {
+function localSuggestions(query: string): Suggestion[] {
   const q = query.trim().toLowerCase();
   const seen = new Set<string>();
-  const out: IssueSuggestion[] = [];
+  const out: Suggestion[] = [];
   for (const r of ui.runs) {
     if (seen.has(r.issueRef)) continue;
     seen.add(r.issueRef);
     if (!q || r.issueRef.toLowerCase().includes(q)) {
       const num = Number(r.issueRef.split('#')[1] ?? 0);
-      out.push({ ref: r.issueRef, repo: r.repoRef, number: num, title: r.issueRef });
+      out.push({ kind: 'issue', ref: r.issueRef, repo: r.repoRef, number: num, title: r.issueRef });
     }
   }
   return out;

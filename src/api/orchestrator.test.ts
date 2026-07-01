@@ -64,7 +64,7 @@ function setup(
     runner,
     config: loaded,
     broadcaster,
-    github,
+    suggestionSource: { suggest: (q: string) => github.suggestIssues(q) },
     resolver,
     ...(opts.defaultWorkingRoot ? { defaultWorkingRoot: opts.defaultWorkingRoot } : {}),
     ...(opts.configPath ? { configPath: opts.configPath } : {}),
@@ -123,8 +123,9 @@ describe('Orchestrator — start + drain', () => {
     expect(() => orchestrator.start({ issueRef: 'not a ref' })).toThrow(ApiError);
   });
 
-  it('admits a run only for an enrolled repo when the resolver is registry-backed (Milestone 8)', () => {
-    // A real (EnrolledRepoResolver) daemon: only enrolled repos can run; others are a loud 400.
+  it('refuses an unenrolled repo (400) when it cannot auto-enroll (no default working root)', () => {
+    // A registry-backed (real) daemon with no `defaultWorkingRoot`: it can't auto-enroll, so an
+    // unenrolled repo is a loud 400 and no run is created for it.
     const { orchestrator, repo } = setup({
       makeResolver: (repo, github) => new EnrolledRepoResolver((ref) => repo.getRepo(ref), () => github),
     });
@@ -135,6 +136,20 @@ describe('Orchestrator — start + drain', () => {
     // …an unenrolled repo is refused, and no run is created for it.
     expect(() => orchestrator.start({ issueRef: 'acme/web#318' })).toThrow(/not enrolled/);
     expect(repo.listRuns().map((r) => r.repoRef.toLowerCase())).toEqual(['jzohdi/tmux-speedrun']);
+  });
+
+  it('auto-enrolls an unenrolled repo on first run when a default working root is configured', () => {
+    // The daemon path: `defaultWorkingRoot` is set (from `--work`), so filing a run on a repo the fleet
+    // has never seen enrolls it with defaults and starts the run — no separate enroll step required.
+    const { orchestrator, repo } = setup({
+      defaultWorkingRoot: './work',
+      makeResolver: (repo, github) => new EnrolledRepoResolver((ref) => repo.getRepo(ref), () => github),
+    });
+
+    const run = orchestrator.start({ issueRef: 'acme/web#318' });
+    expect(run.status).toBe('running');
+    expect(orchestrator.listRepos().map((r) => r.repoRef)).toEqual(['acme/web']); // auto-enrolled
+    expect(repo.getRepo('acme/web')).toMatchObject({ workingRoot: './work', baseBranch: 'main' });
   });
 
   it('admits any repo under the single-repo/mock resolver (no enrollment gate)', () => {
@@ -209,11 +224,11 @@ describe('Orchestrator — queries', () => {
     }
   });
 
-  it('suggests issues from the GitHub adapter, and returns none when none is configured', async () => {
+  it('suggests from the suggestion source, and returns none when none is configured', async () => {
     const { orchestrator, github } = setup();
     github.seedIssue('acme/web#318', { number: 318, title: 'Checkout token refresh' });
     expect(await orchestrator.suggestIssues('checkout')).toEqual([
-      { ref: 'acme/web#318', repo: 'acme/web', number: 318, title: 'Checkout token refresh' },
+      { kind: 'issue', ref: 'acme/web#318', repo: 'acme/web', number: 318, title: 'Checkout token refresh' },
     ]);
 
     const loaded = loadDefaultConfig();
@@ -221,7 +236,7 @@ describe('Orchestrator — queries', () => {
     const broadcaster = new Broadcaster();
     const runner = new AgentRunner(repo, new StubExecutor(goldenPathHandler), loaded.agents, new FakeGitHub());
     const resolver = singleRepoResolver({ github: new FakeGitHub(), baseBranch: 'main' });
-    const noGh = new Orchestrator({ repo, runner, config: loaded, broadcaster, resolver }); // github omitted
+    const noGh = new Orchestrator({ repo, runner, config: loaded, broadcaster, resolver }); // suggestionSource omitted
     expect(await noGh.suggestIssues('anything')).toEqual([]);
   });
 });

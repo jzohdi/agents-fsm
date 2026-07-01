@@ -1,12 +1,12 @@
 <script lang="ts">
   import { startRun, fetchSuggestions } from './store.svelte';
-  import type { IssueSuggestion } from './types';
+  import type { Suggestion } from './types';
 
   let value = $state('');
   let open = $state(false);
   let activeIdx = $state(-1);
   let busy = $state(false);
-  let suggestions = $state<IssueSuggestion[]>([]);
+  let suggestions = $state<Suggestion[]>([]);
   // The last failed start's message, shown inline until the operator edits the input (so the daemon's
   // reason — a malformed ref, or a cross-repo / wrong-repo mismatch — is never silently swallowed).
   let error = $state<string | null>(null);
@@ -26,12 +26,18 @@
     }, 160);
   }
 
-  // group by repo for the dropdown headers
-  const groups = $derived.by(() => {
-    const m = new Map<string, IssueSuggestion[]>();
-    for (const s of suggestions) (m.get(s.repo) ?? m.set(s.repo, []).get(s.repo)!).push(s);
+  // Split the suggestions into repos (shown first, picking one narrows to its issues) and issues
+  // (grouped by repo). `flat` is the exact rendered order, so keyboard nav lines up with the list.
+  const repos = $derived(suggestions.filter((s) => s.kind === 'repo'));
+  const issueGroups = $derived.by(() => {
+    const m = new Map<string, Suggestion[]>();
+    for (const s of suggestions) {
+      if (s.kind !== 'issue') continue;
+      (m.get(s.repo) ?? m.set(s.repo, []).get(s.repo)!).push(s);
+    }
     return [...m.entries()];
   });
+  const flat = $derived([...repos, ...issueGroups.flatMap(([, items]) => items)]);
 
   function refParts(ref: string): { repo: string; num: string } {
     const i = ref.indexOf('#');
@@ -57,23 +63,31 @@
     }
   }
 
-  function choose(ref: string) {
-    value = ref;
-    open = false;
-    activeIdx = -1;
+  // Picking a repo narrows the type-ahead to that repo's issues (keeps the dropdown open + re-queries);
+  // picking an issue fills the full ref, ready to start.
+  function choose(s: Suggestion) {
+    value = s.ref;
+    if (s.kind === 'repo') {
+      open = true;
+      activeIdx = -1;
+      refresh();
+    } else {
+      open = false;
+      activeIdx = -1;
+    }
   }
 
   function onKeydown(e: KeyboardEvent) {
-    if (!open || suggestions.length === 0) return;
+    if (!open || flat.length === 0) return;
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      activeIdx = Math.min(suggestions.length - 1, activeIdx + 1);
+      activeIdx = Math.min(flat.length - 1, activeIdx + 1);
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       activeIdx = Math.max(0, activeIdx - 1);
     } else if (e.key === 'Enter' && activeIdx >= 0) {
       e.preventDefault();
-      choose(suggestions[activeIdx]!.ref);
+      choose(flat[activeIdx]!);
     } else if (e.key === 'Escape') {
       open = false;
     }
@@ -103,21 +117,40 @@
 
   {#if open && value.trim() !== ''}
     <div class="af-ac">
-      {#if suggestions.length === 0}
-        <div class="none">No matching open issues — press <b>Start run</b> to file <code>{value.trim()}</code> anyway.</div>
+      {#if flat.length === 0}
+        <div class="none">No matching repos or issues — press <b>Start run</b> to file <code>{value.trim()}</code> anyway.</div>
       {:else}
-        {#each groups as [repo, items] (repo)}
+        {#if repos.length > 0}
+          <div class="grp">Repositories · {repos.length}</div>
+          {#each repos as s (s.ref)}
+            <div
+              class="opt"
+              class:act={flat.indexOf(s) === activeIdx}
+              onclick={() => choose(s)}
+              onkeydown={(e) => { if (e.key === 'Enter') choose(s); }}
+              onmouseenter={() => (activeIdx = flat.indexOf(s))}
+              role="option"
+              aria-selected={flat.indexOf(s) === activeIdx}
+              tabindex="-1"
+            >
+              <span class="ref">{s.ref}</span>
+              <span class="t">{s.title}</span>
+              <span class="tag">repo</span>
+            </div>
+          {/each}
+        {/if}
+        {#each issueGroups as [repo, items] (repo)}
           <div class="grp">{repo} · {items.length}</div>
           {#each items as s (s.ref)}
             {@const p = refParts(s.ref)}
             <div
               class="opt"
-              class:act={suggestions.indexOf(s) === activeIdx}
-              onclick={() => choose(s.ref)}
-              onkeydown={(e) => { if (e.key === 'Enter') choose(s.ref); }}
-              onmouseenter={() => (activeIdx = suggestions.indexOf(s))}
+              class:act={flat.indexOf(s) === activeIdx}
+              onclick={() => choose(s)}
+              onkeydown={(e) => { if (e.key === 'Enter') choose(s); }}
+              onmouseenter={() => (activeIdx = flat.indexOf(s))}
               role="option"
-              aria-selected={suggestions.indexOf(s) === activeIdx}
+              aria-selected={flat.indexOf(s) === activeIdx}
               tabindex="-1"
             >
               <span class="ref">{p.repo}<b>{p.num}</b></span>

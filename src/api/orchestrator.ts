@@ -30,7 +30,8 @@ import type {
   RunStatus,
   Transition,
 } from '../store/repository';
-import type { GitHub, IssueSuggestion } from '../integration/github';
+import type { Suggestion } from '../integration/github';
+import type { SuggestionSource } from '../integration/github-account';
 import type { RepoResolver } from '../integration/github-resolver';
 import { parseIssueRef, parseRepoRef, type ParsedIssueRef } from '../integration/refs';
 import { Broadcaster, type StreamListener } from './stream';
@@ -61,8 +62,12 @@ export interface OrchestratorOptions {
   runner: AgentRunner;
   config: LoadedConfig;
   broadcaster: Broadcaster;
-  /** GitHub adapter, used (read-only) to power the new-run autocomplete. Omit → suggestions are empty. */
-  github?: GitHub;
+  /**
+   * User-scoped discovery source for the new-run autocomplete (the repo-less {@link SuggestionSource}
+   * — real mode wires a `GitHubCliAccount`, mock wraps the fake). Omit → suggestions are empty. It is
+   * *not* repo-bound, which is what lets the daemon start without a pinned repo.
+   */
+  suggestionSource?: SuggestionSource;
   /**
    * Resolves the per-repo adapter for a run's repo (Milestone 8 Phase A). {@link Orchestrator.start}
    * validates against it — a run is admitted only for a repo the daemon can service (an enrolled repo in
@@ -101,7 +106,7 @@ export class Orchestrator {
   private readonly runner: AgentRunner;
   private readonly loop: EventLoop;
   private readonly configPath?: string;
-  private readonly github?: GitHub;
+  private readonly suggestionSource?: SuggestionSource;
   private readonly resolver: RepoResolver;
   private readonly defaultWorkingRoot?: string;
   private readonly concurrency: number;
@@ -120,7 +125,7 @@ export class Orchestrator {
     this.broadcaster = options.broadcaster;
     this.config = options.config;
     this.configPath = options.configPath;
-    this.github = options.github;
+    this.suggestionSource = options.suggestionSource;
     this.resolver = options.resolver;
     this.defaultWorkingRoot = options.defaultWorkingRoot;
     this.concurrency = options.concurrency ?? 1; // the requested cap; `EventLoop.drain` clamps it to a valid ≥ 1
@@ -154,20 +159,12 @@ export class Orchestrator {
     } catch (err) {
       throw new ApiError(400, err instanceof Error ? err.message : String(err));
     }
-    // Enrollment check (Milestone 8 Phase A): admit a run only for a repo the daemon can service.
-    // The resolver decides — any repo under the single-repo/mock resolver, an enrolled repo under the
-    // real one — and throws an actionable "not enrolled" message otherwise (which we surface as a 400,
-    // never a run that would later fail deep in the loop). This replaces the pre-M8 single-repo guard.
     const repoRef = input.repoRef ?? parsed.repo;
-    try {
-      this.resolver.for(repoRef);
-    } catch (err) {
-      throw new ApiError(400, err instanceof Error ? err.message : String(err));
-    }
     // Global cost ceiling (M8 B3): refuse to admit a *new* run while active spend is at/over the
     // ceiling — a currently-executing stage is never interrupted, but no new work is started. The
     // operator lets in-flight runs finish (freeing headroom) or raises the ceiling. Existing runs park
-    // and stay overridable per-run; only new-run admission bounces here.
+    // and stay overridable per-run; only new-run admission bounces here. Checked *before* enrollment so a
+    // cost-rejected request doesn't leave an orphan repo enrolled.
     if (this.costCeiling !== undefined) {
       const activeCost = this.repo.sumActiveCost();
       if (activeCost >= this.costCeiling) {
@@ -176,6 +173,26 @@ export class Orchestrator {
           `fleet cost ceiling reached ($${activeCost.toFixed(2)} of $${this.costCeiling.toFixed(2)} across active runs); ` +
             `let active runs finish or raise --cost-ceiling before starting new work`,
         );
+      }
+    }
+    // Enrollment check (Milestone 8 Phase A): admit a run only for a repo the daemon can service.
+    // The resolver decides — any repo under the single-repo/mock resolver, an enrolled repo under the
+    // real one. Under the real resolver an un-enrolled repo throws; rather than reject, we **auto-enroll
+    // it with defaults and retry** (the user's choice), so filing a run by pasting an issue ref just
+    // works without a separate enroll step. Auto-enroll needs a default working root; without one (or if
+    // the retry still fails) we surface the resolver's actionable 400 instead of a run that would fail
+    // deep in the loop. Mock/single-repo resolvers never throw, so this path is real-mode only.
+    try {
+      this.resolver.for(repoRef);
+    } catch (notEnrolled) {
+      if (!this.defaultWorkingRoot) {
+        throw new ApiError(400, notEnrolled instanceof Error ? notEnrolled.message : String(notEnrolled));
+      }
+      try {
+        this.enrollRepo({ repoRef }); // upserts the registry row + invalidates the resolver cache
+        this.resolver.for(repoRef); // retry — a bad ref that can't be enrolled/resolved still throws
+      } catch (err) {
+        throw new ApiError(400, err instanceof Error ? err.message : String(err));
       }
     }
     const run = this.loop.startRun({ issueRef: parsed.ref, repoRef });
@@ -363,12 +380,13 @@ export class Orchestrator {
   }
 
   /**
-   * Open issues matching `query` for the dashboard's new-run autocomplete (README §3.3 Layer 7).
-   * Delegates to the GitHub adapter; with no adapter configured there are simply no suggestions.
+   * Repos + open issues matching `query` for the dashboard's new-run autocomplete (README §3.3 Layer 7).
+   * Delegates to the user-scoped {@link SuggestionSource}; with none configured there are no suggestions.
+   * (Kept named `suggestIssues` — the route/method name — though it now also returns repo suggestions.)
    */
-  async suggestIssues(query: string): Promise<IssueSuggestion[]> {
-    if (!this.github) return [];
-    return this.github.suggestIssues(query);
+  async suggestIssues(query: string): Promise<Suggestion[]> {
+    if (!this.suggestionSource) return [];
+    return this.suggestionSource.suggest(query);
   }
 
   // --- config ------------------------------------------------------------------

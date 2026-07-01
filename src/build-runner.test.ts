@@ -43,6 +43,20 @@ describe('buildRunner (real mode — boot-time enrollment, Milestone 8)', () => 
     // …while an unenrolled repo is a loud error, not a silent default (proves it isn't a single-repo stub).
     expect(() => resolver.for('ghost/repo')).toThrow(/not enrolled/);
   });
+
+  it('boots with no --repo: empty registry, a user-scoped suggestion source, no bound repo', () => {
+    const repo = new Repository(openDb(':memory:'));
+    const { agents } = loadDefaultConfig();
+    const args = parseCliArgs(['serve']); // no --repo, no start issueRef
+
+    const { resolver, suggestionSource } = buildRunner(args, repo, agents, '');
+
+    // Nothing is enrolled at boot — repos are added on demand (POST /repos or auto-enroll on first run).
+    expect(repo.listRepos()).toEqual([]);
+    expect(() => resolver.for('anything/here')).toThrow(/not enrolled/);
+    // Autocomplete is still available (the repo-less, user-scoped gh account source), not repo-bound.
+    expect(typeof suggestionSource.suggest).toBe('function');
+  });
 });
 
 describe('resolveConcurrency (global cap: --concurrency → FLEET_CONCURRENCY → default, Milestone 8 Phase B)', () => {

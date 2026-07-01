@@ -97,8 +97,13 @@ export interface LogLine {
   kind?: string;
 }
 
-/** An open issue suggested by the daemon for the new-run autocomplete (`GET /suggestions`). */
-export interface IssueSuggestion {
+/**
+ * A repo or issue suggested by the daemon for the new-run autocomplete (`GET /suggestions`). `kind`
+ * discriminates: an `issue` has a full `owner/repo#N` ref; a `repo` has a bare `owner/repo` ref
+ * (picking it narrows the type-ahead to that repo's issues).
+ */
+export interface Suggestion {
+  kind: 'repo' | 'issue';
   ref: string;
   repo: string;
   number: number;

@@ -66,7 +66,7 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
   // --- fleet cost status: the global ceiling (or null) + current active spend (Milestone 8 B3) ---
   if (method === 'GET' && path === '/cost') return sendJson(res, 200, orch.costStatus());
 
-  // --- new-run autocomplete: open issues matching ?q= (README §3.3 Layer 7) ---
+  // --- new-run autocomplete: your repos + their open issues matching ?q= (README §3.3 Layer 7) ---
   if (method === 'GET' && path === '/suggestions') {
     return sendJson(res, 200, await orch.suggestIssues(url.searchParams.get('q') ?? ''));
   }

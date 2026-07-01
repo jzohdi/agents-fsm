@@ -18,6 +18,7 @@ import { AgentRunner, type PhaseActivity } from './agent/runner';
 import { FatalExecutorError, StubExecutor, goldenPathHandler } from './agent/executor';
 import { FakeGitHub } from './integration/github-fake';
 import type { GitHub } from './integration/github';
+import { GitHubCliAccount, type SuggestionSource } from './integration/github-account';
 import { EnrolledRepoResolver, singleRepoResolver, type RepoResolver } from './integration/github-resolver';
 import { buildRealGitHub, buildRealRunner } from './real-run';
 import { Orchestrator } from './api/orchestrator';
@@ -29,10 +30,17 @@ export interface BuildRunnerOptions {
   onActivity?: (activity: PhaseActivity) => void;
 }
 
+/** Wrap a {@link FakeGitHub} as a {@link SuggestionSource} so mock-mode autocomplete reads its seeded
+ *  issues (tagged `kind:'issue'`). Repos aren't seeded, so mock suggestions are issues only. */
+function fakeSuggestionSource(github: FakeGitHub): SuggestionSource {
+  return { suggest: (query) => github.suggestIssues(query) };
+}
+
 /**
- * Build the Agent Runner + GitHub adapter for the selected mode. The adapter is returned so callers
- * (the CLI's Reply Poller, the daemon) can share the one instance — important for the fake, whose
- * seeded issues live in memory.
+ * Build the Agent Runner + its resolver + the autocomplete {@link SuggestionSource} for the selected
+ * mode. In mock mode the resolver's {@link FakeGitHub} is also returned as `github`, so callers that
+ * seed it in memory (dev-preview, tests) share the one instance; real mode omits `github` (the daemon
+ * is no longer pinned to a single repo's adapter).
  */
 export function buildRunner(
   args: CliArgs,
@@ -40,7 +48,7 @@ export function buildRunner(
   agents: AgentsConfig,
   repoRef: string,
   options: BuildRunnerOptions = {},
-): { runner: AgentRunner; github: GitHub; resolver: RepoResolver } {
+): { runner: AgentRunner; resolver: RepoResolver; suggestionSource: SuggestionSource; github?: GitHub } {
   if (args.mock) {
     // Mock mode is single-repo by nature (one in-memory fake); the resolver returns it for any ref.
     const github = new FakeGitHub({ autoSeedIssues: true });
@@ -48,7 +56,7 @@ export function buildRunner(
     const runner = new AgentRunner(repo, new StubExecutor(goldenPathHandler), agents, resolver, {
       ...(options.onActivity ? { onActivity: options.onActivity } : {}),
     });
-    return { runner, github, resolver };
+    return { runner, github, resolver, suggestionSource: fakeSuggestionSource(github) };
   }
   const config = {
     repo: args.repo ?? repoRef,
@@ -62,19 +70,19 @@ export function buildRunner(
     ...(args.timeoutMinutes !== undefined ? { timeoutMs: args.timeoutMinutes * 60_000 } : {}),
     ...(args.maxRetries !== undefined ? { maxRetries: args.maxRetries } : {}),
   };
-  // A real run is bound to a repo; refuse early with actionable guidance rather than a later
-  // "repo not enrolled" from the resolver (matches the pre-M8 buildRealGitHub guard).
-  if (!config.repo) throw new Error('a real run needs a repo (owner/name); pass --repo or a start issueRef');
-  // Enroll the daemon's bound repo (boot-time, idempotent) so the resolver can find it. Other repos
-  // are enrolled at runtime via `POST /repos` (Milestone 8 Phase A). The per-repo adapter is built
-  // straight from the registry row, so each run is serviced by *its* repo's adapter (README §M8).
-  repo.upsertRepo({
-    repoRef: config.repo,
-    workingRoot: config.workingRoot,
-    baseBranch: config.baseBranch,
-    cloneUrl: config.cloneUrl ?? null,
-    localRepo: config.localRepo ?? null,
-  });
+  // Bootstrap-enroll the daemon's bound repo *only when one was given* (`--repo` or a start issueRef).
+  // With none, the daemon boots empty and repos are enrolled on demand — via `POST /repos` or the
+  // auto-enroll-on-first-run path in `Orchestrator.start` (Milestone 8 Phase A + this change). The
+  // per-repo adapter is built straight from the registry row, so each run is serviced by its repo's.
+  if (config.repo) {
+    repo.upsertRepo({
+      repoRef: config.repo,
+      workingRoot: config.workingRoot,
+      baseBranch: config.baseBranch,
+      cloneUrl: config.cloneUrl ?? null,
+      localRepo: config.localRepo ?? null,
+    });
+  }
   const resolver = new EnrolledRepoResolver(
     (ref) => repo.getRepo(ref),
     (row) =>
@@ -90,10 +98,11 @@ export function buildRunner(
     github: resolver,
     ...(options.onActivity ? { onActivity: options.onActivity } : {}),
   });
-  // The bound repo's adapter powers the new-run autocomplete (a cross-repo `gh` search — any adapter
-  // works, this is just the one on hand). The runner and Reply Poller use the resolver, not this.
-  const github = resolver.for(config.repo).github;
-  return { runner, github, resolver };
+  // The new-run autocomplete is powered by the logged-in `gh` user's own repos + their open issues —
+  // a *repo-less*, user-scoped source (README §M8). That decoupling from any single repo is exactly
+  // what lets the daemon start without `--repo`. The runner and Reply Poller use the resolver, not this.
+  const suggestionSource = new GitHubCliAccount();
+  return { runner, resolver, suggestionSource };
 }
 
 /** Load the FSM config the daemon/CLI runs under: `--config <path>` when given, else the bundled default. */
@@ -136,7 +145,7 @@ export function resolveCostCeiling(args: CliArgs): number | undefined {
 export function buildOrchestrator(args: CliArgs): {
   orchestrator: Orchestrator;
   repo: Repository;
-  github: GitHub;
+  github?: GitHub;
   resolver: RepoResolver;
   broadcaster: Broadcaster;
 } {
@@ -144,7 +153,7 @@ export function buildOrchestrator(args: CliArgs): {
   const repo = new Repository(openDb(args.db));
   const broadcaster = new Broadcaster();
   const repoRef = args.repo ?? args.positionals[1]?.split('#')[0] ?? '';
-  const { runner, github, resolver } = buildRunner(args, repo, loaded.agents, repoRef, {
+  const { runner, github, resolver, suggestionSource } = buildRunner(args, repo, loaded.agents, repoRef, {
     onActivity: (activity) => broadcaster.publish({ type: 'activity', activity }),
   });
   const orchestrator = new Orchestrator({
@@ -152,7 +161,7 @@ export function buildOrchestrator(args: CliArgs): {
     runner,
     config: loaded,
     broadcaster,
-    github, // powers the new-run autocomplete (GET /suggestions)
+    suggestionSource, // powers the new-run autocomplete (GET /suggestions)
     resolver, // per-repo adapter resolution + the start-time enrollment check (Milestone 8)
     defaultWorkingRoot: args.work, // a POST /repos enrollment defaults its working root to the daemon's --work
     concurrency: resolveConcurrency(args), // global cap for the parallel drain pump (Milestone 8 Phase B)
