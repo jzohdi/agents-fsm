@@ -30,6 +30,8 @@ export interface CliArgs {
   model?: string;
   /** Per-invocation wall-clock cap in **minutes** — `--timeout`. */
   timeoutMinutes?: number;
+  /** How many times to retry a rate-limited harness invocation before escalating — `--max-retries`. */
+  maxRetries?: number;
   /** How long to keep polling for a human reply when triage asks a question, in **minutes**. 0 disables polling. `--poll-timeout`. */
   pollTimeoutMinutes: number;
   /** Delay between reply-poll checks, in **seconds** — `--poll-interval`. */
@@ -44,6 +46,12 @@ export interface CliArgs {
    * or its default (see `build-runner`). The one-shot CLI drains serially regardless of this flag.
    */
   concurrency?: number;
+  /**
+   * Global cost ceiling in dollars for the `serve` daemon (Milestone 8 B3) — `--cost-ceiling`. When the
+   * aggregate `cost_used` of active runs reaches this, new runs are refused and existing runs park until
+   * an operator overrides them. Undefined here → falls back to `FLEET_COST_CEILING` or off (no ceiling).
+   */
+  costCeiling?: number;
 }
 
 export function parseCliArgs(argv: string[]): CliArgs {
@@ -62,11 +70,13 @@ export function parseCliArgs(argv: string[]): CliArgs {
       'permission-mode': { type: 'string' },
       model: { type: 'string' },
       timeout: { type: 'string' },
+      'max-retries': { type: 'string' },
       'poll-timeout': { type: 'string' },
       'poll-interval': { type: 'string' },
       config: { type: 'string' },
       port: { type: 'string' },
       concurrency: { type: 'string' },
+      'cost-ceiling': { type: 'string' },
     },
   });
   return {
@@ -82,10 +92,12 @@ export function parseCliArgs(argv: string[]): CliArgs {
     permissionMode: values['permission-mode'],
     model: values.model,
     timeoutMinutes: values.timeout !== undefined ? Number(values.timeout) : undefined,
+    ...(values['max-retries'] !== undefined ? { maxRetries: Number(values['max-retries']) } : {}),
     pollTimeoutMinutes: values['poll-timeout'] !== undefined ? Number(values['poll-timeout']) : 30,
     pollIntervalSeconds: values['poll-interval'] !== undefined ? Number(values['poll-interval']) : 15,
     config: values.config,
     port: values.port !== undefined ? Number(values.port) : 4319,
     ...(values.concurrency !== undefined ? { concurrency: Number(values.concurrency) } : {}),
+    ...(values['cost-ceiling'] !== undefined ? { costCeiling: Number(values['cost-ceiling']) } : {}),
   };
 }

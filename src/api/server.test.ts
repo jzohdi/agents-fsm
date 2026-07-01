@@ -127,6 +127,25 @@ describe('HTTP API', () => {
     expect((await fetch(`${base}/runs/99999/archive`, { method: 'POST' })).status).toBe(404);
   });
 
+  it('validates and routes POST /runs/:id/cost-override, and reports cost status (Milestone 8 B3)', async () => {
+    const { base, orchestrator } = await start();
+    const run = (await (await fetch(`${base}/runs`, { method: 'POST', body: JSON.stringify({ issueRef: 'o/r#1' }) })).json()) as { id: number };
+
+    // GET /cost reports the ceiling (null — none configured here) and current active spend.
+    const cost = (await (await fetch(`${base}/cost`)).json()) as { ceiling: number | null; activeCost: number };
+    expect(cost.ceiling).toBeNull();
+    expect(typeof cost.activeCost).toBe('number');
+
+    // An invalid mode is a 400, validated at the boundary before touching the run.
+    const bad = await fetch(`${base}/runs/${run.id}/cost-override`, { method: 'POST', body: JSON.stringify({ mode: 'sometimes' }) });
+    expect(bad.status).toBe(400);
+
+    // Let the run finish, then a valid override on the (now terminal) run is a 409.
+    await orchestrator.settle();
+    const onDone = await fetch(`${base}/runs/${run.id}/cost-override`, { method: 'POST', body: JSON.stringify({ mode: 'full' }) });
+    expect(onDone.status).toBe(409);
+  });
+
   it('gets the config and rejects an invalid update (read-only without a config path)', async () => {
     const { base } = await start();
     const config = (await (await fetch(`${base}/config`)).json()) as { version: string; fsm: { initial: string } };

@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { loadDefaultConfig } from './fsm/config';
 import { parseCliArgs } from './cli-args';
-import { buildOrchestrator, buildRunner, loadRunConfig, resolveConcurrency } from './build-runner';
+import { buildOrchestrator, buildRunner, loadRunConfig, resolveConcurrency, resolveCostCeiling } from './build-runner';
 import { openDb } from './store/db';
 import { Repository } from './store/repository';
 
@@ -79,6 +79,43 @@ describe('resolveConcurrency (global cap: --concurrency → FLEET_CONCURRENCY �
     expect(resolveConcurrency(argsWith())).toBe(4);
     delete process.env.FLEET_CONCURRENCY;
     expect(resolveConcurrency(argsWith(-2))).toBe(4);
+  });
+});
+
+describe('resolveCostCeiling (global cost ceiling: --cost-ceiling → FLEET_COST_CEILING → off, Milestone 8 B3)', () => {
+  const originalEnv = process.env.FLEET_COST_CEILING;
+  afterEach(() => {
+    if (originalEnv === undefined) delete process.env.FLEET_COST_CEILING;
+    else process.env.FLEET_COST_CEILING = originalEnv;
+  });
+
+  const argsWith = (costCeiling?: number): ReturnType<typeof parseCliArgs> => ({
+    ...parseCliArgs(['serve']),
+    ...(costCeiling !== undefined ? { costCeiling } : {}),
+  });
+
+  it('is off (undefined) when neither the flag nor the env var is set', () => {
+    delete process.env.FLEET_COST_CEILING;
+    expect(resolveCostCeiling(argsWith())).toBeUndefined();
+  });
+
+  it('prefers the --cost-ceiling flag over the env var', () => {
+    process.env.FLEET_COST_CEILING = '50';
+    expect(resolveCostCeiling(argsWith(10))).toBe(10);
+  });
+
+  it('falls back to FLEET_COST_CEILING when the flag is absent, and allows a 0 ceiling', () => {
+    process.env.FLEET_COST_CEILING = '25';
+    expect(resolveCostCeiling(argsWith())).toBe(25);
+    process.env.FLEET_COST_CEILING = '0';
+    expect(resolveCostCeiling(argsWith())).toBe(0);
+  });
+
+  it('treats a negative or non-numeric value as off (never wedges the fleet on a typo)', () => {
+    process.env.FLEET_COST_CEILING = '-5';
+    expect(resolveCostCeiling(argsWith())).toBeUndefined();
+    process.env.FLEET_COST_CEILING = 'nonsense';
+    expect(resolveCostCeiling(argsWith())).toBeUndefined();
   });
 });
 

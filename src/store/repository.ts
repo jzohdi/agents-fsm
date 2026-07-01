@@ -31,9 +31,14 @@ export interface Run {
   flags: Record<string, boolean>;
   /** When an operator archived this (terminal) run out of the dashboard's Resolved lane; `null` = not archived. */
   archivedAt: string | null;
+  /** Operator override of the global cost ceiling (M8 B3): `next_step` = one more stage, `full` = the whole run, `null` = none. */
+  costOverride: CostOverride | null;
   createdAt: string;
   updatedAt: string;
 }
+
+/** How an operator lets a run cross the global cost ceiling: one more stage, or the whole run. */
+export type CostOverride = 'next_step' | 'full';
 
 export interface Transition {
   id: number;
@@ -182,6 +187,7 @@ interface RunRow {
   agent_runs_count: number;
   flags: string;
   archived_at: string | null;
+  cost_override: CostOverride | null;
   created_at: string;
   updated_at: string;
 }
@@ -251,6 +257,7 @@ function mapRun(r: RunRow): Run {
     agentRunsCount: r.agent_runs_count,
     flags: JSON.parse(r.flags) as Record<string, boolean>,
     archivedAt: r.archived_at,
+    costOverride: r.cost_override,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -424,6 +431,23 @@ export class Repository {
     this.db.prepare(`UPDATE runs SET archived_at = ${value}, updated_at = ${NOW} WHERE id = ?`).run(id);
   }
 
+  /** Set (or clear, with `null`) a run's cost-ceiling override (M8 B3). See {@link CostOverride}. */
+  setCostOverride(id: number, mode: CostOverride | null): void {
+    this.db.prepare(`UPDATE runs SET cost_override = ?, updated_at = ${NOW} WHERE id = ?`).run(mode, id);
+  }
+
+  /**
+   * Total `cost_used` across **active** (non-terminal) runs — the input to the global cost ceiling
+   * (M8 B3). Terminal runs (`done`/`stopped`) are excluded, so finishing/stopping a run frees ceiling
+   * headroom. Returns 0 when there are no active runs.
+   */
+  sumActiveCost(): number {
+    const row = this.db
+      .prepare(`SELECT COALESCE(SUM(cost_used), 0) AS total FROM runs WHERE status NOT IN ('done', 'stopped')`)
+      .get() as { total: number };
+    return row.total;
+  }
+
   /**
    * Merge skip flags into the run (last write wins per key). `plan` emits
    * `needs_frontend`/`needs_backend`; persisting them on the run is what lets the
@@ -577,8 +601,13 @@ export class Repository {
    * A run's follow-up event is enqueued inside the stage's commit transaction, before
    * `markEventDone`, so this guard holds it back until the in-flight stage finalizes.
    * Same predicate as {@link hasProcessingEvent}, enforced atomically at pickup.
+   *
+   * Cost-ceiling gate (M8 B3): when `onlyOverrides` is set (the loop is over the global cost ceiling),
+   * only a run carrying a `cost_override` is dispatchable — every other run parks until the aggregate
+   * clears or an operator overrides it. Off by default, so the ungated claim is unchanged.
    */
-  claimNextEvent(): EventRow | undefined {
+  claimNextEvent(opts: { onlyOverrides?: boolean } = {}): EventRow | undefined {
+    const costGate = opts.onlyOverrides ? 'AND runs.cost_override IS NOT NULL' : '';
     const row = this.db
       .prepare(
         `UPDATE events SET status = 'processing'
@@ -589,6 +618,7 @@ export class Repository {
              AND NOT EXISTS (
                SELECT 1 FROM events p WHERE p.run_id = events.run_id AND p.status = 'processing'
              )
+             ${costGate}
            ORDER BY events.id ASC LIMIT 1
          )
          RETURNING *`,

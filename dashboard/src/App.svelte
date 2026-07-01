@@ -5,12 +5,14 @@
   import Pipeline from './lib/Pipeline.svelte';
   import RunDetail from './lib/RunDetail.svelte';
   import Editor from './lib/Editor.svelte';
-  import { ui, loadConfig, loadRuns, selectRun, connectStream, banner } from './lib/store.svelte';
+  import { ui, loadConfig, loadRuns, loadCost, selectRun, connectStream, banner } from './lib/store.svelte';
+  import { costStatusModel } from './lib/render';
 
   onMount(async () => {
     try {
       await loadConfig();
       await loadRuns();
+      await loadCost();
       // Open a sensible run by default so the detail view isn't empty on load: prefer a running one.
       if (ui.selectedId === null && ui.runs.length) {
         const first = ui.runs.find((r) => r.status === 'running') ?? ui.runs[0]!;
@@ -23,6 +25,8 @@
   });
 
   const connLabel = $derived(ui.conn === 'on' ? 'Live' : ui.conn === 'off' ? 'Reconnecting' : 'Connecting');
+  // Fleet cost vs. the global ceiling (M8 B3); only surfaced when a ceiling is configured.
+  const cost = $derived(costStatusModel(ui.runs, ui.costCeiling));
 </script>
 
 <header class="af-topbar">
@@ -33,6 +37,11 @@
       <button type="button" class:on={ui.view === 'editor'} onclick={() => (ui.view = 'editor')}>FSM editor</button>
     </nav>
     <div class="right">
+      {#if cost.ceiling !== null}
+        <span class="af-cost" class:over={cost.overCeiling} title={cost.overCeiling ? 'Cost ceiling reached — new runs are refused and runs park until you override them' : 'Fleet spend across active runs vs. the global cost ceiling'}>
+          <span class="d"></span>{cost.label}{#if cost.overCeiling} · parked{/if}
+        </span>
+      {/if}
       <span>config <b>{ui.config?.version ?? '…'}</b></span>
       <span class="af-live {ui.conn}"><span class="d"></span>{connLabel}</span>
     </div>

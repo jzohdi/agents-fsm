@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { ui, control, revertRun } from './store.svelte';
-  import { telemetryModel, escalationModel, activityLane, issueUrl, prUrl, branchUrl, fmtCost, fmtDuration, fmtTokens, escapeHtml, humanizeState } from './render';
+  import { ui, control, revertRun, overrideCost } from './store.svelte';
+  import { telemetryModel, escalationModel, activityLane, costStatusModel, issueUrl, prUrl, branchUrl, fmtCost, fmtDuration, fmtTokens, escapeHtml, humanizeState } from './render';
   import StateMachine from './StateMachine.svelte';
   import ScrollArea from './ScrollArea.svelte';
 
@@ -17,6 +17,11 @@
       : null,
   );
   const terminal = $derived(run ? run.status === 'done' || run.status === 'stopped' : false);
+  // Cost-override controls (M8 B3): the ceiling only parks *running* runs (a needs_human/paused run is
+  // parked for a different reason), so show them there once the fleet is at the ceiling, or whenever the
+  // run already carries an override (so it can be cleared).
+  const cost = $derived(costStatusModel(ui.runs, ui.costCeiling));
+  const showCostOverride = $derived(run?.status === 'running' && ui.costCeiling !== null && (cost.overCeiling || !!run?.costOverride));
   const tel = $derived(telemetryModel(detail?.agentRuns ?? []));
   const stageMeta = $derived(
     Object.fromEntries(tel.stages.map((s) => [s.stage, `${fmtDuration(s.durationMs)} · ${s.invocations}×`])),
@@ -109,6 +114,18 @@
         <button type="button" class="stop" onclick={() => control('stop')}>Stop</button>
       {:else}
         <span class="terminal-note">terminal — no further control</span>
+      {/if}
+      {#if showCostOverride}
+        <div class="af-cost-override">
+          {#if run.costOverride}
+            <span class="af-tag">ceiling override: {run.costOverride === 'full' ? 'complete issue' : 'next step'}</span>
+            <button type="button" onclick={() => overrideCost(run.id, 'none')}>Clear</button>
+          {:else}
+            <span class="af-tag over">cost-parked</span>
+            <button type="button" onclick={() => overrideCost(run.id, 'next_step')}>Run next step</button>
+            <button type="button" onclick={() => overrideCost(run.id, 'full')}>Complete issue</button>
+          {/if}
+        </div>
       {/if}
     </div>
   </div>

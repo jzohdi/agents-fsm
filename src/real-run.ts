@@ -47,6 +47,8 @@ export interface RealRunConfig {
   permissionMode?: string;
   /** Per-invocation wall-clock cap in ms; a single stage is killed + escalated when exceeded. */
   timeoutMs?: number;
+  /** How many times to retry a rate-limited/overloaded invocation before escalating (Milestone 8 B3). */
+  maxRetries?: number;
 }
 
 /** The `cheap` logical model the cost-control override pins every phase to (the executor maps it to a concrete model). */
@@ -103,6 +105,7 @@ export function buildRealRunner(
   };
   if (config.frontierModel) executorOpts.modelMap = { ...DEFAULT_MODEL_MAP, frontier: config.frontierModel };
   if (config.timeoutMs !== undefined) executorOpts.timeoutMs = config.timeoutMs;
+  if (config.maxRetries !== undefined) executorOpts.maxRetries = config.maxRetries;
   const executor = new SubprocessStageExecutor(executorOpts);
   const github = options.github ?? buildRealGitHub(config);
   const recipe = config.cheap ? forceCheapModels(agents) : agents;

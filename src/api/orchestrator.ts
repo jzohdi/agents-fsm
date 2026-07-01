@@ -21,6 +21,7 @@ import type { AgentRunner } from '../agent/runner';
 import type {
   AgentRunRecord,
   Artifact,
+  CostOverride,
   ListRunsFilter,
   LogRecord,
   Repo,
@@ -81,6 +82,12 @@ export interface OrchestratorOptions {
    * so unit tests are unchanged; the daemon passes a higher cap (see `build-runner`).
    */
   concurrency?: number;
+  /**
+   * Global cost ceiling (M8 B3): when the aggregate `cost_used` of active runs reaches this, {@link
+   * Orchestrator.start} refuses new runs (429) and the loop parks existing runs' next stages until the
+   * aggregate clears or an operator overrides a run ({@link Orchestrator.overrideCost}). Undefined = off.
+   */
+  costCeiling?: number;
   /** Called when a background drain throws (e.g. a `FatalExecutorError`). Default: log to stderr. */
   onError?: (err: unknown) => void;
 }
@@ -98,6 +105,7 @@ export class Orchestrator {
   private readonly resolver: RepoResolver;
   private readonly defaultWorkingRoot?: string;
   private readonly concurrency: number;
+  private readonly costCeiling?: number;
   private config: LoadedConfig;
 
   // Single-flight drain pump (plans/milestone-5.md §2.2).
@@ -116,11 +124,13 @@ export class Orchestrator {
     this.resolver = options.resolver;
     this.defaultWorkingRoot = options.defaultWorkingRoot;
     this.concurrency = options.concurrency ?? 1; // the requested cap; `EventLoop.drain` clamps it to a valid ≥ 1
+    this.costCeiling = options.costCeiling;
     this.onError = options.onError ?? ((err) => console.error(`[orchestrator] drain pump error: ${String(err)}`));
     this.loop = new EventLoop(this.repo, this.config.fsm, this.config.version, this.runner, {
       onTransition: (transition, run) => this.broadcaster.publish({ type: 'transition', runId: run.id, transition, run }),
       ...(options.now ? { now: options.now } : {}),
       ...(options.maxIterations !== undefined ? { maxIterations: options.maxIterations } : {}),
+      ...(options.costCeiling !== undefined ? { costCeiling: options.costCeiling } : {}),
     });
   }
 
@@ -153,6 +163,20 @@ export class Orchestrator {
       this.resolver.for(repoRef);
     } catch (err) {
       throw new ApiError(400, err instanceof Error ? err.message : String(err));
+    }
+    // Global cost ceiling (M8 B3): refuse to admit a *new* run while active spend is at/over the
+    // ceiling — a currently-executing stage is never interrupted, but no new work is started. The
+    // operator lets in-flight runs finish (freeing headroom) or raises the ceiling. Existing runs park
+    // and stay overridable per-run; only new-run admission bounces here.
+    if (this.costCeiling !== undefined) {
+      const activeCost = this.repo.sumActiveCost();
+      if (activeCost >= this.costCeiling) {
+        throw new ApiError(
+          429,
+          `fleet cost ceiling reached ($${activeCost.toFixed(2)} of $${this.costCeiling.toFixed(2)} across active runs); ` +
+            `let active runs finish or raise --cost-ceiling before starting new work`,
+        );
+      }
     }
     const run = this.loop.startRun({ issueRef: parsed.ref, repoRef });
     this.kick();
@@ -223,6 +247,24 @@ export class Orchestrator {
   }
 
   /**
+   * Override the global cost ceiling for one run (M8 B3), the human-in-the-loop control the operator
+   * uses when the fleet is parked at the ceiling: `next_step` lets the run advance exactly one more
+   * stage (then it re-parks), `full` lets it run to completion, `null` clears an override. Kicks the
+   * pump so the newly-admitted run advances. Refuses (`409`) a terminal run (nothing to advance).
+   */
+  overrideCost(runId: number, mode: CostOverride | null): Run {
+    const existing = this.requireRun(runId); // 404
+    if (TERMINAL_STATUSES.has(existing.status)) {
+      throw new ApiError(409, `cannot override the cost ceiling for a "${existing.status}" run`);
+    }
+    this.repo.setCostOverride(runId, mode);
+    const run = this.requireRun(runId);
+    this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
+    this.kick();
+    return run;
+  }
+
+  /**
    * Archive a terminal (done/stopped) run so the dashboard drops it from the Resolved lane. Refuses
    * (`409`) a non-terminal run — you don't hide work that's still in flight. Publishes a `status`
    * event (status unchanged) so connected dashboards update live.
@@ -272,6 +314,14 @@ export class Orchestrator {
   /** The repo a run belongs to (for the repo-scoped live stream). Undefined for an unknown run id. */
   repoOfRun(runId: number): string | undefined {
     return this.repo.getRun(runId)?.repoRef;
+  }
+
+  /**
+   * The global cost ceiling (`null` when disabled) and the current aggregate `cost_used` of active runs
+   * (M8 B3) — what the dashboard reads to show the fleet's spend vs. its ceiling and whether it's parked.
+   */
+  costStatus(): { ceiling: number | null; activeCost: number } {
+    return { ceiling: this.costCeiling ?? null, activeCost: this.repo.sumActiveCost() };
   }
 
   // --- repos (Milestone 8 Phase A) ---------------------------------------------

@@ -63,6 +63,9 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
 
   if (method === 'GET' && path === '/health') return sendJson(res, 200, { ok: true });
 
+  // --- fleet cost status: the global ceiling (or null) + current active spend (Milestone 8 B3) ---
+  if (method === 'GET' && path === '/cost') return sendJson(res, 200, orch.costStatus());
+
   // --- new-run autocomplete: open issues matching ?q= (README §3.3 Layer 7) ---
   if (method === 'GET' && path === '/suggestions') {
     return sendJson(res, 200, await orch.suggestIssues(url.searchParams.get('q') ?? ''));
@@ -101,7 +104,7 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
   const runMatch = /^\/runs\/(\d+)$/.exec(path);
   if (runMatch && method === 'GET') return sendJson(res, 200, orch.getRunDetail(Number(runMatch[1])));
 
-  const actionMatch = /^\/runs\/(\d+)\/(pause|resume|stop|revert|archive|unarchive)$/.exec(path);
+  const actionMatch = /^\/runs\/(\d+)\/(pause|resume|stop|revert|archive|unarchive|cost-override)$/.exec(path);
   if (actionMatch && method === 'POST') {
     const id = Number(actionMatch[1]);
     switch (actionMatch[2]) {
@@ -118,6 +121,14 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
       case 'revert': {
         const body = await readJson(req);
         return sendJson(res, 200, orch.revert(id, str(body, 'toState'), body.reason));
+      }
+      case 'cost-override': {
+        // `mode`: 'next_step' | 'full' to let the run cross the global cost ceiling, or 'none' to clear (M8 B3).
+        const raw = str(await readJson(req), 'mode');
+        if (raw !== 'next_step' && raw !== 'full' && raw !== 'none') {
+          return sendError(res, new ApiError(400, `invalid cost-override mode "${raw}" (expected next_step | full | none)`));
+        }
+        return sendJson(res, 200, orch.overrideCost(id, raw === 'none' ? null : raw));
       }
     }
   }

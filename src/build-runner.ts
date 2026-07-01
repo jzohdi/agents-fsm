@@ -60,6 +60,7 @@ export function buildRunner(
     permissionMode: args.permissionMode,
     frontierModel: args.model,
     ...(args.timeoutMinutes !== undefined ? { timeoutMs: args.timeoutMinutes * 60_000 } : {}),
+    ...(args.maxRetries !== undefined ? { maxRetries: args.maxRetries } : {}),
   };
   // A real run is bound to a repo; refuse early with actionable guidance rather than a later
   // "repo not enrolled" from the resolver (matches the pre-M8 buildRealGitHub guard).
@@ -117,6 +118,17 @@ export function resolveConcurrency(args: CliArgs): number {
 }
 
 /**
+ * Resolve the daemon's global cost ceiling in dollars (Milestone 8 B3), precedence: `--cost-ceiling` →
+ * `FLEET_COST_CEILING` → **off** (undefined = no ceiling). A non-finite or negative value is treated as
+ * off, so a typo never wedges the fleet; `0` is a valid ceiling (park everything but overrides).
+ */
+export function resolveCostCeiling(args: CliArgs): number | undefined {
+  const fromEnv = process.env.FLEET_COST_CEILING !== undefined ? Number(process.env.FLEET_COST_CEILING) : undefined;
+  const candidate = args.costCeiling ?? fromEnv;
+  return candidate !== undefined && Number.isFinite(candidate) && candidate >= 0 ? candidate : undefined;
+}
+
+/**
  * Build the daemon's {@link Orchestrator} and its dependencies. The runner's live activities are wired
  * into the shared {@link Broadcaster}, so the SSE stream sees them alongside transitions and status
  * changes. The GitHub adapter is returned so the daemon can share it with the Reply Poller.
@@ -144,6 +156,7 @@ export function buildOrchestrator(args: CliArgs): {
     resolver, // per-repo adapter resolution + the start-time enrollment check (Milestone 8)
     defaultWorkingRoot: args.work, // a POST /repos enrollment defaults its working root to the daemon's --work
     concurrency: resolveConcurrency(args), // global cap for the parallel drain pump (Milestone 8 Phase B)
+    ...(resolveCostCeiling(args) !== undefined ? { costCeiling: resolveCostCeiling(args) } : {}), // global cost ceiling (M8 B3)
     ...(configPath ? { configPath } : {}),
     // A FatalExecutorError (e.g. the harness is unauthenticated) fails every run; surface its remedy
     // prominently rather than a bare stack trace, the way the one-shot CLI does on shutdown.

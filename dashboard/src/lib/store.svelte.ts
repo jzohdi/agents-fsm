@@ -25,6 +25,9 @@ export const ui = $state({
   // client-side from `ui.runs`, so the SSE stream stays global (no reconnect on tab change). The tabs
   // themselves derive from the runs on screen, so no separate repo list is fetched.
   repoFilter: null as string | null,
+  // Global cost ceiling (Milestone 8 B3): the daemon's configured ceiling (null = off), fetched once.
+  // Active spend is derived live from `ui.runs` in `costStatusModel`, so only this constant is fetched.
+  costCeiling: null as number | null,
 });
 
 /** Runs scoped to the active repo tab (all repos when no filter). */
@@ -125,6 +128,28 @@ export async function loadConfig(): Promise<void> {
 
 export async function loadRuns(): Promise<void> {
   ui.runs = (await request<Run[]>('GET', '/runs')).sort((a, b) => b.id - a.id);
+}
+
+/** Fetch the daemon's global cost ceiling once (Milestone 8 B3); tolerant of an older daemon (no route). */
+export async function loadCost(): Promise<void> {
+  try {
+    ui.costCeiling = (await request<{ ceiling: number | null }>('GET', '/cost')).ceiling;
+  } catch {
+    ui.costCeiling = null; // older daemon without /cost — treat as no ceiling
+  }
+}
+
+/**
+ * Override the cost ceiling for a run (Milestone 8 B3): `next_step` runs one more stage, `full` runs it
+ * to completion, `none` clears the override. The daemon kicks the pump, so an over-ceiling run resumes.
+ */
+export async function overrideCost(id: number, mode: 'next_step' | 'full' | 'none'): Promise<void> {
+  try {
+    upsertRun(await request<Run>('POST', `/runs/${id}/cost-override`, { mode }));
+    if (id === ui.selectedId) await refreshDetail();
+  } catch (err) {
+    banner(`Override failed: ${(err as Error).message}`, 'err');
+  }
 }
 
 export async function startRun(issueRef: string): Promise<void> {

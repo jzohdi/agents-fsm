@@ -1,6 +1,25 @@
 # Milestone 8 — Multi-repo support (design + plan)
 
-> Progress: **Phase A done; Phase B — B1 + B2 done**, suite green at **419 passing / 1 skipped**.
+> Progress: **Phase A done; Phase B — B1 + B2 + B3 done → Milestone 8 COMPLETE**, suite green at **446 passing / 1 skipped**.
+> - **B3 audit hardening:** added the missing migration-4 retrofit test; tightened the dashboard's
+>   cost-override buttons to **`running`** runs only (a `needs_human`/`paused` run is parked for a
+>   different reason, so cost-override there was misleading — browser-verified both cases); added a
+>   worker-pool (`drain N`) cost-ceiling test (the gate was only covered serially); added a `GET /cost`
+>   server test. Backend `overrideCost` stays permissive on any non-terminal run (harmless); only the UI
+>   is scoped.
+> - **B3a — rate-limit retry (executor):** `SubprocessStageExecutor` retries a rate-limited/overloaded
+>   invocation (`RateLimitError`, classified from either a non-zero exit or an `is_error` result) with
+>   capped exponential backoff + equal jitter (injectable `sleep`/`random`); exhaustion escalates as a
+>   `HarnessError`, non-rate failures fail immediately, auth stays fatal. `--max-retries` knob (default 4).
+> - **B3b — global cost ceiling + per-run overrides (backend):** `Repository.sumActiveCost` + migration 4
+>   `runs.cost_override`; `EventLoop` cost gate in a shared `claimNext` (over ceiling → only override-runs
+>   dispatch; `next_step` consumed on use, `full` runs to completion); `Orchestrator.start` → **429** over
+>   ceiling; `overrideCost` command + `POST /runs/:id/cost-override`; `--cost-ceiling`/`FLEET_COST_CEILING`
+>   (off by default). Non-deadlocking human-in-the-loop gate: over ceiling the fleet parks until an
+>   operator overrides a run or runs finish (freeing headroom); the per-run budget guard is untouched.
+> - **B3c — dashboard:** `GET /cost` + pure `costStatusModel`; header chip (`$active / $ceiling · parked`,
+>   red over ceiling) + per-run override buttons (Run next step / Complete issue / Clear) on RunDetail.
+>   Verified live in the browser (chip red at $6.49/$5.00, override round-trip + clear).
 > - **B1 — worker pool + within-run serialization:** `claimNextEvent` gained a `NOT EXISTS … status =
 >   'processing'` guard, so the pool is **parallel across runs, serial within a run** (a run with a stage
 >   in flight is skipped until it finalizes; the follow-up event is enqueued inside the commit txn, so
@@ -29,7 +48,8 @@
 >   the single authoritative clamp (non-finite / < 1 → serial 1), and the Orchestrator no longer
 >   double-clamps. Both covered by new loop tests.
 >
-> **Next: B3** (rate-limit-aware executor retry + optional global cost ceiling).
+> **Milestone 8 is complete** (Phase A + B1/B2/B3). The pure FSM engine and its tests are untouched, as
+> the milestone required. Next milestone chunk: M9 (the deterministic Scheduler) or M10/M11 per the README.
 >
 > _Earlier:_ **A1 + A2 + A3-backend done** at 403 passing / 1 skipped.
 > - **A1 — store:** `repos` registry table + migration 3 (`LATEST_VERSION → 3`, `repo_ref COLLATE NOCASE`,

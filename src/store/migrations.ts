@@ -64,6 +64,13 @@ export const MIGRATIONS: Migration[] = [
          );`,
       ),
   },
+  {
+    version: 4,
+    name: 'add runs.cost_override',
+    // Per-run override of the global cost ceiling (Milestone 8 B3). Additive column, so a plain
+    // ALTER ADD COLUMN retrofits a pre-existing DB; a fresh DB already has it from schema.sql.
+    apply: (db) => addColumnIfMissing(db, 'runs', 'cost_override', 'TEXT'),
+  },
 ];
 
 /** The schema version a fully-migrated database reports — the highest defined migration. */

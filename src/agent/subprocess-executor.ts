@@ -53,6 +53,17 @@ export type SpawnProcess = (command: string, args: string[], options: SpawnOptio
  */
 export const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
 
+/**
+ * Rate-limit retry defaults (Milestone 8 Phase B — B3). N parallel agents (the worker pool) multiply
+ * rate pressure on the shared Anthropic/GitHub limits, so a rate-limited invocation is **retried with
+ * capped exponential backoff + jitter** inside the executor rather than escalating the run — only a
+ * sustained limit that outlasts the retries escalates. Backoff: `base·2^attempt` capped at `max`, with
+ * equal jitter so N agents don't retry in lockstep (the thundering-herd the pool would otherwise cause).
+ */
+export const DEFAULT_MAX_RETRIES = 4;
+export const DEFAULT_RETRY_BASE_MS = 1_000;
+export const DEFAULT_RETRY_MAX_MS = 60_000;
+
 export interface SubprocessExecutorOptions {
   /** The CLI binary to invoke. Defaults to `claude`. */
   command?: string;
@@ -69,6 +80,16 @@ export interface SubprocessExecutorOptions {
   defaultWorkingDir?: string;
   /** Per-invocation wall-clock cap in ms; the child is killed when exceeded. Default {@link DEFAULT_TIMEOUT_MS}. 0 disables. */
   timeoutMs?: number;
+  /** How many times to retry a **rate-limited** invocation before escalating. Default {@link DEFAULT_MAX_RETRIES}. 0 disables retry. */
+  maxRetries?: number;
+  /** Base backoff delay in ms (doubles each attempt). Default {@link DEFAULT_RETRY_BASE_MS}. */
+  retryBaseMs?: number;
+  /** Backoff ceiling in ms. Default {@link DEFAULT_RETRY_MAX_MS}. */
+  retryMaxMs?: number;
+  /** Injectable delay (for tests). Defaults to a real `setTimeout`-backed sleep. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Injectable jitter source in `[0, 1)` (for tests). Defaults to `Math.random`. */
+  random?: () => number;
   /** Injectable spawn (for tests). Defaults to a real `child_process.spawn` wrapper. */
   spawnProcess?: SpawnProcess;
 }
@@ -85,6 +106,34 @@ export class HarnessError extends Error {
     super(message);
     this.name = 'HarnessError';
   }
+}
+
+/**
+ * A **retryable** harness failure: the model API is rate-limited or overloaded (README §3.3 Layer 5 /
+ * Milestone 8 B3). A subtype of {@link HarnessError} so that, once retries are exhausted, it still
+ * flows through the loop's `executor_error` escalation like any other harness failure — but while
+ * retries remain, {@link SubprocessStageExecutor.run} backs off and re-invokes instead of failing.
+ */
+export class RateLimitError extends HarnessError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RateLimitError';
+  }
+}
+
+/** Recognize the harness's rate-limit / overloaded signatures (Anthropic 429 rate_limit / 529 overloaded). */
+export function isRateLimit(text: string): boolean {
+  return /rate[ _-]?limit|overloaded|too many requests|\b(429|529)\b/i.test(text);
+}
+
+/**
+ * Backoff for retry `attempt` (0-based): exponential `base·2^attempt` capped at `max`, with **equal
+ * jitter** — half fixed, half random — so parallel agents retrying the same limit spread out instead
+ * of thundering in lockstep. Pure (jitter injected) so it is directly testable.
+ */
+export function backoffMs(attempt: number, base: number, max: number, random: () => number): number {
+  const exp = Math.min(max, base * 2 ** attempt);
+  return Math.round(exp / 2 + random() * (exp / 2));
 }
 
 /** Operator instructions printed when the spawned `claude` CLI is not authenticated. */
@@ -120,6 +169,11 @@ export class SubprocessStageExecutor implements StageExecutor {
   private readonly extraArgs: string[];
   private readonly defaultWorkingDir: string;
   private readonly timeoutMs: number;
+  private readonly maxRetries: number;
+  private readonly retryBaseMs: number;
+  private readonly retryMaxMs: number;
+  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly random: () => number;
   private readonly spawnProcess: SpawnProcess;
 
   constructor(options: SubprocessExecutorOptions = {}) {
@@ -128,6 +182,11 @@ export class SubprocessStageExecutor implements StageExecutor {
     this.extraArgs = options.extraArgs ?? [];
     this.defaultWorkingDir = options.defaultWorkingDir ?? process.cwd();
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.retryBaseMs = options.retryBaseMs ?? DEFAULT_RETRY_BASE_MS;
+    this.retryMaxMs = options.retryMaxMs ?? DEFAULT_RETRY_MAX_MS;
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.random = options.random ?? Math.random;
     this.spawnProcess = options.spawnProcess ?? defaultSpawnProcess;
   }
 
@@ -163,12 +222,31 @@ export class SubprocessStageExecutor implements StageExecutor {
     // Only stream when someone is listening: parse each stream-json line and forward the activities
     // it summarizes to. Streaming is pure observability — a throwing sink must never affect the run.
     if (req.onActivity) options.onStdoutLine = (line) => emitActivities(line, req.onActivity!);
-    const result = await this.spawnProcess(this.command, this.buildArgs(req), options);
 
+    // Retry only a rate-limit/overloaded failure (from either the exit code or an `is_error` result),
+    // backing off between attempts; every other failure — auth (fatal), a bad exit, malformed output —
+    // propagates on the first attempt exactly as before.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.attempt(req, options);
+      } catch (err) {
+        if (err instanceof RateLimitError && attempt < this.maxRetries) {
+          await this.sleep(backoffMs(attempt, this.retryBaseMs, this.retryMaxMs, this.random));
+          continue;
+        }
+        throw err; // not a rate limit, or retries exhausted → escalate like any harness failure
+      }
+    }
+  }
+
+  /** One harness invocation: spawn, then map the outcome to a result or a classified throw. */
+  private async attempt(req: AgentRunRequest, options: SpawnOptions): Promise<AgentRunResult> {
+    const result = await this.spawnProcess(this.command, this.buildArgs(req), options);
     if (result.code !== 0) {
       const detail = result.stderr.trim() || result.stdout.trim() || '(no output)';
       if (isAuthFailure(detail)) throw new HarnessAuthError(detail);
-      throw new HarnessError(`claude exited with code ${result.code}: ${detail}`);
+      const message = `claude exited with code ${result.code}: ${detail}`;
+      throw isRateLimit(detail) ? new RateLimitError(message) : new HarnessError(message);
     }
     return parseHarnessOutput(result.stdout);
   }
@@ -303,7 +381,8 @@ export function parseHarnessOutput(stdout: string): AgentRunResult {
   if (event.is_error) {
     const detail = event.result ?? '(no detail)';
     if (isAuthFailure(detail)) throw new HarnessAuthError(detail);
-    throw new HarnessError(`harness reported an error result: ${detail}`);
+    const message = `harness reported an error result: ${detail}`;
+    throw isRateLimit(detail) ? new RateLimitError(message) : new HarnessError(message);
   }
 
   const usage: AgentRunResult['usage'] = { tokens: sumTokens(event.usage) };

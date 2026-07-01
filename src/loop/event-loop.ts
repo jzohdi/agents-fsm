@@ -39,6 +39,12 @@ export interface EventLoopOptions {
   now?: () => number;
   /** Safety bound so a misconfigured run can never spin `runUntilIdle` forever. */
   maxIterations?: number;
+  /**
+   * Global cost ceiling (M8 B3): when the aggregate `cost_used` of active runs reaches this, the loop
+   * stops dispatching new stages (parks) — except a run an operator gave a `cost_override`. Undefined
+   * disables the gate (the default; the one-shot CLI never sets it). See {@link claimNext}.
+   */
+  costCeiling?: number;
 }
 
 export class EventLoop {
@@ -214,9 +220,27 @@ export class EventLoop {
     return run;
   }
 
+  /**
+   * Claim the next dispatchable event, applying the global cost-ceiling gate (M8 B3). Under the
+   * ceiling — or with no ceiling configured — this is a plain claim. At/over the ceiling only a run
+   * carrying a `cost_override` is admitted; a one-shot `next_step` override is consumed here so the
+   * run advances exactly one stage and its follow-up then re-parks. Shared by {@link tick} (serial)
+   * and {@link drain} (pool) so both honor the ceiling identically.
+   */
+  private claimNext(): EventRow | undefined {
+    const ceiling = this.options.costCeiling;
+    if (ceiling === undefined) return this.repo.claimNextEvent();
+    const overCeiling = this.repo.sumActiveCost() >= ceiling;
+    const event = this.repo.claimNextEvent({ onlyOverrides: overCeiling });
+    if (event && overCeiling && this.repo.getRun(event.runId)?.costOverride === 'next_step') {
+      this.repo.setCostOverride(event.runId, null); // consume the one-stage override
+    }
+    return event;
+  }
+
   /** Process one event if any is dispatchable. Returns false when the queue is idle. */
   async tick(): Promise<boolean> {
-    const event = this.repo.claimNextEvent();
+    const event = this.claimNext();
     if (!event) return false;
     await this.processEvent(event);
     return true;
@@ -270,7 +294,7 @@ export class EventLoop {
         while (!stopped && inFlight < limit) {
           let event: EventRow | undefined;
           try {
-            event = this.repo.claimNextEvent();
+            event = this.claimNext();
           } catch (err) {
             // A synchronous claim failure (e.g. a DB error) must not escape into the voided worker
             // promise and wedge the drain — abort like the serial path, letting in-flight work settle.

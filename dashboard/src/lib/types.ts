@@ -17,6 +17,8 @@ export interface Run {
   flags: Record<string, boolean>;
   /** When the run was archived out of the Resolved lane (ISO), or `null`. */
   archivedAt: string | null;
+  /** Operator override of the global cost ceiling (M8 B3): one more stage, the whole run, or none. */
+  costOverride?: 'next_step' | 'full' | null;
   createdAt: string;
   updatedAt: string;
 }

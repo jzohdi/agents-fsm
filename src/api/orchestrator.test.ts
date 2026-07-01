@@ -44,6 +44,8 @@ function setup(
     defaultWorkingRoot?: string;
     /** Global concurrency cap for the drain pump (Milestone 8 Phase B). Defaults to 1 (serial). */
     concurrency?: number;
+    /** Global cost ceiling in dollars (Milestone 8 B3). Undefined = off. */
+    costCeiling?: number;
   } = {},
 ) {
   const loaded = loadDefaultConfig();
@@ -67,6 +69,7 @@ function setup(
     ...(opts.defaultWorkingRoot ? { defaultWorkingRoot: opts.defaultWorkingRoot } : {}),
     ...(opts.configPath ? { configPath: opts.configPath } : {}),
     ...(opts.concurrency !== undefined ? { concurrency: opts.concurrency } : {}),
+    ...(opts.costCeiling !== undefined ? { costCeiling: opts.costCeiling } : {}),
   });
   return { orchestrator, repo, github, events };
 }
@@ -489,6 +492,37 @@ describe('Orchestrator — parallel drain (Milestone 8 Phase B)', () => {
     expect(repo.getRun(a.id)!.status).toBe('done');
     expect(repo.getRun(b.id)!.status).toBe('done');
     expect(executor.peak).toBe(1);
+  });
+});
+
+describe('Orchestrator — global cost ceiling + overrides (Milestone 8 B3)', () => {
+  /** Golden path where every `produce` phase costs $1, so a run accrues ~$1 per stage. */
+  const costlyHandler: StubHandler = (req) => (req.phase === 'produce' ? { ...goldenPathHandler(req), cost: 1 } : goldenPathHandler(req));
+
+  it('refuses to start a new run once active spend reaches the ceiling (429)', () => {
+    const { orchestrator, repo } = setup({ costCeiling: 5 });
+    // A pre-existing active run already at the ceiling (a placeholder — never drained here).
+    const active = repo.createRun({ issueRef: 'o/r#9', repoRef: 'o/r', initialState: 'triage', fsmConfigVersion: loadDefaultConfig().version });
+    repo.addRunUsage(active.id, { cost: 5 });
+
+    expectApiError(() => orchestrator.start({ issueRef: 'o/r#1' }), 429);
+  });
+
+  it('overrideCost lets a cost-parked run finish, then refuses the (now terminal) run (409)', async () => {
+    const { orchestrator, repo } = setup({ costCeiling: 2, handler: costlyHandler });
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle();
+
+    // Parked mid-pipeline by the ceiling — running, not done.
+    expect(repo.getRun(run.id)!.status).toBe('running');
+    expect(repo.getRun(run.id)!.currentState).not.toBe('done');
+
+    orchestrator.overrideCost(run.id, 'full');
+    await orchestrator.settle();
+    expect(repo.getRun(run.id)!.status).toBe('done');
+
+    // Nothing to advance on a terminal run.
+    expectApiError(() => orchestrator.overrideCost(run.id, 'next_step'), 409);
   });
 });
 

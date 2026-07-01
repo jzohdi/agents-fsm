@@ -11,9 +11,12 @@ import { describe, expect, it } from 'vitest';
 
 import { FatalExecutorError, type AgentActivity, type AgentRunRequest } from './executor';
 import {
+  backoffMs,
   defaultSpawnProcess,
   HarnessError,
+  isRateLimit,
   parseHarnessOutput,
+  RateLimitError,
   SubprocessStageExecutor,
   summarizeEvent,
   takeCompleteLines,
@@ -149,10 +152,11 @@ describe('SubprocessStageExecutor — run', () => {
   });
 
   it('throws HarnessError when the harness reports an error result', async () => {
-    const errorEvent = JSON.stringify({ type: 'result', is_error: true, result: 'rate limited' });
+    // A generic (non-rate-limit) error result fails immediately — rate-limit results retry, tested below.
+    const errorEvent = JSON.stringify({ type: 'result', is_error: true, result: 'internal error: bad output' });
     const { spawnProcess } = fakeSpawn({ code: 0, stdout: errorEvent, stderr: '' });
     const exec = new SubprocessStageExecutor({ spawnProcess });
-    await expect(exec.run(req())).rejects.toThrowError(/rate limited/);
+    await expect(exec.run(req())).rejects.toThrowError(/bad output/);
   });
 
   it('propagates a spawn error (e.g. binary not found)', async () => {
@@ -183,6 +187,99 @@ describe('SubprocessStageExecutor — run', () => {
     // A timeout escalates one run (executor_error), it does NOT abort the whole drain like auth does.
     await expect(exec.run(req())).rejects.toBeInstanceOf(HarnessError);
     await expect(exec.run(req())).rejects.not.toBeInstanceOf(FatalExecutorError);
+  });
+});
+
+describe('rate-limit retry (Milestone 8 Phase B — B3)', () => {
+  /** A spawn that returns each result in turn (repeating the last), recording how many times it ran. */
+  function sequencedSpawn(results: ProcessResult[]): { spawnProcess: SpawnProcess; calls: () => number } {
+    let i = 0;
+    const spawnProcess: SpawnProcess = () => Promise.resolve(results[Math.min(i++, results.length - 1)]!);
+    return { spawnProcess, calls: () => i };
+  }
+
+  const rateLimitedExit: ProcessResult = { code: 1, stdout: '', stderr: 'API error: 429 rate_limit_error — Number of requests exceeded' };
+  const success: ProcessResult = { code: 0, stdout: streamJson('{"requestedTransition":"proceed"}'), stderr: '' };
+  /** No-op sleep that records the backoff delays, so tests never actually wait. */
+  const recorder = () => {
+    const delays: number[] = [];
+    return { delays, sleep: (ms: number) => { delays.push(ms); return Promise.resolve(); } };
+  };
+
+  it('classifies rate-limit / overloaded signatures (and nothing else)', () => {
+    for (const s of ['429 rate_limit_error', 'HTTP 529', 'Overloaded', 'rate limit exceeded', 'Too Many Requests']) {
+      expect(isRateLimit(s)).toBe(true);
+    }
+    for (const s of ['boom: bad model', 'Invalid API key', 'exit code 2', 'ENOENT']) {
+      expect(isRateLimit(s)).toBe(false);
+    }
+  });
+
+  it('backoffMs is exponential, capped, and jittered within [exp/2, exp]', () => {
+    // random = 0 → the fixed half; random ≈ 1 → the full window; both capped by `max`.
+    expect(backoffMs(0, 1000, 60_000, () => 0)).toBe(500);
+    expect(backoffMs(1, 1000, 60_000, () => 0)).toBe(1000);
+    expect(backoffMs(2, 1000, 60_000, () => 0)).toBe(2000);
+    expect(backoffMs(0, 1000, 60_000, () => 0.999)).toBeGreaterThan(500);
+    expect(backoffMs(0, 1000, 60_000, () => 0.999)).toBeLessThanOrEqual(1000);
+    expect(backoffMs(20, 1000, 60_000, () => 1)).toBe(60_000); // capped, not 1000·2^20
+  });
+
+  it('retries a rate-limited invocation with backoff, then succeeds', async () => {
+    const { spawnProcess, calls } = sequencedSpawn([rateLimitedExit, rateLimitedExit, success]);
+    const { delays, sleep } = recorder();
+    const exec = new SubprocessStageExecutor({ spawnProcess, sleep, random: () => 0 });
+
+    const result = await exec.run(req());
+
+    expect(result.output).toEqual({ requestedTransition: 'proceed' });
+    expect(calls()).toBe(3); // two rate-limited attempts, then the success
+    expect(delays).toEqual([500, 1000]); // exponential backoff between the three attempts
+  });
+
+  it('retries a rate-limited `is_error` result event (code 0), not just a non-zero exit', async () => {
+    const overloadedResult: ProcessResult = {
+      code: 0,
+      stdout: JSON.stringify({ type: 'result', subtype: 'error', is_error: true, result: 'Overloaded (529)' }),
+      stderr: '',
+    };
+    const { spawnProcess, calls } = sequencedSpawn([overloadedResult, success]);
+    const { sleep } = recorder();
+    const exec = new SubprocessStageExecutor({ spawnProcess, sleep, random: () => 0 });
+
+    await expect(exec.run(req())).resolves.toMatchObject({ output: { requestedTransition: 'proceed' } });
+    expect(calls()).toBe(2);
+  });
+
+  it('escalates a RateLimitError once retries are exhausted (a HarnessError the loop can escalate)', async () => {
+    const { spawnProcess, calls } = sequencedSpawn([rateLimitedExit]); // always rate-limited
+    const { delays, sleep } = recorder();
+    const exec = new SubprocessStageExecutor({ spawnProcess, sleep, random: () => 0, maxRetries: 2 });
+
+    const err = await exec.run(req()).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RateLimitError);
+    expect(err).toBeInstanceOf(HarnessError); // so it flows through executor_error escalation
+    expect(calls()).toBe(3); // initial + 2 retries
+    expect(delays).toHaveLength(2);
+  });
+
+  it('does not retry a non-rate-limit failure — it fails on the first attempt', async () => {
+    const { spawnProcess, calls } = sequencedSpawn([{ code: 2, stdout: '', stderr: 'boom: bad model' }]);
+    const { delays, sleep } = recorder();
+    const exec = new SubprocessStageExecutor({ spawnProcess, sleep });
+
+    await expect(exec.run(req())).rejects.toBeInstanceOf(HarnessError);
+    expect(calls()).toBe(1);
+    expect(delays).toHaveLength(0);
+  });
+
+  it('maxRetries: 0 disables retry (a rate limit fails immediately)', async () => {
+    const { spawnProcess, calls } = sequencedSpawn([rateLimitedExit]);
+    const { sleep } = recorder();
+    const exec = new SubprocessStageExecutor({ spawnProcess, sleep, maxRetries: 0 });
+
+    await expect(exec.run(req())).rejects.toBeInstanceOf(RateLimitError);
+    expect(calls()).toBe(1);
   });
 });
 

@@ -27,11 +27,12 @@ describe('parseCliArgs', () => {
   });
 
   it('reads the serve daemon flags', () => {
-    const args = parseCliArgs(['serve', '--port', '8080', '--config=/etc/af/fsm.json', '--concurrency', '8']);
+    const args = parseCliArgs(['serve', '--port', '8080', '--config=/etc/af/fsm.json', '--concurrency', '8', '--cost-ceiling', '25']);
     expect(args.positionals).toEqual(['serve']);
     expect(args.port).toBe(8080);
     expect(args.config).toBe('/etc/af/fsm.json');
     expect(args.concurrency).toBe(8);
+    expect(args.costCeiling).toBe(25);
   });
 
   it('reads the reply-poll overrides', () => {
@@ -44,7 +45,7 @@ describe('parseCliArgs', () => {
     const args = parseCliArgs([
       'owner/repo#1', '--mock', '--cheap', '--repo', 'o/r', '--base=develop', '--work', '/tmp/w',
       '--clone-url', 'git@github.com:o/r.git', '--local-repo', '/home/me/o-r', '--permission-mode=acceptEdits',
-      '--model', 'sonnet',
+      '--model', 'sonnet', '--max-retries', '2',
     ]);
     expect(args.mock).toBe(true);
     expect(args.cheap).toBe(true);
@@ -55,6 +56,7 @@ describe('parseCliArgs', () => {
     expect(args.localRepo).toBe('/home/me/o-r');
     expect(args.permissionMode).toBe('acceptEdits');
     expect(args.model).toBe('sonnet');
+    expect(args.maxRetries).toBe(2);
   });
 
   it('keeps the resume subcommand and run id as positionals', () => {

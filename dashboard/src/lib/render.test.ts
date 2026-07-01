@@ -13,6 +13,7 @@ import {
   isAtBottom,
   issueUrl,
   prUrl,
+  costStatusModel,
   fmtCost,
   fmtDuration,
   fmtTokens,
@@ -139,6 +140,33 @@ describe('repoOverviewModel', () => {
       { repoRef: 'old/done', active: 0, needsHuman: 0 },
     ]);
     expect(repoOverviewModel(undefined)).toEqual([]);
+  });
+});
+
+describe('costStatusModel', () => {
+  it('sums active (non-terminal) cost, excludes terminal runs, and flags over-ceiling', () => {
+    const runs = [
+      run({ id: 1, status: 'running', costUsed: 2 }),
+      run({ id: 2, status: 'needs_human', costUsed: 3 }),
+      run({ id: 3, status: 'done', costUsed: 10 }), // terminal → excluded
+      run({ id: 4, status: 'stopped', costUsed: 20 }), // terminal → excluded
+    ];
+    const m = costStatusModel(runs, 5);
+    expect(m).toEqual({ ceiling: 5, activeCost: 5, overCeiling: true, label: '$5.00 / $5.00' });
+  });
+
+  it('is under-ceiling when active spend is below it', () => {
+    expect(costStatusModel([run({ status: 'running', costUsed: 1 })], 5)).toMatchObject({ overCeiling: false, label: '$1.00 / $5.00' });
+  });
+
+  it('shows active spend only, ungated, when no ceiling is configured', () => {
+    expect(costStatusModel([run({ status: 'running', costUsed: 2.5 })], null)).toEqual({
+      ceiling: null, activeCost: 2.5, overCeiling: false, label: '$2.50',
+    });
+  });
+
+  it('is empty-safe', () => {
+    expect(costStatusModel(undefined, 5)).toMatchObject({ activeCost: 0, overCeiling: false });
   });
 });
 

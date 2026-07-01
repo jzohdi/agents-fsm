@@ -83,6 +83,34 @@ describe('runs', () => {
     });
   });
 
+  it('sums cost_used across active runs and sets/clears the cost override (Milestone 8 B3)', () => {
+    const a = repo.createRun({ issueRef: 'o/r#1', repoRef: 'o/r', initialState: 'triage', fsmConfigVersion: 'v1' });
+    const b = repo.createRun({ issueRef: 'o/r#2', repoRef: 'o/r', initialState: 'triage', fsmConfigVersion: 'v1' });
+    const c = repo.createRun({ issueRef: 'o/r#3', repoRef: 'o/r', initialState: 'triage', fsmConfigVersion: 'v1' });
+    repo.addRunUsage(a.id, { cost: 2 });
+    repo.addRunUsage(b.id, { cost: 3 });
+    repo.addRunUsage(c.id, { cost: 5 });
+    expect(repo.sumActiveCost()).toBe(10);
+
+    // A terminal run's cost drops out of the active sum (finishing/stopping frees ceiling headroom).
+    repo.setRunStatus(c.id, 'done');
+    expect(repo.sumActiveCost()).toBe(5);
+    repo.setRunStatus(b.id, 'stopped');
+    expect(repo.sumActiveCost()).toBe(2);
+
+    expect(repo.getRun(a.id)!.costOverride).toBeNull();
+    repo.setCostOverride(a.id, 'next_step');
+    expect(repo.getRun(a.id)!.costOverride).toBe('next_step');
+    repo.setCostOverride(a.id, 'full');
+    expect(repo.getRun(a.id)!.costOverride).toBe('full');
+    repo.setCostOverride(a.id, null);
+    expect(repo.getRun(a.id)!.costOverride).toBeNull();
+  });
+
+  it('sumActiveCost is 0 when there are no active runs', () => {
+    expect(repo.sumActiveCost()).toBe(0);
+  });
+
   it('persists the branch (at plan) independently of the PR number (at tdd)', () => {
     const run = newRun();
     // Branch is created when `plan` begins, before any PR exists.
@@ -227,6 +255,21 @@ describe('events (at-least-once queue)', () => {
     // A finishes → its second event becomes claimable again (serial within the run).
     repo.markEventDone(first.id);
     expect(repo.claimNextEvent()!.runId).toBe(a.id);
+  });
+
+  it('with onlyOverrides, claims only a run carrying a cost override (the M8 B3 ceiling gate)', () => {
+    const plain = newRun();
+    const overridden = newRun();
+    repo.enqueueEvent({ runId: plain.id, type: 'stage_done' });
+    repo.enqueueEvent({ runId: overridden.id, type: 'stage_done' });
+
+    // Over the ceiling: a run with no override is parked; only the overridden run is dispatchable.
+    expect(repo.claimNextEvent({ onlyOverrides: true })).toBeUndefined();
+    repo.setCostOverride(overridden.id, 'full');
+    expect(repo.claimNextEvent({ onlyOverrides: true })!.runId).toBe(overridden.id);
+
+    // Under the ceiling (default): the parked run is claimable again.
+    expect(repo.claimNextEvent()!.runId).toBe(plain.id);
   });
 
   it('only claims events whose run is dispatchable (status = running)', () => {

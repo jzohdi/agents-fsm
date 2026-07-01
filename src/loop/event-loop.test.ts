@@ -778,6 +778,90 @@ describe('bounded worker pool (Milestone 8 Phase B — drain concurrency)', () =
   });
 });
 
+describe('global cost ceiling + per-run overrides (Milestone 8 Phase B — B3)', () => {
+  /** Golden path where every `produce` phase costs $1, so a run accrues ~$1 per stage. */
+  const costlyHandler: StubHandler = (req) => (req.phase === 'produce' ? { ...goldenPathHandler(req), cost: 1 } : goldenPathHandler(req));
+
+  function costSetup(costCeiling: number) {
+    const loaded = loadDefaultConfig();
+    const repo = new Repository(openDb(':memory:'));
+    const runner = new AgentRunner(repo, new StubExecutor(costlyHandler), loaded.agents, new FakeGitHub({ autoSeedIssues: true }));
+    const loop = new EventLoop(repo, loaded.fsm, loaded.version, runner, { costCeiling });
+    return { repo, loop };
+  }
+
+  it('parks a run mid-pipeline once the aggregate cost reaches the ceiling', async () => {
+    const { repo, loop } = costSetup(2); // ceiling $2; each stage costs ~$1
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+
+    await loop.drain(1);
+
+    // It advanced only while under the ceiling, then parked (still running, not done, no override).
+    const parked = repo.getRun(run.id)!;
+    expect(parked.status).toBe('running');
+    expect(parked.currentState).not.toBe('done');
+    expect(parked.costUsed).toBeGreaterThanOrEqual(2);
+    expect(parked.costOverride).toBeNull();
+  });
+
+  it("'full' override runs a parked run to completion despite the ceiling", async () => {
+    const { repo, loop } = costSetup(2);
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.drain(1);
+    expect(repo.getRun(run.id)!.currentState).not.toBe('done'); // parked
+
+    repo.setCostOverride(run.id, 'full');
+    await loop.drain(1);
+
+    expect(repo.getRun(run.id)!.status).toBe('done'); // ran to completion ignoring the ceiling
+  });
+
+  it("'next_step' override advances exactly one stage, then re-parks (override consumed)", async () => {
+    const { repo, loop } = costSetup(2);
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.drain(1);
+    const parkedAt = repo.getRun(run.id)!.currentState;
+
+    repo.setCostOverride(run.id, 'next_step');
+    await loop.drain(1);
+
+    const after = repo.getRun(run.id)!;
+    expect(after.currentState).not.toBe(parkedAt); // advanced one stage
+    expect(after.status).toBe('running');
+    expect(after.currentState).not.toBe('done'); // then re-parked (not run to completion)
+    expect(after.costOverride).toBeNull(); // the one-shot override was consumed
+  });
+
+  it('does not gate anything while under the ceiling', async () => {
+    const { repo, loop } = costSetup(1000); // effectively no ceiling
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.drain(2);
+    expect(repo.getRun(run.id)!.status).toBe('done');
+  });
+
+  it('gates under the worker pool: over the ceiling only an overridden run advances (drain N)', async () => {
+    const { repo, loop } = costSetup(2);
+    const runs = [
+      loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' }),
+      loop.startRun({ issueRef: 'o/r#2', repoRef: 'o/r' }),
+      loop.startRun({ issueRef: 'o/r#3', repoRef: 'o/r' }),
+    ];
+
+    await loop.drain(3);
+    // The fleet parked at the ceiling — every run is still running, none reached done.
+    for (const r of runs) expect(repo.getRun(r.id)!.status).toBe('running');
+    expect(repo.listRuns().some((r) => r.currentState === 'done')).toBe(false);
+    expect(repo.sumActiveCost()).toBeGreaterThanOrEqual(2);
+
+    // Override one run to completion; under the pool only it advances to done, the others stay parked.
+    repo.setCostOverride(runs[0]!.id, 'full');
+    await loop.drain(3);
+    expect(repo.getRun(runs[0]!.id)!.status).toBe('done');
+    expect(repo.getRun(runs[1]!.id)!.currentState).not.toBe('done');
+    expect(repo.getRun(runs[2]!.id)!.currentState).not.toBe('done');
+  });
+});
+
 describe('fatal executor error aborts the drain (does not escalate one run)', () => {
   it('propagates the error and leaves the run running + the event recoverable', async () => {
     const repo = new Repository(openDb(':memory:'));

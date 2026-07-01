@@ -236,6 +236,17 @@ input, textarea, button, select { font: inherit; }
 .af-revert input { width: 150px; }
 .af-revert input:focus, .af-revert select:focus { outline: none; background: var(--paper2); }
 
+/* Global cost ceiling (M8 B3): the header chip + per-run override controls. */
+.af-cost { display: flex; align-items: center; gap: 7px; font-weight: 600; font-size: 12.5px; color: var(--ink2); font-family: var(--mono); }
+.af-cost .d { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.af-cost.over { color: var(--rose); }
+.af-cost.over .d { background: var(--rose); }
+.af-cost-override { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-left: 1px solid var(--rule); }
+.af-cost-override .af-tag { font-size: 11.5px; font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase; color: var(--ink3); }
+.af-cost-override .af-tag.over { color: var(--rose); }
+.af-cost-override button { border: 1px solid var(--accent-line); background: var(--accent-soft); color: var(--accent); font-size: 12.5px; font-weight: 600; padding: 6px 14px; border-radius: 2px; cursor: pointer; }
+.af-cost-override button:hover { background: var(--accent); color: #fff; }
+
 /* --- escalation inspector (needs_human UX, README Milestone 7) --- */
 .af-esc { margin-top: 24px; border: 1px solid var(--rose); border-left-width: 3px; background: var(--rose-soft); padding: 16px 20px; }
 .af-esc-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }

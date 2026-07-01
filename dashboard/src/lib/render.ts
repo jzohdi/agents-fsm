@@ -203,6 +203,34 @@ export function repoOverviewModel(runs: Run[] | undefined): RepoSummary[] {
   return [...byRepo.values()].sort((a, b) => a.repoRef.localeCompare(b.repoRef));
 }
 
+// --- fleet cost ceiling (Milestone 8 B3) --------------------------------------
+
+export interface CostStatusModel {
+  /** The configured global ceiling in dollars, or `null` when no ceiling is set. */
+  ceiling: number | null;
+  /** Aggregate `costUsed` across active (non-terminal) runs — the figure gated against the ceiling. */
+  activeCost: number;
+  /** Whether active spend has reached the ceiling, so new runs are refused and existing runs park. */
+  overCeiling: boolean;
+  /** `$active / $ceiling` (or just `$active` when no ceiling is configured), 2-decimal dollars. */
+  label: string;
+}
+
+/**
+ * The fleet's cost against the global ceiling (M8 B3). `activeCost` sums `costUsed` over non-terminal
+ * runs — the same set the daemon gates — so it stays live from the runs already on screen; the
+ * `ceiling` is fetched once (it's a daemon flag). Pure, so it is unit-tested with the other models.
+ */
+export function costStatusModel(runs: Run[] | undefined, ceiling: number | null): CostStatusModel {
+  const activeCost = (runs ?? [])
+    .filter((r) => r.status !== 'done' && r.status !== 'stopped')
+    .reduce((sum, r) => sum + (r.costUsed ?? 0), 0);
+  const overCeiling = ceiling !== null && activeCost >= ceiling;
+  const dollars = (n: number): string => `$${n.toFixed(2)}`;
+  const label = ceiling !== null ? `${dollars(activeCost)} / ${dollars(ceiling)}` : dollars(activeCost);
+  return { ceiling, activeCost, overCeiling, label };
+}
+
 // --- state-machine stepper ----------------------------------------------------
 
 export interface StepperNode {

@@ -48,7 +48,9 @@ const STEPS: AgentActivity[] = [
 function main(): void {
   // `--mock`: the preview must use the stub executor + in-memory FakeGitHub (we seed both), never the
   // real harness — runs are real by default now, so this flag is required here.
-  const args = parseCliArgs(['serve', '--mock', '--db', ':memory:', '--port', String(PORT), '--poll-timeout', '0']);
+  // A low `--cost-ceiling` so the preview demonstrates the M8 B3 over-ceiling state (the seeded active
+  // runs sum to ~$6.49): the header chip goes red and running runs surface the per-run override controls.
+  const args = parseCliArgs(['serve', '--mock', '--db', ':memory:', '--port', String(PORT), '--poll-timeout', '0', '--cost-ceiling', '5']);
   const { orchestrator, repo, github, broadcaster } = buildOrchestrator(args);
 
   const version = orchestrator.getConfig().version;
