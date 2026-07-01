@@ -239,26 +239,44 @@ export class EventLoop {
    * tree and a state cursor). Resolves once the queue is idle *and* every worker has settled.
    *
    * `concurrency = 1` is exactly the serial drain (why the Orchestrator defaults to 1 and existing
-   * tests are unchanged); the daemon runs a higher global cap. A worker's throw — only a
-   * {@link FatalExecutorError} escapes `processEvent`, since escalate/await are commits, not throws —
-   * stops new dispatch and, once the already-running workers settle, rejects the drain, mirroring the
-   * serial path: the triggering event stays recoverable and the entry point surfaces the remedy. In
-   * flight stages always finish (a fatal error never abandons a mid-flight commit).
+   * tests are unchanged); the daemon runs a higher global cap. A failure — a worker throw (only a
+   * {@link FatalExecutorError} escapes `processEvent`, since escalate/await are commits, not throws) or
+   * a synchronous claim error (a broken DB) — stops new dispatch and, once the already-running workers
+   * settle, rejects the drain with the first error, mirroring the serial path: the triggering event
+   * stays recoverable and the entry point surfaces the remedy. In-flight stages always finish (a
+   * failure never abandons a mid-flight commit).
    *
    * The DB claim/commit calls are synchronous (better-sqlite3), so the pump's `inFlight` bookkeeping
    * runs on the single JS thread with no interleaving; the only real concurrency is the overlapping
    * `await runner.runStage(...)` calls.
    */
   async drain(concurrency: number): Promise<void> {
-    const limit = Math.max(1, Math.floor(concurrency));
+    // Authoritative clamp for the whole pool: any non-finite or < 1 cap falls back to serial (1) rather
+    // than wedging (`inFlight < NaN` is always false → nothing dispatches) or ignoring the cap entirely.
+    const limit = Number.isFinite(concurrency) && concurrency >= 1 ? Math.floor(concurrency) : 1;
     let inFlight = 0;
     let firstError: unknown;
     let stopped = false;
 
+    const fail = (err: unknown): void => {
+      if (!stopped) {
+        stopped = true;
+        firstError = err;
+      }
+    };
+
     await new Promise<void>((resolve) => {
       const pump = (): void => {
         while (!stopped && inFlight < limit) {
-          const event = this.repo.claimNextEvent();
+          let event: EventRow | undefined;
+          try {
+            event = this.repo.claimNextEvent();
+          } catch (err) {
+            // A synchronous claim failure (e.g. a DB error) must not escape into the voided worker
+            // promise and wedge the drain — abort like the serial path, letting in-flight work settle.
+            fail(err);
+            break;
+          }
           if (!event) break;
           inFlight++;
           void this.processEvent(event).then(
@@ -268,10 +286,7 @@ export class EventLoop {
             },
             (err) => {
               inFlight--;
-              if (!stopped) {
-                stopped = true;
-                firstError = err;
-              }
+              fail(err);
               pump();
             },
           );

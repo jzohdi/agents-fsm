@@ -717,6 +717,16 @@ describe('bounded worker pool (Milestone 8 Phase B — drain concurrency)', () =
     expect(executor.perRunPeak).toBe(1); // serial within a run — two stages of one run never overlap
   });
 
+  it('clamps an invalid cap (0 / negative / non-finite) to serial rather than wedging or ignoring it', async () => {
+    for (const badCap of [0, -3, NaN, Infinity]) {
+      const { repo, loop, executor } = poolSetup();
+      const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+      await loop.drain(badCap); // must terminate (a NaN cap would otherwise dispatch nothing forever)
+      expect(repo.getRun(run.id)!.status).toBe('done');
+      expect(executor.peak).toBe(1); // treated as serial
+    }
+  });
+
   it('drain(1) is exactly the serial drain — never more than one stage at a time', async () => {
     const { repo, loop, executor } = poolSetup();
     const a = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
@@ -747,6 +757,24 @@ describe('bounded worker pool (Milestone 8 Phase B — drain concurrency)', () =
     expect(repo.getRun(b.id)!.status).toBe('running');
     expect(repo.listTransitions(a.id)).toHaveLength(0);
     expect(loop.recover()).toBe(2);
+  });
+
+  it('aborts (does not hang) when the claim throws mid-drain — a DB error rejects the drain', async () => {
+    const { repo, loop } = poolSetup();
+    loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+
+    // First claim serves the run's event; a later claim (fired from a worker's completion) throws, the
+    // way a broken DB would. The throw must reject the drain, not escape into the voided worker promise
+    // and wedge it — the vitest timeout would fail this test if `drain` ever hung.
+    const realClaim = repo.claimNextEvent.bind(repo);
+    let claims = 0;
+    vi.spyOn(repo, 'claimNextEvent').mockImplementation(() => {
+      claims += 1;
+      if (claims === 1) return realClaim();
+      throw new Error('database is locked');
+    });
+
+    await expect(loop.drain(2)).rejects.toThrow(/database is locked/);
   });
 });
 

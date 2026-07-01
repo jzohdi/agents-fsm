@@ -115,7 +115,7 @@ export class Orchestrator {
     this.github = options.github;
     this.resolver = options.resolver;
     this.defaultWorkingRoot = options.defaultWorkingRoot;
-    this.concurrency = Math.max(1, Math.floor(options.concurrency ?? 1));
+    this.concurrency = options.concurrency ?? 1; // the requested cap; `EventLoop.drain` clamps it to a valid ≥ 1
     this.onError = options.onError ?? ((err) => console.error(`[orchestrator] drain pump error: ${String(err)}`));
     this.loop = new EventLoop(this.repo, this.config.fsm, this.config.version, this.runner, {
       onTransition: (transition, run) => this.broadcaster.publish({ type: 'transition', runId: run.id, transition, run }),

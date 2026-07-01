@@ -1,6 +1,6 @@
 # Milestone 8 — Multi-repo support (design + plan)
 
-> Progress: **Phase A done; Phase B — B1 done**, suite green at **415 passing / 1 skipped**.
+> Progress: **Phase A done; Phase B — B1 + B2 done**, suite green at **419 passing / 1 skipped**.
 > - **B1 — worker pool + within-run serialization:** `claimNextEvent` gained a `NOT EXISTS … status =
 >   'processing'` guard, so the pool is **parallel across runs, serial within a run** (a run with a stage
 >   in flight is skipped until it finalizes; the follow-up event is enqueued inside the commit txn, so
@@ -11,8 +11,25 @@
 >   global cap from `--concurrency` → `FLEET_CONCURRENCY` → **4** (`build-runner.resolveConcurrency`).
 >   Tests: claim within-run/cross-run serialization, pool parallelism + cap + per-run-serial witness +
 >   fatal-rejects (loop), two-repo concurrent drain (orchestrator), `--concurrency` parsing.
+> - **B2 — per-run worktrees / per-repo roots + concurrent crash recovery:** **no production code** — the
+>   per-repo working roots (each repo's adapter is built from its `repos` row's `workingRoot`) and per-run
+>   trees (`prepareWorkingTree` keys `<workingRoot>/run-<id>` on the *global* run id) already existed from
+>   Phase A + M3, and idempotency is run-scoped (event-keyed transitions; the outbox ledger is keyed
+>   `(run_id, key)` UNIQUE). B2 **proves** it holds under the pool: `src/integration/concurrent-recovery.test.ts`
+>   extends the M2 post-commit and M7 outbox crash-recovery tests to several runs across two repos
+>   recovered + drained concurrently — no duplicate/lost events, no duplicate transitions (golden path
+>   each), one PR per run on its own adapter with distinct per-run branches, and split sub-issues/comments
+>   created exactly once per run. Both passed first try, confirming the design was concurrency-safe by
+>   construction.
+> - **B1 audit hardening** (found during the B2 code audit, in the committed `drain`): (1) a synchronous
+>   `claimNextEvent` throw fired from a worker-completion `pump()` used to escape into the voided worker
+>   promise and **hang the drain forever** — now caught and treated like a worker failure (abort + reject,
+>   matching serial `runUntilIdle`); (2) the concurrency clamp `Math.max(1, Math.floor(x))` was not
+>   NaN-safe (`Math.max(1, NaN) === NaN` → dispatch nothing; `Infinity` bypassed the cap) — `drain` is now
+>   the single authoritative clamp (non-finite / < 1 → serial 1), and the Orchestrator no longer
+>   double-clamps. Both covered by new loop tests.
 >
-> **Next: B2** (per-run worktrees / per-repo roots + concurrent crash recovery), then **B3**.
+> **Next: B3** (rate-limit-aware executor retry + optional global cost ceiling).
 >
 > _Earlier:_ **A1 + A2 + A3-backend done** at 403 passing / 1 skipped.
 > - **A1 — store:** `repos` registry table + migration 3 (`LATEST_VERSION → 3`, `repo_ref COLLATE NOCASE`,
