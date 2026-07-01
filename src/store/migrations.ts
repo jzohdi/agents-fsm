@@ -5,11 +5,18 @@
  * provision a fresh database. The migrations here bring a **pre-existing** database (created against an
  * older schema) up to that same shape. Each is written to be **idempotent** — e.g. add a column only
  * if it is missing — so it is a harmless no-op on a fresh DB the baseline already satisfied, and safe
- * to re-run after a mid-way crash. The applied version is recorded in SQLite's built-in
- * `PRAGMA user_version`, so an up-to-date database skips the work on every open.
+ * to re-run after a mid-way crash. Applied migrations are recorded **by name** in the
+ * `schema_migrations` table, so an up-to-date database skips the work on every open. Names — not a
+ * single high-water version number — are the identity: divergent branches can each define a
+ * "migration 6", and a DB migrated by one lineage must still get the other's same-numbered-but-
+ * different migration instead of silently skipping it (the runs.harness incident). SQLite's
+ * `PRAGMA user_version` (the previous tracking scheme) is deliberately left untouched: code from a
+ * pre-`schema_migrations` lineage keys on it and re-runs its own migrations, which their
+ * idempotency makes harmless.
  *
- * Adding a migration: append `{ version: <next>, name, apply }` (versions must stay a gap-free 1..N
- * sequence) and reflect the change in `schema.sql` too. Keep migrations additive: SQLite can
+ * Adding a migration: append `{ version: <next>, name, apply }` (versions order the list and must
+ * stay a gap-free 1..N sequence; names are the tracked identity and must be unique — never rename
+ * an applied one) and reflect the change in `schema.sql` too. Keep migrations additive: SQLite can
  * `ALTER TABLE ADD COLUMN` cheaply but cannot change a CHECK constraint in place — that needs a full
  * table rebuild (the 12-step ALTER procedure); none is pending.
  */
@@ -103,29 +110,45 @@ export const MIGRATIONS: Migration[] = [
   },
 ];
 
-/** The schema version a fully-migrated database reports — the highest defined migration. */
-export const LATEST_VERSION = MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);
-
-// Guard the invariant the runner relies on: a gap-free, strictly increasing 1..N sequence.
+// Guard the invariants the runner relies on: versions a gap-free, strictly increasing 1..N sequence
+// (ordering only) and unique names (the identity key — a duplicate would shadow a real migration).
 MIGRATIONS.forEach((m, i) => {
   if (m.version !== i + 1) {
     throw new Error(`migrations must be numbered 1..N with no gaps; found version ${m.version} at index ${i}`);
   }
 });
+if (new Set(MIGRATIONS.map((m) => m.name)).size !== MIGRATIONS.length) {
+  throw new Error('migration names must be unique; the name is the applied-migration identity key');
+}
+
+// Mirrors schema.sql; created here too so `runMigrations` is self-sufficient when called directly.
+const TRACKING_TABLE_SQL = `CREATE TABLE IF NOT EXISTS schema_migrations (
+  name       TEXT PRIMARY KEY,
+  applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);`;
+
+/** The migration names a fully-migrated database has recorded in `schema_migrations`. */
+export const appliedMigrations = (db: Db): Set<string> =>
+  new Set((db.prepare('SELECT name FROM schema_migrations').all() as Array<{ name: string }>).map((r) => r.name));
 
 /**
- * Apply every migration the database has not yet recorded, in order, pinning `user_version` after
- * each. Idempotent and crash-safe: a fresh DB re-runs the (guarded) migrations as no-ops and ends
- * pinned at {@link LATEST_VERSION}; an older DB gets exactly the changes it is missing.
+ * Apply every migration the database has no record of, in order, recording each by name in the
+ * same transaction. Idempotent and crash-safe: a fresh DB runs the (guarded) migrations as no-ops
+ * and records them all; an older DB gets exactly the changes it has no record of — including a DB
+ * whose `user_version` was stamped by a divergent lineage but that never saw these migrations.
  */
 export function runMigrations(db: Db): void {
-  const current = db.pragma('user_version', { simple: true }) as number;
+  db.exec(TRACKING_TABLE_SQL);
+  const applied = appliedMigrations(db);
+  const record = db.prepare('INSERT INTO schema_migrations (name) VALUES (?)');
   for (const m of MIGRATIONS) {
-    if (m.version <= current) continue;
-    db.transaction(() => m.apply(db))(); // the schema change itself is atomic
-    // Record progress outside the DDL transaction (some PRAGMAs can't run inside one); re-applying an
-    // already-applied migration after a crash here is a no-op, so the unrecorded window is harmless.
-    db.pragma(`user_version = ${m.version}`);
+    if (applied.has(m.name)) continue;
+    // Apply and record atomically: after a crash the migration is either fully applied and recorded,
+    // or re-run from scratch (a no-op, per the idempotency invariant) — never recorded without running.
+    db.transaction(() => {
+      m.apply(db);
+      record.run(m.name);
+    })();
   }
 }
 

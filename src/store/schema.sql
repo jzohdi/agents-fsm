@@ -154,6 +154,15 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL
 );
 
+-- Ledger of applied schema migrations, keyed by NAME (see migrations.ts). Names — not a single
+-- high-water version number like PRAGMA user_version — are the identity: divergent branches can
+-- define same-numbered but different migrations, and a version stamp written by one lineage must
+-- not make the other lineage silently skip its own migration (the runs.harness incident).
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  name       TEXT PRIMARY KEY,
+  applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_transitions_run ON transitions(run_id, id);
 CREATE INDEX IF NOT EXISTS idx_events_status ON events(status, id);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_run ON agent_runs(run_id, id);
