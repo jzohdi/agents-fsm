@@ -78,6 +78,13 @@ export const MIGRATIONS: Migration[] = [
     // ALTER ADD COLUMN retrofits a pre-existing DB; a fresh DB already has it from schema.sql.
     apply: (db) => addColumnIfMissing(db, 'runs', 'model_override', 'TEXT'),
   },
+  {
+    version: 6,
+    name: 'add runs.pr_feedback_watermark',
+    // High-water mark of PR comments the PR Feedback Poller has accounted for. Additive column, so a
+    // plain ALTER ADD COLUMN retrofits a pre-existing DB; a fresh DB already has it from schema.sql.
+    apply: (db) => addColumnIfMissing(db, 'runs', 'pr_feedback_watermark', 'INTEGER'),
+  },
 ];
 
 /** The schema version a fully-migrated database reports — the highest defined migration. */

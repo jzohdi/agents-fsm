@@ -34,8 +34,12 @@ export interface CliArgs {
   maxRetries?: number;
   /** How long to keep polling for a human reply when triage asks a question, in **minutes**. 0 disables polling. `--poll-timeout`. */
   pollTimeoutMinutes: number;
-  /** Delay between reply-poll checks, in **seconds** — `--poll-interval`. */
+  /** Delay between reply-poll checks, in **seconds** — `--poll-interval`. Also drives PR-feedback polling. */
   pollIntervalSeconds: number;
+  /** Marker a PR comment must start with to be treated as actionable feedback — `--feedback-marker`. Default `feedback:`. */
+  feedbackMarker: string;
+  /** Stage a run re-enters when PR feedback arrives on its open PR — `--feedback-reentry`. Default `plan`. */
+  feedbackReentryState: string;
   /** FSM config file the daemon/CLI runs under; enables `PUT /config` to persist edits — `--config`. */
   config?: string;
   /** Port the `serve` daemon listens on — `--port`. Default 4319. */
@@ -73,6 +77,8 @@ export function parseCliArgs(argv: string[]): CliArgs {
       'max-retries': { type: 'string' },
       'poll-timeout': { type: 'string' },
       'poll-interval': { type: 'string' },
+      'feedback-marker': { type: 'string' },
+      'feedback-reentry': { type: 'string' },
       config: { type: 'string' },
       port: { type: 'string' },
       concurrency: { type: 'string' },
@@ -103,6 +109,8 @@ export function parseCliArgs(argv: string[]): CliArgs {
     ...(values['max-retries'] !== undefined ? { maxRetries: Number(values['max-retries']) } : {}),
     pollTimeoutMinutes: values['poll-timeout'] !== undefined ? Number(values['poll-timeout']) : 30,
     pollIntervalSeconds: values['poll-interval'] !== undefined ? Number(values['poll-interval']) : 15,
+    feedbackMarker: values['feedback-marker'] ?? 'feedback:',
+    feedbackReentryState: values['feedback-reentry'] ?? 'plan',
     config: values.config,
     port: values.port !== undefined ? Number(values.port) : 4319,
     ...(values.concurrency !== undefined ? { concurrency: Number(values.concurrency) } : {}),

@@ -14,6 +14,7 @@ import { openDb } from '../store/db';
 import { Repository, type Run } from '../store/repository';
 import { StubExecutor, type AgentRunRequest, type StageExecutor, type StubHandler } from './executor';
 import { AgentRunner, phaseModel, type AgentRunnerOptions } from './runner';
+import { ADDRESSING_PR_FEEDBACK_FLAG } from '../loop/event-loop';
 
 describe('phaseModel', () => {
   it('replaces only the frontier role when an override is set', () => {
@@ -217,6 +218,44 @@ describe('AgentRunner — harness request', () => {
     const after = repo.getRun(run.id)!;
     expect(after.tokensUsed).toBe(15);
     expect(after.costUsed).toBeCloseTo(0.03);
+  });
+});
+
+describe('AgentRunner — PR feedback context injection', () => {
+  /** A produce/self_review handler that records every request it sees. */
+  function recordingSetup() {
+    const seen: AgentRunRequest[] = [];
+    const h = setup((req) => {
+      seen.push(req);
+      return req.phase === 'self_review' ? { output: { acceptable: true } } : { output: { requestedTransition: 'proceed' } };
+    });
+    return { ...h, seen };
+  }
+
+  it('injects the open PR + feedback thread when the run is addressing PR feedback', async () => {
+    const { repo, runner, run, github, seen } = recordingSetup();
+    const pr = await github.openPr({ branch: 'agent/run', base: 'main', title: 't', body: '' });
+    repo.setRunPr(run.id, pr.number);
+    repo.mergeRunFlags(run.id, { [ADDRESSING_PR_FEEDBACK_FLAG]: true });
+    github.seedPrComment(pr.number, { author: 'alice', body: 'feedback: rename the endpoint' });
+
+    await runner.runStage(repo.getRun(run.id)!); // pass the updated snapshot (flag + PR set)
+
+    const input = seen[0]!.input as { pullRequest?: { number: number; addressingFeedback: boolean }; prFeedback?: Array<{ body: string }> };
+    expect(input.pullRequest).toMatchObject({ number: pr.number, addressingFeedback: true });
+    expect(input.prFeedback?.map((c) => c.body)).toEqual(['feedback: rename the endpoint']);
+  });
+
+  it('does not inject PR context on a normal first-pass stage (PR exists but the flag is unset)', async () => {
+    const { repo, runner, run, github, seen } = recordingSetup();
+    const pr = await github.openPr({ branch: 'agent/run', base: 'main', title: 't', body: '' });
+    repo.setRunPr(run.id, pr.number); // PR exists, but this is the initial build — no feedback flag
+
+    await runner.runStage(repo.getRun(run.id)!);
+
+    const input = seen[0]!.input as { pullRequest?: unknown; prFeedback?: unknown };
+    expect(input.pullRequest).toBeUndefined();
+    expect(input.prFeedback).toBeUndefined();
   });
 });
 

@@ -32,6 +32,24 @@ export const EVENT_ADVANCE = 'advance';
  */
 export const AWAIT_INPUT_TRIGGER = 'await_input';
 
+/**
+ * Trigger recorded on the loop-owned transition that re-opens a finished run to address reviewer
+ * feedback on its open PR (see the PR Feedback Poller). Like `revert`/`resume`, this transition
+ * bypasses the FSM engine — it is a control action, not an agent-requested edge.
+ */
+export const PR_FEEDBACK_TRIGGER = 'pr_feedback';
+
+/** Default stage a run re-enters when the PR Feedback Poller re-opens it (README §2 planning). */
+export const DEFAULT_FEEDBACK_REENTRY_STATE = 'plan';
+
+/**
+ * Run flag set when a run is re-opened to address PR feedback. The Agent Runner reads it to inject
+ * the open PR + its comment thread into every stage's input (so stages iterate on the existing PR
+ * instead of rebuilding it). Once set it stays set for the run's life — a PR, once opened, is always
+ * being iterated on. It is a boolean run flag, alongside `needs_frontend`/`needs_backend`.
+ */
+export const ADDRESSING_PR_FEEDBACK_FLAG = 'addressing_pr_feedback';
+
 export interface EventLoopOptions {
   /** Called after every committed transition — the seam the CLI/dashboard stream subscribes to. */
   onTransition?: (transition: Transition, run: Run) => void;
@@ -45,6 +63,12 @@ export interface EventLoopOptions {
    * disables the gate (the default; the one-shot CLI never sets it). See {@link claimNext}.
    */
   costCeiling?: number;
+  /**
+   * The stage a run re-enters when the PR Feedback Poller re-opens it to address reviewer feedback
+   * ({@link EventLoop.reopenForPrFeedback}). Must be a defined, non-terminal state. Defaults to
+   * {@link DEFAULT_FEEDBACK_REENTRY_STATE} (`plan`).
+   */
+  feedbackReentryState?: string;
 }
 
 export class EventLoop {
@@ -207,6 +231,53 @@ export class EventLoop {
         status: 'running',
         eventId: null, // a manual operator transition, not driven by an event
       });
+      this.repo.enqueueEvent({ runId, type: EVENT_ADVANCE });
+      return t;
+    });
+    this.emit(transition, runId);
+    return this.requireRun(runId);
+  }
+
+  /**
+   * Re-open a **finished** run (`done` or `needs_human`) to address reviewer feedback on its still-open
+   * PR — the PR Feedback Poller calls this when it detects a new marker-matching comment. It records a
+   * loop-owned transition from the run's current (terminal) state back to the configured re-entry stage
+   * (`plan` by default), resets the round counters (a fresh budget for the new cycle, like {@link
+   * resumeRun}), sets status `running`, sets the {@link ADDRESSING_PR_FEEDBACK_FLAG} flag so the Agent
+   * Runner injects the open-PR context into every stage, and enqueues an advance event so the loop
+   * re-dispatches. Like `revert`/`resume` this bypasses the FSM engine (a control action, not an
+   * agent-requested edge), so it needs no `src/fsm` change. A `reason` is required so the re-entered
+   * stage knows why it is re-running. Returns the updated run; the caller kicks the pump.
+   */
+  reopenForPrFeedback(runId: number, reason: unknown): Run {
+    const run = this.repo.getRun(runId);
+    if (!run) throw new Error(`reopenForPrFeedback: run ${runId} not found`);
+    if (run.status !== 'done' && run.status !== 'needs_human') {
+      throw new Error(`reopenForPrFeedback: run ${runId} is "${run.status}", not a finished (done/needs_human) run`);
+    }
+    if (reason === undefined || reason === null || reason === '') {
+      throw new Error('reopenForPrFeedback: a reason is required so the re-entered stage knows why it is re-running');
+    }
+    const toState = this.options.feedbackReentryState ?? DEFAULT_FEEDBACK_REENTRY_STATE;
+    const target = this.fsm.states[toState];
+    if (!target) throw new Error(`reopenForPrFeedback: unknown re-entry state "${toState}"`);
+    if (target.terminal) throw new Error(`reopenForPrFeedback: re-entry state "${toState}" is terminal`);
+
+    const transition = this.repo.transaction(() => {
+      // A finished run holds no follow-up event, but discard defensively so the re-entry is driven by
+      // exactly one fresh advance event (mirrors revertRun).
+      this.repo.discardPendingEvents(runId);
+      const t = this.repo.commitTransition({
+        runId,
+        fromState: run.currentState,
+        toState,
+        trigger: PR_FEEDBACK_TRIGGER,
+        reason,
+        isReset: true, // fresh budget of rounds for the re-opened cycle
+        status: 'running',
+        eventId: null, // a control transition, not driven by an event
+      });
+      this.repo.mergeRunFlags(runId, { [ADDRESSING_PR_FEEDBACK_FLAG]: true });
       this.repo.enqueueEvent({ runId, type: EVENT_ADVANCE });
       return t;
     });

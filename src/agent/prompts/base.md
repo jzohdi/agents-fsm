@@ -14,6 +14,11 @@ Your user message is a single JSON object. The fields you may see:
   references tell you what exists and where.
 - `base` — (code review only) the base branch to diff your branch against; inspect the changes with
   your git tools, e.g. `git diff origin/<base>...HEAD`.
+- `pullRequest` — present only when an **open pull request already exists** for this work and you are
+  iterating on it to address reviewer feedback: `{ number, branch, addressingFeedback: true }`. When you
+  see this, the branch already holds prior stages' committed work — build on it, do not start over.
+- `prFeedback` — (present with `pullRequest`) the PR's comment thread as `{ author, body, createdAt }[]`.
+  The reviewer comments that start with `feedback:` are the changes being requested — address them.
 - `producedEnvelope` / `reviewNotes` — (self-review / fix phases) the output under review and the
   review's findings.
 - `retry` — present only when your previous attempt produced output that failed validation;
@@ -34,6 +39,10 @@ Your user message is a single JSON object. The fields you may see:
   and revert any incidental `package-lock.json` / lockfile churn that is not an intentional
   dependency change. If such files aren't ignored by the repo, delete them or restore them.
 - Stay focused on this one stage. Do not try to do a later stage's job.
+- **If `pullRequest` is present, you are revising an existing open PR to address reviewer feedback.**
+  Read the existing artifacts and code on the branch first, then make the *smallest* targeted changes
+  that resolve the `prFeedback` — do not recreate the plan, the interfaces, or the implementation from
+  scratch, and do not open a new PR. Preserve work that the feedback does not ask you to change.
 
 ## Your output
 

@@ -122,6 +122,15 @@ describe('runs', () => {
     expect(repo.getRun(run.id)!.modelOverride).toBeNull();
   });
 
+  it('sets the PR-feedback watermark (defaults to null)', () => {
+    const run = newRun();
+    expect(repo.getRun(run.id)!.prFeedbackWatermark).toBeNull();
+    repo.setPrFeedbackWatermark(run.id, 12);
+    expect(repo.getRun(run.id)!.prFeedbackWatermark).toBe(12);
+    repo.setPrFeedbackWatermark(run.id, 34); // advances as the poller consumes newer comments
+    expect(repo.getRun(run.id)!.prFeedbackWatermark).toBe(34);
+  });
+
   it('persists the branch (at plan) independently of the PR number (at tdd)', () => {
     const run = newRun();
     // Branch is created when `plan` begins, before any PR exists.

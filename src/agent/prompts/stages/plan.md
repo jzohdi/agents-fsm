@@ -15,6 +15,10 @@ Declare scope with two flags so the pipeline knows which implementation stages t
 
 At least one must be `true` (otherwise the work should not have left planning).
 
+If `pullRequest` is present, you are re-planning to address reviewer feedback on an existing open PR:
+read the current `.agent/plan.md` and **revise it in place** to cover the `feedback:` comments, rather
+than rewriting it from scratch. Keep the scope flags consistent with the change the feedback asks for.
+
 Record the plan in `artifacts` as `{ "kind": "plan", "locator": { "path": ".agent/plan.md" } }`.
 
 Allowed transitions: `proceed` (to plan review), `escalate` (if the issue genuinely cannot be planned).

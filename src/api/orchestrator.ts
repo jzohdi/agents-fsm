@@ -94,6 +94,12 @@ export interface OrchestratorOptions {
    * aggregate clears or an operator overrides a run ({@link Orchestrator.overrideCost}). Undefined = off.
    */
   costCeiling?: number;
+  /**
+   * The stage a run re-enters when the PR Feedback Poller re-opens it to address reviewer feedback
+   * ({@link Orchestrator.reopenForPrFeedback}). Must be a defined, non-terminal state. Defaults to
+   * `plan` (see `EventLoop.DEFAULT_FEEDBACK_REENTRY_STATE`).
+   */
+  feedbackReentryState?: string;
   /** Called when a background drain throws (e.g. a `FatalExecutorError`). Default: log to stderr. */
   onError?: (err: unknown) => void;
   /**
@@ -148,6 +154,7 @@ export class Orchestrator {
       ...(options.now ? { now: options.now } : {}),
       ...(options.maxIterations !== undefined ? { maxIterations: options.maxIterations } : {}),
       ...(options.costCeiling !== undefined ? { costCeiling: options.costCeiling } : {}),
+      ...(options.feedbackReentryState !== undefined ? { feedbackReentryState: options.feedbackReentryState } : {}),
     });
   }
 
@@ -257,6 +264,19 @@ export class Orchestrator {
   resumeAwaitingInput(runId: number): Run {
     this.loop.resumeAwaitingInput(runId);
     const run = this.requireRun(runId);
+    this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
+    this.kick();
+    return run;
+  }
+
+  /**
+   * Re-open a finished run (`done`/`needs_human`) to address reviewer feedback on its open PR — the PR
+   * Feedback Poller calls this in the daemon when it detects a new `feedback:` comment. It re-enters the
+   * run at the configured stage (`plan` by default) with the open-PR context, then kicks the pump so the
+   * loop re-dispatches. Publishes the status change to the stream. Satisfies {@link PrFeedbackReopener}.
+   */
+  reopenForPrFeedback(runId: number, reason: unknown): Run {
+    const run = this.loop.reopenForPrFeedback(runId, reason);
     this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
     this.kick();
     return run;

@@ -31,6 +31,7 @@ import {
   type Issue,
   type IssueComment,
   type OpenPrInput,
+  type PrComment,
   type PrepareWorkingTreeInput,
   type PullRequest,
   type ReadDiffInput,
@@ -159,6 +160,10 @@ export class GitHubCli implements GitHub {
     return this.viewPrByBranch(input.branch);
   }
 
+  async getPr(prNumber: number): Promise<PullRequest> {
+    return this.viewPr(prNumber);
+  }
+
   async updatePr(input: UpdatePrInput): Promise<PullRequest> {
     const args = ['pr', 'edit', String(input.prNumber), '--repo', this.repo];
     if (input.title !== undefined) args.push('--title', input.title);
@@ -175,6 +180,14 @@ export class GitHubCli implements GitHub {
     ]);
     const parsed = JSON.parse(json) as { id: number };
     return { id: parsed.id, prNumber: input.prNumber, body: input.body };
+  }
+
+  async listPrComments(prNumber: number): Promise<PrComment[]> {
+    // A PR is an issue under the hood, so its comment thread comes from the same REST endpoint as
+    // issue comments — carrying the id/author/timestamp the PR Feedback Poller anchors on.
+    const json = await this.gh(['api', `repos/${this.repo}/issues/${prNumber}/comments?per_page=100`]);
+    const parsed = JSON.parse(json) as RawIssueComment[];
+    return parsed.map((c) => ({ id: c.id, prNumber, author: c.user?.login ?? 'unknown', body: c.body ?? '', createdAt: c.created_at }));
   }
 
   // --- local working tree + git (no network) ----------------------------------
