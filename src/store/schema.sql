@@ -25,7 +25,6 @@ CREATE TABLE IF NOT EXISTS runs (
   archived_at        TEXT,                              -- when an operator archived this (terminal) run out of the dashboard's Resolved lane; NULL = not archived
   cost_override      TEXT,                              -- operator override of the global cost ceiling (M8 B3): 'next_step' (one stage) | 'full' (whole run) | NULL (none)
   model_override     TEXT,                              -- per-run harness model override (the dashboard's model dropdown); NULL = use the daemon default. Read by the runner at each stage.
-  pr_feedback_watermark INTEGER,                         -- highest PR-comment id the PR Feedback Poller has accounted for; NULL = not yet baselined (see the PR Feedback Poller)
   created_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );

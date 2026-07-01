@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { ui, control, revertRun, overrideCost, setModel } from './store.svelte';
+  import { ui, control, revertRun, overrideCost, setModel, checkPrFeedback } from './store.svelte';
   import type { HarnessModel } from './types';
-  import { telemetryModel, escalationModel, activityLane, costStatusModel, issueUrl, prUrl, branchUrl, fmtCost, fmtDuration, fmtTokens, escapeHtml, humanizeState } from './render';
+  import { telemetryModel, escalationModel, activityLane, costStatusModel, issueUrl, prUrl, branchUrl, isWatchingPrFeedback, fmtCost, fmtDuration, fmtTokens, escapeHtml, humanizeState } from './render';
   import StateMachine from './StateMachine.svelte';
   import ScrollArea from './ScrollArea.svelte';
 
@@ -18,6 +18,8 @@
       : null,
   );
   const terminal = $derived(run ? run.status === 'done' || run.status === 'stopped' : false);
+  // Is the orchestrator watching this finished run's open PR for `feedback:` comments? (README §9.7)
+  const watchingPrFeedback = $derived(isWatchingPrFeedback(run));
   // Cost-override controls (M8 B3): the ceiling only parks *running* runs (a needs_human/paused run is
   // parked for a different reason), so show them there once the fleet is at the ceiling, or whenever the
   // run already carries an override (so it can be cleared).
@@ -144,7 +146,7 @@
           <button type="submit">Revert</button>
         </form>
         <button type="button" class="stop" onclick={() => control('stop')}>Stop</button>
-      {:else}
+      {:else if !watchingPrFeedback}
         <span class="terminal-note">terminal — no further control</span>
       {/if}
       {#if showCostOverride}
@@ -157,6 +159,12 @@
             <button type="button" onclick={() => overrideCost(run.id, 'next_step')}>Run next step</button>
             <button type="button" onclick={() => overrideCost(run.id, 'full')}>Complete issue</button>
           {/if}
+        </div>
+      {/if}
+      {#if watchingPrFeedback}
+        <div class="af-prwatch">
+          <span class="af-tag"><span class="pip"></span>watching {run.prNumber ? `PR #${run.prNumber}` : 'the PR'} for feedback</span>
+          <button type="button" onclick={() => checkPrFeedback(run.id)}>Check now</button>
         </div>
       {/if}
     </div>

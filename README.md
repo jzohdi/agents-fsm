@@ -579,23 +579,39 @@ reset and a run flag (`addressing_pr_feedback`) set. That flag makes the Agent R
 + its comment thread into **every** stage's input (`pullRequest` / `prFeedback`), and the prompts tell
 the agent to *iterate on the existing PR* — refining the plan/interface/code to address the feedback —
 rather than rebuild it (so `tdd` adopts the existing PR via its find-or-create path; no duplicate PR).
-A poller-owned high-water mark (`runs.pr_feedback_watermark`, schema migration 6) baselines on first
-sight and advances as comments are consumed, so a comment is handled exactly once. Polling **stops** once
-the PR is merged or closed (the run is flagged and skipped). The daemon runs it alongside the Reply
-Poller, on the same `--poll-interval` and `--poll-timeout 0` disable switch.
+A comment counts as unaddressed feedback when it was posted **after the run entered its finished state**
+— the run's most recent transition (the one that moved it into `done`/`needs_human`) is the boundary, so
+its timestamp is exactly "when the run finished." This is anchored in the transition log (like the Reply
+Poller), needs no stored high-water mark, and is restart-safe: after a re-open the run's *new* finish
+transition advances the boundary, so an addressed comment never re-triggers, and a comment left *before*
+completion (a pipeline review comment) is ignored. Polling **stops** once the PR is merged or closed (the
+run is flagged and skipped), and an **archived** run is never watched (archiving files a resolved run
+away). The daemon runs it alongside the Reply Poller, on the same `--poll-interval` and `--poll-timeout 0`
+disable switch.
 
-- **Tests:** `isFeedbackComment` marker matching; the poller baselining on first sight, re-opening on a
-  new `feedback:` comment, ignoring benign chatter, advancing the mark so a comment fires once, stopping
-  on merge **and** close, re-opening a `needs_human` run, not re-detecting consumed feedback after the
-  re-opened run finishes, per-run adapter isolation (multi-repo), and transient-error isolation; the
-  loop's `reopenForPrFeedback` (done/needs_human re-entry, reset + flag + one advance event, configured
-  re-entry stage, and the not-finished / missing-reason / terminal-target rejections); the runner
-  injecting `pullRequest`/`prFeedback` only when the flag is set; the fake's `getPr`/`listPrComments`/
-  `seedPrComment`; and the `pr_feedback_watermark` round-trip.
+The **Orchestrator owns the poller**, so the daemon's background tick (`pollPrFeedbackOnce`) and the
+dashboard's on-demand check (`POST /runs/:id/check-pr-feedback` → `checkPrFeedback`) drive the same
+instance. The **dashboard** surfaces it in the run detail: a finished run with an open PR shows a pulsing
+"watching PR #N for feedback" chip plus a **Check now** button (pure `isWatchingPrFeedback`; the button
+banners the outcome — re-opened / still watching / stopped). So the operator can see the watch is live
+and force an immediate check instead of waiting for the next poll.
+
+- **Tests:** `isFeedbackComment` marker matching and the pure `newFeedbackComments` boundary rule
+  (only marker comments newer than the finished-at timestamp); the poller re-opening on a `feedback:`
+  comment left after completion, ignoring one left before completion and benign chatter, not re-detecting
+  it once the run is re-opened, stopping on merge **and** close, re-opening a `needs_human` run, excluding
+  an archived run, per-run adapter isolation (multi-repo), and transient-error isolation; the loop's
+  `reopenForPrFeedback` (done/needs_human re-entry, reset + flag + one advance event, configured re-entry
+  stage, and the not-finished / missing-reason / terminal-target rejections); the runner injecting
+  `pullRequest`/`prFeedback` only when the flag is set; and the fake's `getPr`/`listPrComments`/
+  `seedPrComment`/`seedPr`. The **on-demand check** adds: the poller's `checkRun` outcomes
+  (watching → reopened → not_watching → stopped), the `Orchestrator.checkPrFeedback` command
+  (reopen / watching / stopped / not_watching + a 404), the `POST /runs/:id/check-pr-feedback` route,
+  and the pure `isWatchingPrFeedback` badge helper.
 
 > The per-milestone test counts above record each milestone as it shipped; the authoritative current
-> figure is **495 passing / 2 skipped** (the two flag-gated real integration tests). Run `npm test` for
-> the live number rather than trusting a hand-maintained tally.
+> figure is **503 passing / 2 skipped** backend (+ 32 dashboard render-model tests), the two skips being
+> the flag-gated real integration tests. Run `npm test` for the live number rather than a hand tally.
 
 ---
 
@@ -686,6 +702,10 @@ reviewer comment back into the pipeline, **post a PR comment that starts with `f
 re-opens the run at `plan` (configurable via `--feedback-reentry`), carrying the open PR + the comment
 thread into every stage so the agents refine the *existing* PR instead of rebuilding it. Comments that
 don't start with the marker are ignored, so ordinary review chatter is safe. Watching stops
-automatically once the PR is **merged or closed**. Tune the marker with `--feedback-marker`; disable
-both pollers with `--poll-timeout 0`.
+automatically once the PR is **merged or closed** (or if you **archive** the run). Tune the marker with
+`--feedback-marker`; disable both pollers with `--poll-timeout 0`.
+
+Don't want to wait for the next poll? Open the run in the dashboard: a watched run shows a **"watching
+PR #N for feedback"** chip and a **Check now** button that polls that one PR immediately and tells you
+what it found (re-opened / still watching / stopped).
 

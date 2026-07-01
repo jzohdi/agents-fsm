@@ -615,6 +615,56 @@ describe('Orchestrator — global cost ceiling + overrides (Milestone 8 B3)', ()
   });
 });
 
+describe('Orchestrator — on-demand PR feedback check', () => {
+  /** Start a run and drive it to `done` (so it has an open PR). */
+  async function toDone() {
+    const h = setup();
+    const run = h.orchestrator.start({ issueRef: 'o/r#1' });
+    await h.orchestrator.settle();
+    expect(h.repo.getRun(run.id)!.status).toBe('done');
+    return { ...h, run };
+  }
+
+  /** Seed a reviewer feedback comment timed after the run finished, so it counts as unaddressed. */
+  function seedFeedbackAfterFinish(repo: Repository, github: FakeGitHub, runId: number) {
+    const finishedAt = repo.listTransitions(runId).at(-1)!.createdAt;
+    const after = new Date(Date.parse(finishedAt) + 1000).toISOString();
+    github.seedPrComment(repo.getRun(runId)!.prNumber!, { author: 'alice', body: 'feedback: rename the endpoint', createdAt: after });
+  }
+
+  it('re-opens the run when a feedback: comment is left after it finished, else keeps watching', async () => {
+    const { orchestrator, repo, github, run } = await toDone();
+    const prNumber = repo.getRun(run.id)!.prNumber!;
+
+    expect((await orchestrator.checkPrFeedback(run.id)).result).toBe('watching'); // open PR, no new feedback
+    seedFeedbackAfterFinish(repo, github, run.id);
+
+    const { result } = await orchestrator.checkPrFeedback(run.id);
+    expect(result).toBe('reopened');
+    await orchestrator.settle();
+    // Re-opened and driven back to done on the same PR (no duplicate).
+    expect(repo.getRun(run.id)!.prNumber).toBe(prNumber);
+  });
+
+  it('reports "stopped" and flags the run once the PR is merged', async () => {
+    const { orchestrator, repo, github, run } = await toDone();
+    github.setPrState(repo.getRun(run.id)!.prNumber!, 'merged');
+
+    const { result } = await orchestrator.checkPrFeedback(run.id);
+    expect(result).toBe('stopped');
+    expect(repo.getRun(run.id)!.flags.pr_feedback_closed).toBe(true);
+  });
+
+  it('reports "not_watching" for a finished run without a PR, and 404s an unknown run', async () => {
+    const { orchestrator, repo } = setup();
+    const bare = repo.createRun({ issueRef: 'o/r#9', repoRef: 'o/r', initialState: 'triage', fsmConfigVersion: 'v1' });
+    repo.setRunStatus(bare.id, 'done'); // done but never opened a PR
+
+    expect((await orchestrator.checkPrFeedback(bare.id)).result).toBe('not_watching');
+    await expect(orchestrator.checkPrFeedback(999)).rejects.toBeInstanceOf(ApiError);
+  });
+});
+
 function expectApiError(fn: () => unknown, status: number): void {
   try {
     fn();

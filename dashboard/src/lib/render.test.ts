@@ -11,6 +11,7 @@ import {
   escalationModel,
   escapeHtml,
   isAtBottom,
+  isWatchingPrFeedback,
   issueUrl,
   prUrl,
   costStatusModel,
@@ -194,6 +195,20 @@ describe('GitHub deep links', () => {
     expect(branchUrl('o/r', 'agent/run-1-abc')).toBe('https://github.com/o/r/tree/agent/run-1-abc');
     expect(branchUrl('o/r', null)).toBeNull();
     expect(branchUrl(undefined, 'main')).toBeNull();
+  });
+});
+
+describe('isWatchingPrFeedback', () => {
+  it('is true for a finished run with an open PR, false otherwise', () => {
+    // done / needs_human with a PR and no closed flag → being watched.
+    expect(isWatchingPrFeedback(run({ status: 'done', prNumber: 36 }))).toBe(true);
+    expect(isWatchingPrFeedback(run({ status: 'needs_human', prNumber: 36 }))).toBe(true);
+    // Not finished, no PR, or the PR already merged/closed → not watched.
+    expect(isWatchingPrFeedback(run({ status: 'running', prNumber: 36 }))).toBe(false);
+    expect(isWatchingPrFeedback(run({ status: 'done', prNumber: null }))).toBe(false);
+    expect(isWatchingPrFeedback(run({ status: 'done', prNumber: 36, flags: { pr_feedback_closed: true } }))).toBe(false);
+    expect(isWatchingPrFeedback(run({ status: 'done', prNumber: 36, archivedAt: '2026-07-01T00:00:00Z' }))).toBe(false); // archived → filed away
+    expect(isWatchingPrFeedback(null)).toBe(false);
   });
 });
 

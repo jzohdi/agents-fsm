@@ -35,8 +35,6 @@ export interface Run {
   costOverride: CostOverride | null;
   /** Per-run harness model override (the dashboard's model dropdown); `null` = the daemon default. Read by the runner at each stage, so a change takes effect on the next stage. */
   modelOverride: string | null;
-  /** Highest PR-comment id the PR Feedback Poller has accounted for; `null` = not yet baselined (see the PR Feedback Poller). */
-  prFeedbackWatermark: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -193,7 +191,6 @@ interface RunRow {
   archived_at: string | null;
   cost_override: CostOverride | null;
   model_override: string | null;
-  pr_feedback_watermark: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -265,7 +262,6 @@ function mapRun(r: RunRow): Run {
     archivedAt: r.archived_at,
     costOverride: r.cost_override,
     modelOverride: r.model_override,
-    prFeedbackWatermark: r.pr_feedback_watermark,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -431,15 +427,6 @@ export class Repository {
   /** Record the PR number, set when `tdd` opens the PR — separate from the branch, which exists earlier. */
   setRunPr(id: number, prNumber: number): void {
     this.db.prepare(`UPDATE runs SET pr_number = ?, updated_at = ${NOW} WHERE id = ?`).run(prNumber, id);
-  }
-
-  /**
-   * Record the PR-feedback high-water mark — the highest PR-comment id the PR Feedback Poller has
-   * accounted for. Only comments with a larger id (and the feedback marker) re-open a finished run,
-   * so advancing this is what keeps a comment from being handled twice (see the PR Feedback Poller).
-   */
-  setPrFeedbackWatermark(id: number, commentId: number): void {
-    this.db.prepare(`UPDATE runs SET pr_feedback_watermark = ?, updated_at = ${NOW} WHERE id = ?`).run(commentId, id);
   }
 
   /** Archive (stamp `archived_at`) or unarchive (clear it) a run — the dashboard's Resolved-lane tidy-up. */

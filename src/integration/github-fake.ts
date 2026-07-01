@@ -174,6 +174,29 @@ export class FakeGitHub implements GitHub {
     this.requirePr(prNumber).state = state;
   }
 
+  /**
+   * Seed a PR with an explicit number + state (test / preview affordance; parallels {@link seedIssue}).
+   * Used when a PR must already exist without going through `openPr` — e.g. the dashboard preview, whose
+   * runs are seeded straight into the store. Idempotent on the number; bumps the auto-number counter so a
+   * later `openPr` never collides.
+   */
+  seedPr(number: number, pr: { branch: string; base?: string; state?: PullRequest['state']; title?: string; body?: string }): PullRequest {
+    const existing = this.prs.find((p) => p.number === number);
+    if (existing) return { ...existing };
+    const created: PullRequest = {
+      number,
+      branch: pr.branch,
+      base: pr.base ?? 'main',
+      title: pr.title ?? `PR #${number}`,
+      body: pr.body ?? '',
+      state: pr.state ?? 'open',
+      url: `https://github.test/pr/${number}`,
+    };
+    this.prs.push(created);
+    this.prCounter = Math.max(this.prCounter, number);
+    return { ...created };
+  }
+
   // --- GitHub API -------------------------------------------------------------
   //
   // Every interface method is `async` so a thrown error (e.g. a missing-PR `requirePr`)

@@ -151,14 +151,14 @@ const SPECS: RunSpec[] = [
   },
 ];
 
-/** A fully-finished run (every forward stage done, PR merged) for the Resolved lane. */
+/** A fully-finished run (every forward stage done, PR open for review) for the Resolved lane. */
 function resolved(issue: number, repo: string, title: string, tokens: number, cost: number, branch: string, pr: number): RunSpec {
   return {
     issue, repo, title, currentState: 'done', status: 'done', tokens, cost, branch, pr,
     path: ['triage', 'plan', 'plan_review', 'interface_design', 'tdd', 'frontend', 'backend', 'code_review', 'done'],
     logs: [
       { level: 'info', message: `Opened PR \`${repo}#${pr}\``, stage: 'code_review' },
-      { level: 'info', message: 'CI green — **auto-merged**', stage: 'done' },
+      { level: 'info', message: 'CI green — **open for review** (watching for `feedback:` comments)', stage: 'done' },
     ],
     artifacts: [{ kind: 'branch', locator: branch }, { kind: 'pr', locator: { url: `https://github.com/${repo}/pull/${pr}` } }],
   };

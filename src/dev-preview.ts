@@ -55,7 +55,21 @@ function main(): void {
 
   const version = orchestrator.getConfig().version;
   const ids = seedRuns(repo, version);
-  if (github instanceof FakeGitHub) seedSuggestions(github);
+  if (github instanceof FakeGitHub) {
+    seedSuggestions(github);
+    // Seed the fake PRs behind finished runs so the dashboard's PR-feedback "watching" chip + "Check now"
+    // work against them (the seed writes the store, not the fake). The top done run gets an unaddressed
+    // `feedback:` comment dated *after* it finished, so clicking "Check now" genuinely re-opens it.
+    for (const r of [...repo.listRuns({ status: 'done' }), ...repo.listRuns({ status: 'needs_human' })]) {
+      if (r.prNumber != null && r.branch) github.seedPr(r.prNumber, { branch: r.branch, state: 'open' });
+    }
+    const watched = repo.listRuns({ status: 'done' }).find((r) => r.prNumber != null && r.archivedAt === null);
+    if (watched) {
+      const finishedAt = repo.listTransitions(watched.id).at(-1)?.createdAt ?? new Date().toISOString();
+      const afterFinish = new Date(Date.parse(finishedAt) + 60_000).toISOString();
+      github.seedPrComment(watched.prNumber!, { author: 'maintainer', body: 'feedback: please also handle the empty-list case before we merge', createdAt: afterFinish });
+    }
+  }
   // The dashboard opens the highest-id running run by default; aim the live feed at the same one so
   // the "model thinking" stream animates on the run the operator first sees.
   const running = repo.listRuns({ status: 'running' });

@@ -11,18 +11,22 @@
  *  - **Polling, not webhooks.** One `getPr` + one `listPrComments` per watched run per tick; no server,
  *    no inbound networking. Consistent with the rest of the MVP's polled-signal approach.
  *  - **Deterministic signal, not heuristics.** A comment is actionable only if its body starts with the
- *    marker (`feedback:`) and it is newer than the run's high-water mark (`runs.pr_feedback_watermark`).
- *    The marker is the human's explicit "please act on this"; the bot never uses it, so benign chatter
- *    and the orchestrator's own review comments are cleanly ignored.
+ *    marker (`feedback:`) and it was posted *after the run entered its finished state*. The marker is the
+ *    human's explicit "please act on this"; the bot never uses it, so benign chatter and the pipeline's
+ *    own review comments are cleanly ignored.
+ *  - **The transition log is the anchor** (like the Reply Poller): the run's most recent transition is
+ *    the one that moved it into its finished state, so its timestamp is exactly "when the run finished".
+ *    A reviewer comment newer than that is unaddressed feedback; a comment older than it (a pipeline
+ *    review comment, or discussion from before completion) is not. This needs no stored high-water mark
+ *    and is restart-safe: after a re-open the run's *new* finish transition advances the boundary, so an
+ *    already-addressed comment never re-triggers.
  *  - **Stops on merge/close.** Once a PR is `merged` or `closed` the run is flagged and never scanned
  *    again — the work is landed (or abandoned), so there is nothing left to iterate on.
- *  - **Poller-owned watermark.** On first sight of a run the mark is baselined to the PR's current max
- *    comment id (re-opening nothing), so only feedback left *after* the run finished ever triggers work.
  *  - **`checkOnce` is the pure core**; the timed `poll` driver is a thin loop over it with an injected
  *    clock + sleep so tests drive it without real time.
  */
 
-import type { GitHub } from '../integration/github';
+import type { GitHub, PrComment } from '../integration/github';
 import { isRepoResolver, singleRepoResolver, type RepoResolver } from '../integration/github-resolver';
 import type { Repository, Run } from '../store/repository';
 
@@ -36,6 +40,15 @@ export const DEFAULT_FEEDBACK_MARKER = 'feedback:';
 
 /** Run flag set once a run's PR is merged/closed, so the poller stops scanning it. A boolean run flag. */
 export const PR_FEEDBACK_CLOSED_FLAG = 'pr_feedback_closed';
+
+/**
+ * What one check of a run's PR produced:
+ *  - `reopened`     — new marker feedback (posted after the run finished) was found; the run was re-opened.
+ *  - `watching`     — the PR is open with no new feedback since the run finished (still watched).
+ *  - `stopped`      — the PR merged/closed, so the run is now flagged and no longer watched.
+ *  - `not_watching` — the run isn't a finished run with an open, still-watched PR (nothing to check).
+ */
+export type PrFeedbackCheck = 'reopened' | 'watching' | 'stopped' | 'not_watching';
 
 export interface PrFeedbackPollerOptions {
   /** Delay between ticks, in ms. Default 15s (matches the Reply Poller). */
@@ -54,6 +67,20 @@ const DEFAULT_INTERVAL_MS = 15_000;
  */
 export function isFeedbackComment(body: string, marker: string): boolean {
   return body.trimStart().toLowerCase().startsWith(marker.toLowerCase());
+}
+
+/**
+ * The comments that should re-open a finished run: those that start with `marker` **and** were posted
+ * after `sinceIso` (the moment the run entered its finished state). The finished-state boundary is what
+ * separates fresh reviewer feedback from comments left earlier — the pipeline's own review comments, or
+ * discussion from before the run finished. GitHub comment timestamps and our transition timestamps are
+ * both ISO-8601 UTC, so `Date.parse` compares them directly (tolerating GitHub's second precision vs our
+ * millisecond one). An absent boundary (`undefined` — a run with no transitions) counts every marker
+ * comment. Pure and exported so the rule is unit-tested with controlled timestamps.
+ */
+export function newFeedbackComments(comments: PrComment[], marker: string, sinceIso: string | undefined): PrComment[] {
+  const since = sinceIso ? Date.parse(sinceIso) : 0;
+  return comments.filter((c) => isFeedbackComment(c.body, marker) && Date.parse(c.createdAt) > since);
 }
 
 export class PrFeedbackPoller {
@@ -85,7 +112,7 @@ export class PrFeedbackPoller {
     let reopened = 0;
     for (const run of this.watchedRuns()) {
       try {
-        if (await this.processRun(run)) reopened += 1;
+        if ((await this.processRun(run)) === 'reopened') reopened += 1;
       } catch (err) {
         // A transient GitHub/read error on one run must not abort polling for the others; the run stays
         // watched and the next tick retries. Recorded so the operator can see it happened.
@@ -117,16 +144,42 @@ export class PrFeedbackPoller {
     return total;
   }
 
-  /** Finished runs (`done`/`needs_human`) that still have an open PR we haven't stopped watching. */
-  private watchedRuns(): Run[] {
-    return [...this.repo.listRuns({ status: 'done' }), ...this.repo.listRuns({ status: 'needs_human' })].filter(
-      (r) => r.prNumber !== null && r.flags[PR_FEEDBACK_CLOSED_FLAG] !== true,
+  /**
+   * Check one run's PR on demand (the dashboard's "Check now" button) and report what happened. Returns
+   * `not_watching` when the run isn't a finished run with an open, still-watched PR; otherwise the same
+   * outcome the background poller acts on. Same idempotent logic as a background tick, so a manual check
+   * and a scheduled one are interchangeable.
+   */
+  async checkRun(runId: number): Promise<PrFeedbackCheck> {
+    const run = this.repo.getRun(runId);
+    if (!run || !this.isWatchable(run)) return 'not_watching';
+    return this.processRun(run);
+  }
+
+  /**
+   * A finished run (`done`/`needs_human`) that still has an open PR we haven't stopped watching. An
+   * **archived** run is excluded: archiving is the operator filing a resolved run away, so we don't
+   * resurrect it from a PR comment (that would pop it back into an active lane unexpectedly).
+   */
+  private isWatchable(run: Run): boolean {
+    return (
+      (run.status === 'done' || run.status === 'needs_human') &&
+      run.prNumber !== null &&
+      run.archivedAt === null &&
+      run.flags[PR_FEEDBACK_CLOSED_FLAG] !== true
     );
   }
 
-  /** Process one watched run; returns true iff it was re-opened for feedback this tick. */
-  private async processRun(run: Run): Promise<boolean> {
-    const prNumber = run.prNumber!; // watchedRuns filtered out null PRs
+  /** Finished runs (`done`/`needs_human`) that still have an open PR we haven't stopped watching. */
+  private watchedRuns(): Run[] {
+    return [...this.repo.listRuns({ status: 'done' }), ...this.repo.listRuns({ status: 'needs_human' })].filter((r) =>
+      this.isWatchable(r),
+    );
+  }
+
+  /** Process one watched run; returns the outcome of the check (see {@link PrFeedbackCheck}). */
+  private async processRun(run: Run): Promise<Exclude<PrFeedbackCheck, 'not_watching'>> {
+    const prNumber = run.prNumber!; // isWatchable filtered out null PRs
     const { github } = this.resolver.for(run.repoRef);
 
     // Stop watching a landed/abandoned PR: nothing left to iterate on.
@@ -134,28 +187,17 @@ export class PrFeedbackPoller {
     if (pr.state !== 'open') {
       this.repo.mergeRunFlags(run.id, { [PR_FEEDBACK_CLOSED_FLAG]: true });
       this.repo.recordLog({ runId: run.id, message: `PR #${prNumber} is ${pr.state} — no longer watching for feedback`, data: { kind: 'pr_feedback_stopped', prNumber, state: pr.state } });
-      return false;
+      return 'stopped';
     }
 
     const comments = await github.listPrComments(prNumber);
-    const maxId = comments.reduce((m, c) => Math.max(m, c.id), 0);
+    // Feedback newer than the run's finished-state transition is unaddressed reviewer feedback; anything
+    // older (a pipeline review comment, pre-completion discussion) is not. The run's most recent
+    // transition is the one that moved it into its finished state, so its timestamp is "when it finished".
+    const finishedAt = this.repo.listTransitions(run.id).at(-1)?.createdAt;
+    const actionable = newFeedbackComments(comments, this.marker, finishedAt);
 
-    // First sight: baseline to the current max id so only feedback left *after* the run finished counts.
-    if (run.prFeedbackWatermark === null) {
-      this.repo.setPrFeedbackWatermark(run.id, maxId);
-      return false;
-    }
-
-    const watermark = run.prFeedbackWatermark;
-    // The marker is the deterministic signal — the bot never prefixes a comment with it, so a plain
-    // marker + high-water-mark test cleanly excludes the orchestrator's own review comments and chatter.
-    const actionable = comments.filter((c) => c.id > watermark && isFeedbackComment(c.body, this.marker));
-
-    // Always advance the mark past everything seen this tick, so a benign comment is evaluated once and
-    // an addressed feedback comment never re-triggers.
-    if (maxId > watermark) this.repo.setPrFeedbackWatermark(run.id, maxId);
-
-    if (actionable.length === 0) return false;
+    if (actionable.length === 0) return 'watching';
 
     this.repo.recordLog({
       runId: run.id,
@@ -167,6 +209,6 @@ export class PrFeedbackPoller {
       prNumber,
       comments: actionable.map((c) => ({ author: c.author, body: c.body, createdAt: c.createdAt })),
     });
-    return true;
+    return 'reopened';
   }
 }
