@@ -65,7 +65,10 @@ export const DEFAULT_RETRY_BASE_MS = 1_000;
 export const DEFAULT_RETRY_MAX_MS = 60_000;
 
 export interface SubprocessExecutorOptions {
-  /** The CLI binary to invoke. Defaults to `claude`. */
+  /** The harness profile driving argv, model map, error policy, and activity summaries. Defaults to
+   *  {@link CLAUDE_PROFILE}, so an existing call site with no `profile` keeps Claude Code behavior. */
+  profile?: HarnessProfile;
+  /** The CLI binary to invoke. Defaults to the profile's `command`. */
   command?: string;
   /** Logical → concrete model map (README §3.3: logical names like `frontier`/`cheap`). */
   modelMap?: Record<string, string>;
@@ -148,22 +151,106 @@ export const CLAUDE_AUTH_REMEDY = [
 ].join('\n');
 
 /**
- * The harness is not authenticated — fatal (every stage would hit it). {@link FatalExecutorError}
- * so the loop aborts rather than escalating one run; the CLI prints {@link CLAUDE_AUTH_REMEDY}.
+ * The harness is not authenticated. Whether this is fatal (aborts the whole drain) or a per-run
+ * escalation is the harness's call, via {@link HarnessProfile.authFatal}: Claude Code is fatal (every
+ * stage would hit it); a per-run harness like Cursor escalates only its own runs so a mixed fleet keeps
+ * flowing (plan §8.1). This class is the *fatal* case — a {@link FatalExecutorError} carrying the
+ * harness's own remedy; the non-fatal case is a plain {@link HarnessError} (see {@link classifyFailure}).
  */
 export class HarnessAuthError extends FatalExecutorError {
-  constructor(detail: string) {
-    super(`Claude Code is not authenticated: ${detail}`, CLAUDE_AUTH_REMEDY);
+  constructor(message: string, remedy: string) {
+    super(message, remedy);
     this.name = 'HarnessAuthError';
   }
 }
 
-/** Recognize the harness's "not authenticated" signatures (login required or bad API key). */
-function isAuthFailure(text: string): boolean {
+/** Recognize Claude Code's "not authenticated" signatures (login required or bad API key). */
+function isClaudeAuthFailure(text: string): boolean {
   return /not logged in|please run \/login|authentication_failed|not authenticated|invalid api key|invalid x-api-key/i.test(text);
 }
 
+/**
+ * The harness-specific behaviors behind the generic subprocess engine (Layer 5). Everything else —
+ * spawn, stream, timeout, rate-limit retry, and the terminal-result parse — is harness-neutral and
+ * lives in {@link SubprocessStageExecutor}. Adding a harness is a new profile + its executor, with no
+ * change to the runner, loop, or store. See {@link CLAUDE_PROFILE} and the Cursor profile.
+ */
+export interface HarnessProfile {
+  /** Stable id, matching the run's `harness` and the harness's model catalog. */
+  id: string;
+  /** Default CLI binary (overridable per-executor via `command`). */
+  command: string;
+  /** Short name used in error messages, e.g. `claude` / `cursor-agent`. */
+  label: string;
+  /** Logical → concrete model map (overridable per-executor via `modelMap`). */
+  modelMap: Record<string, string>;
+  /** Build the argv for one invocation, given the already-resolved concrete model. The executor
+   *  appends its own `extraArgs` after this, so a profile returns just the harness-specific args. */
+  buildArgs(req: AgentRunRequest, model: string): string[];
+  /** Turn one parsed stream-json event into live activities (the "what is the agent doing now" feed). */
+  summarize(event: unknown): AgentActivity[];
+  /** Recognize this harness's "not authenticated" wording. */
+  isAuthFailure(text: string): boolean;
+  /** Recognize this harness's rate-limit / overloaded wording (retried with backoff). */
+  isRateLimit(text: string): boolean;
+  /** Operator remedy printed (fatal) or carried in the escalation reason (non-fatal) on an auth failure. */
+  authRemedy: string;
+  /** Whether an auth failure aborts the whole drain (Claude) or escalates only the affected run (Cursor). */
+  authFatal: boolean;
+}
+
+/**
+ * Build the right error for a harness failure `detail`, per the profile's policy: a fatal or per-run
+ * auth error (with the harness's remedy), a retryable {@link RateLimitError}, or a generic
+ * {@link HarnessError}. Shared by the non-zero-exit path and the `is_error` result path so both classify
+ * identically.
+ */
+export function classifyFailure(profile: HarnessProfile, detail: string, message: string): HarnessError {
+  if (profile.isAuthFailure(detail)) {
+    const authMessage = `${profile.label} is not authenticated: ${detail}`;
+    // Fatal → a FatalExecutorError the loop propagates (drain aborts). Non-fatal → a plain HarnessError
+    // the loop escalates as executor_error, with the remedy folded into the message for the run's log.
+    return profile.authFatal
+      ? new HarnessAuthError(authMessage, profile.authRemedy)
+      : new HarnessError(`${authMessage}\n\n${profile.authRemedy}`);
+  }
+  const full = `${message}: ${detail}`;
+  return profile.isRateLimit(detail) ? new RateLimitError(full) : new HarnessError(full);
+}
+
+/** The Claude Code profile — the default harness; preserves the pre-profile behavior exactly. */
+export const CLAUDE_PROFILE: HarnessProfile = {
+  id: 'claude-code',
+  command: 'claude',
+  label: 'claude',
+  modelMap: DEFAULT_MODEL_MAP,
+  buildArgs(req, model) {
+    const args = [
+      '-p',
+      userPrompt(req.input),
+      '--output-format',
+      'stream-json',
+      '--verbose', // required by Claude Code to stream JSON in `-p` mode
+      '--model',
+      model,
+      '--append-system-prompt',
+      req.system,
+    ];
+    if (req.allowedTools && req.allowedTools.length > 0) {
+      // Claude Code reads `--allowedTools` as a comma-separated list.
+      args.push('--allowedTools', req.allowedTools.join(','));
+    }
+    return args;
+  },
+  summarize: summarizeEvent,
+  isAuthFailure: isClaudeAuthFailure,
+  isRateLimit,
+  authRemedy: CLAUDE_AUTH_REMEDY,
+  authFatal: true, // an unauthenticated Claude Code fails every stage → abort the drain, print the remedy
+};
+
 export class SubprocessStageExecutor implements StageExecutor {
+  private readonly profile: HarnessProfile;
   private readonly command: string;
   private readonly modelMap: Record<string, string>;
   private readonly extraArgs: string[];
@@ -177,8 +264,9 @@ export class SubprocessStageExecutor implements StageExecutor {
   private readonly spawnProcess: SpawnProcess;
 
   constructor(options: SubprocessExecutorOptions = {}) {
-    this.command = options.command ?? 'claude';
-    this.modelMap = options.modelMap ?? DEFAULT_MODEL_MAP;
+    this.profile = options.profile ?? CLAUDE_PROFILE;
+    this.command = options.command ?? this.profile.command;
+    this.modelMap = options.modelMap ?? this.profile.modelMap;
     this.extraArgs = options.extraArgs ?? [];
     this.defaultWorkingDir = options.defaultWorkingDir ?? process.cwd();
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -195,33 +283,18 @@ export class SubprocessStageExecutor implements StageExecutor {
     return this.modelMap[logical] ?? logical;
   }
 
-  /** Build the argv for one phase invocation (kept pure so it is directly testable). */
+  /** Build the argv for one phase invocation: the profile's harness-specific args + our `extraArgs`
+   *  (deployment-specific flags). Kept pure so it is directly testable. */
   buildArgs(req: AgentRunRequest): string[] {
-    const args = [
-      '-p',
-      userPrompt(req.input),
-      '--output-format',
-      'stream-json',
-      '--verbose', // required by Claude Code to stream JSON in `-p` mode
-      '--model',
-      this.resolveModel(req.model),
-      '--append-system-prompt',
-      req.system,
-    ];
-    if (req.allowedTools && req.allowedTools.length > 0) {
-      // Claude Code reads `--allowedTools` as a comma-separated list.
-      args.push('--allowedTools', req.allowedTools.join(','));
-    }
-    args.push(...this.extraArgs);
-    return args;
+    return [...this.profile.buildArgs(req, this.resolveModel(req.model)), ...this.extraArgs];
   }
 
   async run(req: AgentRunRequest): Promise<AgentRunResult> {
     const cwd = req.workingDir ?? this.defaultWorkingDir;
     const options: SpawnOptions = { cwd, env: process.env, timeoutMs: this.timeoutMs };
-    // Only stream when someone is listening: parse each stream-json line and forward the activities
-    // it summarizes to. Streaming is pure observability — a throwing sink must never affect the run.
-    if (req.onActivity) options.onStdoutLine = (line) => emitActivities(line, req.onActivity!);
+    // Only stream when someone is listening: parse each stream-json line and forward the activities the
+    // profile summarizes it to. Streaming is pure observability — a throwing sink must never affect the run.
+    if (req.onActivity) options.onStdoutLine = (line) => emitActivities(line, req.onActivity!, this.profile.summarize);
 
     // Retry only a rate-limit/overloaded failure (from either the exit code or an `is_error` result),
     // backing off between attempts; every other failure — auth (fatal), a bad exit, malformed output —
@@ -239,29 +312,28 @@ export class SubprocessStageExecutor implements StageExecutor {
     }
   }
 
-  /** One harness invocation: spawn, then map the outcome to a result or a classified throw. */
+  /** One harness invocation: spawn, then map the outcome to a result or a profile-classified throw. */
   private async attempt(req: AgentRunRequest, options: SpawnOptions): Promise<AgentRunResult> {
     const result = await this.spawnProcess(this.command, this.buildArgs(req), options);
     if (result.code !== 0) {
       const detail = result.stderr.trim() || result.stdout.trim() || '(no output)';
-      if (isAuthFailure(detail)) throw new HarnessAuthError(detail);
-      const message = `claude exited with code ${result.code}: ${detail}`;
-      throw isRateLimit(detail) ? new RateLimitError(message) : new HarnessError(message);
+      throw classifyFailure(this.profile, detail, `${this.profile.label} exited with code ${result.code}`);
     }
-    return parseHarnessOutput(result.stdout);
+    return parseHarnessOutput(result.stdout, this.profile);
   }
 }
 
-/** The user-message text for one invocation: the structured input, JSON-encoded. */
-function userPrompt(input: unknown): string {
+/** The user-message text for one invocation: the structured input, JSON-encoded. Exported so a harness
+ *  profile can compose it into its prompt (e.g. Cursor, which has no separate system-prompt flag). */
+export function userPrompt(input: unknown): string {
   return typeof input === 'string' ? input : JSON.stringify(input);
 }
 
 // --- live activity (pure, exported for direct tests) ------------------------
 
-/** Parse one stream-json line and forward every {@link AgentActivity} it yields, swallowing both
- * JSON-parse noise and a throwing sink — live progress must never break the run. */
-function emitActivities(line: string, onActivity: (a: AgentActivity) => void): void {
+/** Parse one stream-json line and forward every {@link AgentActivity} the profile's `summarize` yields,
+ * swallowing both JSON-parse noise and a throwing sink — live progress must never break the run. */
+function emitActivities(line: string, onActivity: (a: AgentActivity) => void, summarize: (event: unknown) => AgentActivity[]): void {
   const trimmed = line.trim();
   if (!trimmed) return;
   let parsed: unknown;
@@ -270,7 +342,7 @@ function emitActivities(line: string, onActivity: (a: AgentActivity) => void): v
   } catch {
     return; // non-JSON noise line; ignore (same tolerance as the result parser)
   }
-  for (const activity of summarizeEvent(parsed)) {
+  for (const activity of summarize(parsed)) {
     try {
       onActivity(activity);
     } catch {
@@ -375,14 +447,11 @@ interface ResultEvent {
  * envelope schema), and sum its token usage. This also accepts single-object `json`
  * output, since that one object is itself the final result event.
  */
-export function parseHarnessOutput(stdout: string): AgentRunResult {
+export function parseHarnessOutput(stdout: string, profile: HarnessProfile = CLAUDE_PROFILE): AgentRunResult {
   const event = findResultEvent(stdout);
   if (!event) throw new HarnessError('harness produced no result event');
   if (event.is_error) {
-    const detail = event.result ?? '(no detail)';
-    if (isAuthFailure(detail)) throw new HarnessAuthError(detail);
-    const message = `harness reported an error result: ${detail}`;
-    throw isRateLimit(detail) ? new RateLimitError(message) : new HarnessError(message);
+    throw classifyFailure(profile, event.result ?? '(no detail)', 'harness reported an error result');
   }
 
   const usage: AgentRunResult['usage'] = { tokens: sumTokens(event.usage) };

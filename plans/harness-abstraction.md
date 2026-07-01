@@ -30,10 +30,28 @@ Two things changed since the plan below was first written; read this first.
    - Tests: `harness.test.ts`, a runner dispatch-by-harness test (+ unknown-harness escalation), a store
      round-trip + default test, and a migration-6 backfill test. Full suite stays green.
 
-**Next PR (Cursor):** the `HarnessProfile` refactor + `CURSOR_PROFILE` (§3.2, §4), register `cursor`, add
-its `HarnessCatalog`, generalize `getModels`/`setModel` to the run's harness catalog, add the `POST /runs`
+3. **PR 2 (stacked on `harness-selection-foundation`) — the Cursor harness executor.** The executor
+   layer only; still behavior-preserving (Cursor is not yet registered or selectable). Delivers:
+   - `HarnessProfile` seam in [`subprocess-executor.ts`](../src/agent/subprocess-executor.ts) + `CLAUDE_PROFILE`
+     (a pure refactor — the generic engine of spawn/stream/timeout/retry/parse is unchanged; only argv,
+     model map, error policy, and activity summaries move behind the profile). `SubprocessStageExecutor`
+     takes an optional `profile` (default `CLAUDE_PROFILE`), so every existing call site is unchanged.
+     `HarnessAuthError` now carries a per-harness remedy; `classifyFailure(profile, …)` centralizes the
+     auth-fatal / rate-limit / generic split for both the exit-code and `is_error` paths.
+   - [`cursor-profile.ts`](../src/agent/cursor-profile.ts): `CURSOR_PROFILE` — `cursor-agent -p …
+     --output-format stream-json --force --model`, the system prompt folded into the prompt (no
+     `--append-system-prompt`), no `--allowedTools`, Cursor auth matcher, `authFatal: false` (§8.1),
+     provisional `summarize` reuse.
+   - Tests: `cursor-profile.test.ts` (argv, model map, and the auth-is-recoverable-not-fatal §8.1 guard) +
+     a Cursor participant in the shared `stageExecutorContract` proving the same parse path yields the
+     contract's "structured result out" (Cursor's missing token usage → `tokens: 0`, which the contract
+     allows). Full suite stays green.
+
+**Next PR (register + select Cursor):** add `cursor` to `HARNESS_IDS` + register its executor in
+`real-run` (with per-harness daemon config, since `--model`/`--permission-mode` are Claude-shaped), add its
+`HarnessCatalog` + generalize `getModels`/`setModel` to the run's harness catalog, then the `POST /runs`
 harness param + settings default (§5) + dashboard selector (§7). Everything below is the design for that
-work; the §8.1 fleet-abort finding and the strict-registry decision are already honored by PR 1.
+work; the §8.1 fleet-abort finding and the strict-registry decision are already honored.
 
 ## 0. Goal & scope
 
