@@ -24,6 +24,7 @@ import type { GitHub, Issue, IssueComment, PullRequest } from '../integration/gi
 import { isRepoResolver, singleRepoResolver, type RepoContext, type RepoResolver } from '../integration/github-resolver';
 import type { AgentPhase, Repository, Run } from '../store/repository';
 import type { AgentActivity, AgentRunResult, StageExecutor } from './executor';
+import { isHarnessResolver, singleHarness, type HarnessResolver } from './harness';
 import {
   parseEnvelope,
   parseReviewVerdict,
@@ -123,12 +124,16 @@ interface StagePrep {
 export class AgentRunner {
   private readonly systemPrompt: SystemPromptFn;
   private readonly githubResolver: RepoResolver;
+  private readonly harnesses: HarnessResolver;
   private readonly malformedRetryCap: number;
   private readonly onActivity?: (activity: PhaseActivity) => void;
 
   constructor(
     private readonly repo: Repository,
-    private readonly executor: StageExecutor,
+    // A single harness executor (mock / tests) or a multi-harness {@link HarnessResolver}; the former is
+    // normalized to a one-harness resolver so the rest of the runner resolves per-run identically. A run
+    // is dispatched to the executor its `harness` id names (per-run harness selection).
+    harnesses: StageExecutor | HarnessResolver,
     private agents: AgentsConfig,
     // A single repo's adapter (single-repo / mock / tests) or a multi-repo {@link RepoResolver}; the
     // former is normalized to a one-repo resolver so the rest of the runner is repo-agnostic (M8).
@@ -136,6 +141,7 @@ export class AgentRunner {
     options: AgentRunnerOptions = {},
   ) {
     this.systemPrompt = options.systemPrompt ?? defaultSystemPrompt;
+    this.harnesses = isHarnessResolver(harnesses) ? harnesses : singleHarness(harnesses);
     this.githubResolver = isRepoResolver(github)
       ? github
       : singleRepoResolver({ github, baseBranch: options.baseBranch ?? DEFAULT_BASE_BRANCH });
@@ -401,7 +407,11 @@ export class AgentRunner {
     const startedAt = Date.now();
     let result: AgentRunResult;
     try {
-      result = await this.executor.run({
+      // Resolve the run's harness inside the try: an unknown/unregistered harness throws here and is
+      // recorded as a failed agent_run + rethrown, so the loop escalates the one run (executor_error →
+      // needs_human) rather than silently switching harness or crashing the drain.
+      const executor = this.harnesses.for(run.harness);
+      result = await executor.run({
         runId: run.id,
         stage: run.currentState,
         phase,

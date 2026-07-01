@@ -122,6 +122,12 @@ describe('runs', () => {
     expect(repo.getRun(run.id)!.modelOverride).toBeNull();
   });
 
+  it('defaults a run to the claude-code harness, and stamps an explicit one', () => {
+    expect(newRun().harness).toBe('claude-code'); // omitted → the shipped default
+    const chosen = repo.createRun({ issueRef: 'o/r#9', repoRef: 'o/r', initialState: 'triage', fsmConfigVersion: 'v1', harness: 'cursor' });
+    expect(repo.getRun(chosen.id)!.harness).toBe('cursor'); // pinned per-run, round-trips through the store
+  });
+
   it('persists the branch (at plan) independently of the PR number (at tdd)', () => {
     const run = newRun();
     // Branch is created when `plan` begins, before any PR exists.

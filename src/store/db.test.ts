@@ -145,4 +145,20 @@ describe('migrate', () => {
     expect(userVersion(db)).toBe(LATEST_VERSION);
     db.close();
   });
+
+  it('retrofits a database created before runs.harness existed, backfilling to claude-code', () => {
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, flags TEXT NOT NULL DEFAULT '{}', archived_at TEXT)`);
+    db.prepare("INSERT INTO runs (status) VALUES ('running')").run(); // a pre-existing row, before the column
+    db.pragma('user_version = 5'); // past migrations 1–5; only migration 6 (harness) should run
+    expect(columnExists(db, 'runs', 'harness')).toBe(false);
+
+    runMigrations(db); // the migration adds the NOT NULL column with a constant default on a pre-existing DB
+
+    expect(columnExists(db, 'runs', 'harness')).toBe(true);
+    // The constant default backfills existing rows — no NULL harness that would break the runner's lookup.
+    expect((db.prepare('SELECT harness FROM runs').get() as { harness: string }).harness).toBe('claude-code');
+    expect(userVersion(db)).toBe(LATEST_VERSION);
+    db.close();
+  });
 });

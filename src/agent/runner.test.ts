@@ -13,6 +13,7 @@ import { FakeGitHub } from '../integration/github-fake';
 import { openDb } from '../store/db';
 import { Repository, type Run } from '../store/repository';
 import { StubExecutor, type AgentRunRequest, type StageExecutor, type StubHandler } from './executor';
+import { HarnessRegistry } from './harness';
 import { AgentRunner, phaseModel, type AgentRunnerOptions } from './runner';
 
 describe('phaseModel', () => {
@@ -454,5 +455,46 @@ describe('AgentRunner — per-run model override', () => {
     expect(models.produce).toBe('frontier'); // the Layer-5 executor resolves these logical names
     expect(models.self_review).toBe('frontier');
     expect(models.simplify).toBe('cheap');
+  });
+});
+
+describe('AgentRunner — per-run harness dispatch', () => {
+  /** A stub whose handler records the stages it saw, so we can tell which executor a run used. */
+  function recordingExecutor(seen: string[]): StubExecutor {
+    return new StubExecutor((req) => {
+      seen.push(req.stage);
+      return req.phase === 'self_review' ? { output: { acceptable: true } } : { output: { requestedTransition: 'proceed' } };
+    });
+  }
+
+  it('dispatches each run to the executor its `harness` id names, and no other', async () => {
+    const repo = new Repository(openDb(':memory:'));
+    const github = new FakeGitHub({ autoSeedIssues: true });
+    const seenDefault: string[] = [];
+    const seenOther: string[] = [];
+    const registry = new HarnessRegistry({ 'claude-code': recordingExecutor(seenDefault), other: recordingExecutor(seenOther) });
+    const runner = new AgentRunner(repo, registry, {}, github);
+
+    const runDefault = repo.createRun({ issueRef: 'o/r#1', repoRef: 'o/r', initialState: 'plan', fsmConfigVersion: 'v1' }); // harness → default 'claude-code'
+    const runOther = repo.createRun({ issueRef: 'o/r#2', repoRef: 'o/r', initialState: 'plan', fsmConfigVersion: 'v1', harness: 'other' });
+
+    await runner.runStage(runDefault);
+    expect(seenDefault).toContain('plan'); // the default-harness run hit the claude-code executor…
+    expect(seenOther).toEqual([]); // …and left the other one untouched
+
+    await runner.runStage(runOther);
+    expect(seenOther).toContain('plan'); // the 'other'-harness run hit the other executor
+  });
+
+  it('escalates a run whose harness is not registered (throws → the loop parks it, never a silent fallback)', async () => {
+    const repo = new Repository(openDb(':memory:'));
+    const github = new FakeGitHub({ autoSeedIssues: true });
+    const runner = new AgentRunner(repo, new HarnessRegistry({ 'claude-code': new StubExecutor(() => ({ output: {} })) }), {}, github);
+    const ghost = repo.createRun({ issueRef: 'o/r#1', repoRef: 'o/r', initialState: 'plan', fsmConfigVersion: 'v1', harness: 'ghost' });
+
+    // The runner rethrows the resolution error (recorded as a failed agent_run); the event loop turns a
+    // non-fatal throw into an `executor_error` escalation, so one bad harness parks its run, not the fleet.
+    await expect(runner.runStage(ghost)).rejects.toThrowError(/no executor registered for harness "ghost"/);
+    expect(repo.listAgentRuns(ghost.id).some((r) => !r.success)).toBe(true);
   });
 });

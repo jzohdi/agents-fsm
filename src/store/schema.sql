@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS runs (
   archived_at        TEXT,                              -- when an operator archived this (terminal) run out of the dashboard's Resolved lane; NULL = not archived
   cost_override      TEXT,                              -- operator override of the global cost ceiling (M8 B3): 'next_step' (one stage) | 'full' (whole run) | NULL (none)
   model_override     TEXT,                              -- per-run harness model override (the dashboard's model dropdown); NULL = use the daemon default. Read by the runner at each stage.
+  harness            TEXT    NOT NULL DEFAULT 'claude-code', -- which agent harness runs this, pinned at start (like fsm_config_version). No CHECK: the valid set is app-validated (isHarnessId) and ALTER can't add a CHECK later — keeps a fresh DB identical to a migrated one.
   created_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );

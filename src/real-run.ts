@@ -11,6 +11,7 @@
  */
 
 import { createSystemPromptFn } from './agent/prompts';
+import { DEFAULT_HARNESS, HarnessRegistry } from './agent/harness';
 import { AgentRunner, type AgentRunnerOptions, type PhaseActivity } from './agent/runner';
 import { DEFAULT_MODEL_MAP, SubprocessStageExecutor, type SubprocessExecutorOptions } from './agent/subprocess-executor';
 import { GitHubCli } from './integration/github-cli';
@@ -111,5 +112,8 @@ export function buildRealRunner(
   const recipe = config.cheap ? forceCheapModels(agents) : agents;
   const runnerOptions: AgentRunnerOptions = { systemPrompt: createSystemPromptFn(), baseBranch: config.baseBranch };
   if (options.onActivity) runnerOptions.onActivity = options.onActivity;
-  return new AgentRunner(repo, executor, recipe, github, runnerOptions);
+  // Register the Claude Code executor under the default harness id. A run's `harness` selects here; a
+  // second harness is one more entry (its executor), with no change to the runner/loop/store.
+  const harnesses = new HarnessRegistry({ [DEFAULT_HARNESS]: executor });
+  return new AgentRunner(repo, harnesses, recipe, github, runnerOptions);
 }

@@ -35,6 +35,9 @@ export interface Run {
   costOverride: CostOverride | null;
   /** Per-run harness model override (the dashboard's model dropdown); `null` = the daemon default. Read by the runner at each stage, so a change takes effect on the next stage. */
   modelOverride: string | null;
+  /** Which agent harness runs this, pinned at start (a {@link HarnessId} from the agent layer; kept as a
+   *  plain string here so the store never depends upward on the agent layer). Defaults to `claude-code`. */
+  harness: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -80,6 +83,8 @@ export interface CreateRunInput {
   repoRef: string;
   initialState: string;
   fsmConfigVersion: string;
+  /** Which harness runs this ({@link HarnessId}). Omit → the column default (`claude-code`). */
+  harness?: string;
 }
 
 /** Optional filters for {@link Repository.listRuns}; omit a field to not filter on it. */
@@ -191,6 +196,7 @@ interface RunRow {
   archived_at: string | null;
   cost_override: CostOverride | null;
   model_override: string | null;
+  harness: string;
   created_at: string;
   updated_at: string;
 }
@@ -262,6 +268,7 @@ function mapRun(r: RunRow): Run {
     archivedAt: r.archived_at,
     costOverride: r.cost_override,
     modelOverride: r.model_override,
+    harness: r.harness,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -364,12 +371,14 @@ export class Repository {
   // --- runs --------------------------------------------------------------------
 
   createRun(input: CreateRunInput): Run {
+    // `harness` is COALESCEd so an omitted one lands on the column default ('claude-code') — one source
+    // of truth for the default, and forward-ready for per-run harness selection.
     const info = this.db
       .prepare(
-        `INSERT INTO runs (issue_ref, repo_ref, current_state, status, fsm_config_version)
-         VALUES (?, ?, ?, 'running', ?)`,
+        `INSERT INTO runs (issue_ref, repo_ref, current_state, status, fsm_config_version, harness)
+         VALUES (?, ?, ?, 'running', ?, COALESCE(?, 'claude-code'))`,
       )
-      .run(input.issueRef, input.repoRef, input.initialState, input.fsmConfigVersion);
+      .run(input.issueRef, input.repoRef, input.initialState, input.fsmConfigVersion, input.harness ?? null);
     const run = this.getRun(Number(info.lastInsertRowid));
     if (!run) throw new Error('createRun: row vanished immediately after insert');
     return run;

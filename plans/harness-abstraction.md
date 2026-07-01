@@ -1,6 +1,39 @@
 # Multi-harness support (Claude Code + Cursor) — implementation plan
 
-Status: proposed · Author: design spike · Supersedes nothing · Depends on: Milestone 8 (complete)
+Status: in progress · Author: design spike · Supersedes nothing · Depends on: Milestone 8 (complete)
+
+## Implementation status & revisions
+
+Two things changed since the plan below was first written; read this first.
+
+1. **A per-run *model* selection feature already landed** (commits "ability to select models" / "repository
+   enrollment and selection improvements"): [`harness-models.ts`](../src/agent/harness-models.ts) defines a
+   per-harness `HarnessCatalog` (`CLAUDE_CODE_CATALOG`, `harness: 'claude-code'`), a `runs.model_override`
+   column, and `GET /models` + `setModel`. Harness selection layers *above* this: a run picks a harness,
+   and that harness determines the model catalog. To stay consistent, the harness id is **`claude-code`**
+   (matching the catalog's `harness` field), not `claude` as the draft below assumed.
+
+2. **PR 1 (shipped on branch `harness-selection-foundation`) — per-run harness selection plumbing,
+   Claude-Code-only, behavior-preserving.** It is a tighter slice than the draft "Phase 1": the
+   `HarnessProfile` executor refactor and the settings/default-persistence were **deferred** (YAGNI — a
+   profile with only one profile, and a persisted default with nothing yet able to change it, are
+   speculative until the second harness exists). PR 1 delivers:
+   - [`src/agent/harness.ts`](../src/agent/harness.ts): `HarnessId`, `HARNESS_IDS`, `DEFAULT_HARNESS`,
+     `isHarnessId`, `HarnessResolver`, `HarnessRegistry` (strict — throws on an unregistered id),
+     `singleHarness`, `isHarnessResolver`.
+   - `runs.harness` column (migration 6, `NOT NULL DEFAULT 'claude-code'`, no CHECK — §6.1) + `Run.harness`
+     (typed `string` in the store to avoid an upward store→agent dependency) + `CreateRunInput.harness`.
+   - `AgentRunner` accepts `StageExecutor | HarnessResolver` and resolves the executor per-run *inside* its
+     per-phase try, so an unregistered harness escalates that one run (`executor_error`), never the fleet.
+   - Wiring: `real-run` registers the Claude Code executor under `claude-code`; mock/tests pass a bare
+     executor (normalized via `singleHarness`).
+   - Tests: `harness.test.ts`, a runner dispatch-by-harness test (+ unknown-harness escalation), a store
+     round-trip + default test, and a migration-6 backfill test. Full suite stays green.
+
+**Next PR (Cursor):** the `HarnessProfile` refactor + `CURSOR_PROFILE` (§3.2, §4), register `cursor`, add
+its `HarnessCatalog`, generalize `getModels`/`setModel` to the run's harness catalog, add the `POST /runs`
+harness param + settings default (§5) + dashboard selector (§7). Everything below is the design for that
+work; the §8.1 fleet-abort finding and the strict-registry decision are already honored by PR 1.
 
 ## 0. Goal & scope
 

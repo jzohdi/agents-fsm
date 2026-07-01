@@ -78,6 +78,15 @@ export const MIGRATIONS: Migration[] = [
     // ALTER ADD COLUMN retrofits a pre-existing DB; a fresh DB already has it from schema.sql.
     apply: (db) => addColumnIfMissing(db, 'runs', 'model_override', 'TEXT'),
   },
+  {
+    version: 6,
+    name: 'add runs.harness',
+    // Which agent harness runs each row (multi-harness support). SQLite allows ADD COLUMN with a
+    // constant default, so pre-existing rows backfill to 'claude-code' — the shipped default — and the
+    // column is NOT NULL from the start. No CHECK on the value: ALTER can't add one, so imposing it here
+    // would make a fresh DB (schema.sql) diverge from a migrated one; the valid set is app-validated.
+    apply: (db) => addColumnIfMissing(db, 'runs', 'harness', "TEXT NOT NULL DEFAULT 'claude-code'"),
+  },
 ];
 
 /** The schema version a fully-migrated database reports — the highest defined migration. */
