@@ -599,13 +599,15 @@ flags: `--db <path>` (persist state, e.g. `./.agent-work/run.db`), `--config <pa
 ### 9.3 Run the daemon + dashboard
 ```
 npm run build:dashboard                              # build the SPA the daemon serves
-npm start -- serve --config ./fsm.json --db ./.agent-work/run.db
+npm start -- serve --repo <owner/repo> --config ./fsm.json
 # open http://127.0.0.1:4319
 ```
-The daemon recovers crash-stranded events on startup, runs the reply poller, and serves the
-dashboard. Start runs from the dashboard's **File a new run** bar (GitHub-backed autocomplete) or by
-`POST /runs`. For dashboard development with hot reload, `npm run dev` (one-command build-watch +
-in-process daemon) or `npm run dev:dashboard` (Vite HMR against a running daemon).
+The daemon **persists to disk by default** (`<--work>/run.db`, i.e. `./.agent-work/run.db`), so it
+survives restarts — on startup it recovers crash-stranded events and resumes queued work. Pass
+`--db <path>` to choose the file, or `--db :memory:` for a throwaway (ephemeral) daemon; the startup
+banner prints which one is in use. Start runs from the dashboard's **File a new run** bar (GitHub-backed
+autocomplete) or by `POST /runs`. For dashboard development with hot reload, `npm run dev` (one-command
+build-watch + in-process daemon) or `npm run dev:dashboard` (Vite HMR against a running daemon).
 
 **Concurrency (Milestone 8 Phase B).** The daemon advances runs in parallel — **parallel across runs,
 serial within a run** (two stages of one run never overlap; they share a working tree). The global cap

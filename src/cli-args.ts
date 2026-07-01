@@ -79,14 +79,22 @@ export function parseCliArgs(argv: string[]): CliArgs {
       'cost-ceiling': { type: 'string' },
     },
   });
+  const mock = values.mock ?? false;
+  const work = values.work ?? './.agent-work';
+  // A `serve` daemon must survive restarts — its `recover()` reclaims stranded events and resumes
+  // queued work — so default it to an **on-disk** DB under the working root. Without this, a daemon
+  // silently loses every run on shutdown. The one-shot CLI and any `--mock` run stay ephemeral
+  // (`:memory:`): a single watched run / a no-cost test has no state worth persisting.
+  const serving = positionals[0] === 'serve';
+  const db = values.db ?? (serving && !mock ? `${work}/run.db` : ':memory:');
   return {
     positionals,
-    db: values.db ?? ':memory:',
-    mock: values.mock ?? false,
+    db,
+    mock,
     cheap: values.cheap ?? false,
     repo: values.repo,
     base: values.base ?? 'main',
-    work: values.work ?? './.agent-work',
+    work,
     cloneUrl: values['clone-url'],
     localRepo: values['local-repo'],
     permissionMode: values['permission-mode'],

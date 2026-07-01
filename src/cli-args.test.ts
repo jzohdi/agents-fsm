@@ -68,4 +68,21 @@ describe('parseCliArgs', () => {
   it('errors loudly on an unknown flag instead of ignoring it', () => {
     expect(() => parseCliArgs(['owner/repo#1', '--bogus'])).toThrow();
   });
+
+  describe('DB default (serve persists across restarts; one-shot/mock stay ephemeral)', () => {
+    it('defaults `serve` to an on-disk DB under the working root so a daemon survives a restart', () => {
+      expect(parseCliArgs(['serve', '--repo', 'o/r']).db).toBe('./.agent-work/run.db');
+      expect(parseCliArgs(['serve', '--repo', 'o/r', '--work', '/data/agent']).db).toBe('/data/agent/run.db');
+    });
+
+    it('keeps `serve --mock` and the one-shot CLI ephemeral (:memory:)', () => {
+      expect(parseCliArgs(['serve', '--mock']).db).toBe(':memory:');
+      expect(parseCliArgs(['owner/repo#1']).db).toBe(':memory:'); // one-shot run
+    });
+
+    it('an explicit --db always wins', () => {
+      expect(parseCliArgs(['serve', '--repo', 'o/r', '--db', ':memory:']).db).toBe(':memory:');
+      expect(parseCliArgs(['serve', '--repo', 'o/r', '--db', '/tmp/x.db']).db).toBe('/tmp/x.db');
+    });
+  });
 });

@@ -34,7 +34,12 @@ export async function serve(args: CliArgs): Promise<void> {
   await listen(server, args.port);
   const config = orchestrator.getConfig();
   console.log(`agent-fleet daemon listening on http://localhost:${args.port} (FSM config ${config.version}${args.mock ? ', mock mode' : ', real mode'})`);
-  console.log('  POST /runs · GET /runs · GET /runs/:id · POST /runs/:id/{pause,resume,stop,revert} · GET|POST /repos · GET|PUT /config · GET /stream');
+  console.log(
+    args.db === ':memory:'
+      ? '  ⚠ state: in-memory — runs are LOST on shutdown. Pass --db <path> to persist across restarts.'
+      : `  state: ${args.db} (persists across restarts; the daemon recovers queued work on startup)`,
+  );
+  console.log('  POST /runs · GET /runs · GET /runs/:id · POST /runs/:id/{pause,resume,stop,revert,archive,unarchive,cost-override} · GET|POST /repos · GET /cost · GET|PUT /config · GET /stream');
   if (!existsSync(DEFAULT_PUBLIC_DIR)) {
     console.warn('  ⚠ dashboard not built — run `npm run build:dashboard` (or `npm run dev:dashboard` for HMR). The API works regardless.');
   }
