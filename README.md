@@ -624,9 +624,16 @@ loopback; the dashboard is a pure client of its API (§3.3 Layer 7).
 - **Node ≥ 20** and a working **`gh`** (GitHub CLI), authenticated (`gh auth login`) — the real
   Git/GitHub adapter shells out to it.
 - **Secrets** live in the environment, never in SQLite. Copy `.env.example` → `.env` and fill in
-  `GITHUB_TOKEN` (issues / PRs / branches / comments) and `ANTHROPIC_API_KEY` (the agents). `.env`
-  is gitignored — never commit it.
-- `npm install` once.
+  `GITHUB_TOKEN` (issues / PRs / branches / comments) and, for the default Claude Code harness,
+  `ANTHROPIC_API_KEY` (see the harness bullet). `.env` is gitignored — never commit it.
+- **A harness (the agent runner).** Runs execute on a selectable harness (§9.8); install + authenticate
+  the one(s) you'll run — only those you actually use need credentials:
+  - **Claude Code (default):** the `claude` CLI on `PATH`, authenticated via `claude login` or
+    `ANTHROPIC_API_KEY`.
+  - **Cursor (optional):** the `cursor-agent` CLI on `PATH`, authenticated via `cursor-agent login` or
+    `CURSOR_API_KEY`. Not needed unless you select the Cursor harness.
+- `npm install` once. The SQLite schema is created/migrated automatically on first open — no manual
+  migration step, and an existing daemon DB upgrades in place on the next `serve`.
 
 ### 9.2 Run a single issue (one-shot CLI)
 ```
@@ -708,4 +715,42 @@ automatically once the PR is **merged or closed** (or if you **archive** the run
 Don't want to wait for the next poll? Open the run in the dashboard: a watched run shows a **"watching
 PR #N for feedback"** chip and a **Check now** button that polls that one PR immediately and tells you
 what it found (re-opened / still watching / stopped).
+
+### 9.8 Choose a harness (Claude Code or Cursor)
+Each run executes on a **harness** — the headless agent CLI that owns the within-stage tool-use loop
+(§3.3 Layer 5). Two ship today: **`claude-code`** (default) and **`cursor`**. A run's harness is
+**pinned at start** (like its FSM config version), so it uses one harness for its whole life, including
+across crash/resume. If you only ever use the default, there's nothing to configure — this section is
+only needed to run Cursor or change the default.
+
+**The default harness** is resolved at boot with this precedence: the **`--harness <id>` flag** /
+**`FLEET_HARNESS` env** (a session override — a bad value fails fast at startup, and it does *not*
+overwrite your remembered choice) → the **persisted default** (set from the dashboard) → **`claude-code`**.
+
+**Selecting a harness** (a run stamps whichever was chosen at click/submit time):
+- **Dashboard (recommended).** The **Harness** dropdown in the *File a new run* bar is a unified
+  control: changing it **persists** the fleet default *and* is the harness the next run starts with. A
+  run whose harness isn't the current default shows a small badge on its card.
+- **Daemon:** `npm start -- serve --harness cursor …` (or `FLEET_HARNESS=cursor npm start -- serve …`).
+- **One-shot CLI:** `npm start -- <owner/repo#issue> --repo <owner/repo> --harness cursor`.
+- **API:** `POST /runs { "issueRef": "...", "harness": "cursor" }` (omit → the default; an unknown id →
+  `400`). `GET /settings` returns the current default + selectable ids; `PUT /settings/default-harness
+  { "harness": "cursor" }` changes it live (no restart) and persists it.
+
+**Before running Cursor:**
+1. Install the `cursor-agent` CLI and authenticate it (`cursor-agent login` or `CURSOR_API_KEY`) — see §9.1.
+2. **Confirm the model ids.** The shipped Cursor model map/catalog (`src/agent/cursor-profile.ts`,
+   `src/agent/harness-models.ts`) uses *provisional* ids (`sonnet-4.5`, `gpt-5`); check them against
+   `cursor-agent --list-models` and adjust if they differ, or Cursor will reject `--model`.
+
+**Caveats (accepted for now):**
+- **Cursor doesn't report token/cost usage**, so its runs record `0`. The global cost ceiling (§9.3) and
+  the per-run token budget therefore don't gate Cursor runs, and the dashboard shows **"cost n/a"** (never
+  a misleading "$0.00"). A cost estimator is deferred.
+- **Cursor auth failures are non-fatal**: an unauthenticated `cursor-agent` escalates only *its own* runs
+  to `needs_human` (with a login remedy in the reason) — Claude Code runs keep flowing. (A Claude auth
+  failure still aborts the whole drain, as before.)
+- The per-run **model dropdown** appears only for a run whose harness matches the loaded catalog (i.e. the
+  current default's), so it never offers wrong-harness models; per-harness catalogs for off-default runs
+  are deferred.
 
