@@ -71,6 +71,13 @@ export const MIGRATIONS: Migration[] = [
     // ALTER ADD COLUMN retrofits a pre-existing DB; a fresh DB already has it from schema.sql.
     apply: (db) => addColumnIfMissing(db, 'runs', 'cost_override', 'TEXT'),
   },
+  {
+    version: 5,
+    name: 'add runs.model_override',
+    // Per-run harness model override (the dashboard's model dropdown). Additive column, so a plain
+    // ALTER ADD COLUMN retrofits a pre-existing DB; a fresh DB already has it from schema.sql.
+    apply: (db) => addColumnIfMissing(db, 'runs', 'model_override', 'TEXT'),
+  },
 ];
 
 /** The schema version a fully-migrated database reports — the highest defined migration. */

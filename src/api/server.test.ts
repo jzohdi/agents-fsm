@@ -15,7 +15,8 @@ import { loadDefaultConfig } from '../fsm/config';
 import { openDb } from '../store/db';
 import { Repository } from '../store/repository';
 import { AgentRunner } from '../agent/runner';
-import { StubExecutor, goldenPathHandler } from '../agent/executor';
+import { StubExecutor, goldenPathHandler, type StubHandler } from '../agent/executor';
+import { CLAUDE_CODE_CATALOG } from '../agent/harness-models';
 import { FakeGitHub } from '../integration/github-fake';
 import { singleRepoResolver } from '../integration/github-resolver';
 import { Orchestrator } from './orchestrator';
@@ -28,12 +29,12 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((s) => new Promise<void>((r) => s.close(() => r()))));
 });
 
-async function start(opts: { publicDir?: string } = {}): Promise<{ base: string; orchestrator: Orchestrator; repo: Repository; github: FakeGitHub }> {
+async function start(opts: { publicDir?: string; handler?: StubHandler } = {}): Promise<{ base: string; orchestrator: Orchestrator; repo: Repository; github: FakeGitHub }> {
   const loaded = loadDefaultConfig();
   const repo = new Repository(openDb(':memory:'));
   const github = new FakeGitHub({ autoSeedIssues: true });
   const broadcaster = new Broadcaster();
-  const runner = new AgentRunner(repo, new StubExecutor(goldenPathHandler), loaded.agents, github, {
+  const runner = new AgentRunner(repo, new StubExecutor(opts.handler ?? goldenPathHandler), loaded.agents, github, {
     onActivity: (activity) => broadcaster.publish({ type: 'activity', activity }),
   });
   const resolver = singleRepoResolver({ github, baseBranch: 'main' });
@@ -45,6 +46,8 @@ async function start(opts: { publicDir?: string } = {}): Promise<{ base: string;
     suggestionSource: { suggest: (q: string) => github.suggestIssues(q) },
     resolver,
     defaultWorkingRoot: './w',
+    modelCatalog: CLAUDE_CODE_CATALOG,
+    defaultModel: 'opus',
   });
   const server = createApiServer(orchestrator, opts.publicDir ? { publicDir: opts.publicDir } : {});
   servers.push(server);
@@ -178,6 +181,31 @@ describe('HTTP API', () => {
     expect(await (await fetch(`${base}/suggestions`)).json()).toEqual(
       expect.arrayContaining([expect.objectContaining({ ref: 'acme/web#318' })]),
     ); // no query → all seeded issues
+  });
+
+  it('serves the harness model catalog and sets/clears/validates a run model override', async () => {
+    // A malformed-output handler parks the run in needs_human (non-terminal), so the model override
+    // applies regardless of how far the background drain has progressed — no race on the run finishing.
+    const { base, repo } = await start({ handler: () => ({ output: { unparseable: true } }) });
+
+    const models = (await (await fetch(`${base}/models`)).json()) as { harness: string; defaultModel: string; models: Array<{ id: string }> };
+    expect(models.harness).toBe('claude-code');
+    expect(models.defaultModel).toBe('opus');
+    expect(models.models.map((m) => m.id)).toEqual(expect.arrayContaining(['opus', 'sonnet', 'haiku']));
+
+    const run = (await (await fetch(`${base}/runs`, { method: 'POST', body: JSON.stringify({ issueRef: 'o/r#1' }) })).json()) as { id: number };
+
+    const set = await fetch(`${base}/runs/${run.id}/model`, { method: 'POST', body: JSON.stringify({ model: 'sonnet' }) });
+    expect(set.status).toBe(200);
+    expect(((await set.json()) as { modelOverride: string | null }).modelOverride).toBe('sonnet');
+
+    const clear = await fetch(`${base}/runs/${run.id}/model`, { method: 'POST', body: JSON.stringify({ model: null }) });
+    expect(((await clear.json()) as { modelOverride: string | null }).modelOverride).toBeNull();
+    expect(repo.getRun(run.id)!.modelOverride).toBeNull();
+
+    // An unknown model is a 400; a missing model field is a 400.
+    expect((await fetch(`${base}/runs/${run.id}/model`, { method: 'POST', body: JSON.stringify({ model: 'gpt-4' }) })).status).toBe(400);
+    expect((await fetch(`${base}/runs/${run.id}/model`, { method: 'POST', body: JSON.stringify({}) })).status).toBe(400);
   });
 
   it('streams live events over SSE', async () => {

@@ -42,6 +42,23 @@ export const DEFAULT_MODELS: Record<AgentPhase, string> = {
   simplify: 'cheap',
 };
 
+/**
+ * The logical role a per-run model override replaces — the primary produce/review model. This mirrors
+ * the `--model` flag, which remaps this same role daemon-wide (see `real-run` `modelMap.frontier`), so
+ * an operator's per-run pick affects the real work while the cheaper `simplify` pass stays cheap.
+ */
+export const OVERRIDE_ROLE = 'frontier';
+
+/**
+ * The concrete model to run a phase under. When a run carries a `modelOverride` (the dashboard's model
+ * dropdown) it replaces the {@link OVERRIDE_ROLE} logical name; every other phase (and an unset override)
+ * falls through to the recipe's logical model for the Layer-5 executor to resolve as before. Pure and
+ * exported so the override precedence is unit-tested directly.
+ */
+export function phaseModel(logical: string, override: string | null): string {
+  return override && logical === OVERRIDE_ROLE ? override : logical;
+}
+
 /** Default base branch a run's working branch is cut from and diffed against. */
 export const DEFAULT_BASE_BRANCH = 'main';
 /** Default number of extra attempts on malformed output before escalating (plans/milestone-4.md §3.5). */
@@ -366,7 +383,10 @@ export class AgentRunner {
 
   /** One phase invocation: call the executor (harness), record telemetry + usage, return the raw output. */
   private async invokePhase(run: Run, phase: AgentPhase, recipe: Recipe, prep: StagePrep, extra: PhaseExtra): Promise<unknown> {
-    const model = recipe.models[phase] ?? DEFAULT_MODELS[phase];
+    // The run's model override (dashboard dropdown) replaces the frontier role; `run` is the snapshot the
+    // loop loaded when this stage was dispatched, so the whole stage uses one model and a mid-run change
+    // is picked up by the *next* stage's fresh dispatch (README event loop). null override → default.
+    const model = phaseModel(recipe.models[phase] ?? DEFAULT_MODELS[phase], run.modelOverride);
     const input = {
       issueRef: run.issueRef,
       repoRef: run.repoRef,

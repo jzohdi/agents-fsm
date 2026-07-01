@@ -132,4 +132,17 @@ describe('migrate', () => {
     expect(userVersion(db)).toBe(LATEST_VERSION);
     db.close();
   });
+
+  it('retrofits a database created before runs.model_override existed', () => {
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, flags TEXT NOT NULL DEFAULT '{}', archived_at TEXT)`);
+    db.pragma('user_version = 4'); // past migrations 1–4; only migration 5 (model_override) should run
+    expect(columnExists(db, 'runs', 'model_override')).toBe(false);
+
+    runMigrations(db); // the migration adds the column on a pre-existing DB
+
+    expect(columnExists(db, 'runs', 'model_override')).toBe(true);
+    expect(userVersion(db)).toBe(LATEST_VERSION);
+    db.close();
+  });
 });

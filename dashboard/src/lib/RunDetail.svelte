@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { ui, control, revertRun, overrideCost } from './store.svelte';
+  import { ui, control, revertRun, overrideCost, setModel } from './store.svelte';
+  import type { HarnessModel } from './types';
   import { telemetryModel, escalationModel, activityLane, costStatusModel, issueUrl, prUrl, branchUrl, fmtCost, fmtDuration, fmtTokens, escapeHtml, humanizeState } from './render';
   import StateMachine from './StateMachine.svelte';
   import ScrollArea from './ScrollArea.svelte';
@@ -29,9 +30,19 @@
   const revertable = $derived(
     ui.config ? Object.entries(ui.config.fsm.states).filter(([, d]) => !d.terminal).map(([name]) => name) : [],
   );
-  const model = $derived(
-    detail?.agentRuns?.find((a) => a.model)?.model ?? 'claude-opus-4-8',
-  );
+  // The run's effective model for the live badge: its override, else the daemon default.
+  const model = $derived(run?.modelOverride ?? ui.models?.defaultModel ?? 'default');
+  // Catalog models grouped for the dropdown's <optgroup>s (ungrouped models under the '' key).
+  const modelGroups = $derived.by(() => {
+    const cat = ui.models;
+    if (!cat) return [] as Array<[string, HarnessModel[]]>;
+    const m = new Map<string, HarnessModel[]>();
+    for (const hm of cat.models) {
+      const g = hm.group ?? '';
+      (m.get(g) ?? m.set(g, []).get(g)!).push(hm);
+    }
+    return [...m.entries()];
+  });
 
   let revertTo = $state('');
   let revertReason = $state('');
@@ -97,6 +108,27 @@
       </div>
     </div>
     <div class="af-controls">
+      {#if !terminal && ui.models && ui.models.models.length}
+        <label class="af-model">
+          <span class="lbl">model</span>
+          <select
+            value={run.modelOverride ?? ''}
+            onchange={(e) => setModel(run.id, e.currentTarget.value || null)}
+            aria-label="run model"
+          >
+            <option value="">Default{ui.models.defaultModel ? ` — ${ui.models.defaultModel}` : ''}</option>
+            {#each modelGroups as [group, models] (group)}
+              {#if group}
+                <optgroup label={group}>
+                  {#each models as m (m.id)}<option value={m.id}>{m.label}</option>{/each}
+                </optgroup>
+              {:else}
+                {#each models as m (m.id)}<option value={m.id}>{m.label}</option>{/each}
+              {/if}
+            {/each}
+          </select>
+        </label>
+      {/if}
       {#if run.status === 'running'}
         <button type="button" onclick={() => control('pause')}>Pause</button>
       {/if}

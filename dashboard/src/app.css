@@ -236,6 +236,13 @@ input, textarea, button, select { font: inherit; }
 .af-revert input { width: 150px; }
 .af-revert input:focus, .af-revert select:focus { outline: none; background: var(--paper2); }
 
+/* Per-run model dropdown, in the run controls (matches the revert select's inline look). */
+.af-model { display: flex; align-items: center; border-left: 1px solid var(--rule); }
+.af-model:first-child { border-left: 0; }
+.af-model .lbl { padding: 9px 0 9px 14px; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink4); }
+.af-model select { border: 0; background: transparent; padding: 9px 12px; font-family: var(--mono); font-size: 12px; color: var(--ink); cursor: pointer; }
+.af-model select:focus { outline: none; background: var(--paper2); }
+
 /* Global cost ceiling (M8 B3): the header chip + per-run override controls. */
 .af-cost { display: flex; align-items: center; gap: 7px; font-weight: 600; font-size: 12.5px; color: var(--ink2); font-family: var(--mono); }
 .af-cost .d { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }

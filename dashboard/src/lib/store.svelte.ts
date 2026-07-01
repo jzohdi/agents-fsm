@@ -7,7 +7,7 @@
  */
 
 import { request } from './api';
-import type { LoadedConfig, LogLine, Repo, Run, RunDetail, Suggestion } from './types';
+import type { LoadedConfig, LogLine, ModelCatalog, Repo, Run, RunDetail, Suggestion } from './types';
 
 export const ui = $state({
   runs: [] as Run[], // newest first
@@ -28,6 +28,8 @@ export const ui = $state({
   // Global cost ceiling (Milestone 8 B3): the daemon's configured ceiling (null = off), fetched once.
   // Active spend is derived live from `ui.runs` in `costStatusModel`, so only this constant is fetched.
   costCeiling: null as number | null,
+  // The active harness's model catalog + default (the per-run model dropdown), fetched once at startup.
+  models: null as ModelCatalog | null,
 });
 
 /** Runs scoped to the active repo tab (all repos when no filter). */
@@ -136,6 +138,28 @@ export async function loadCost(): Promise<void> {
     ui.costCeiling = (await request<{ ceiling: number | null }>('GET', '/cost')).ceiling;
   } catch {
     ui.costCeiling = null; // older daemon without /cost — treat as no ceiling
+  }
+}
+
+/** Fetch the harness model catalog once (the model dropdown); tolerant of an older daemon (no route). */
+export async function loadModels(): Promise<void> {
+  try {
+    ui.models = await request<ModelCatalog>('GET', '/models');
+  } catch {
+    ui.models = null; // older daemon without /models — the dropdown just won't render
+  }
+}
+
+/**
+ * Set (or clear, with `null`) the selected run's harness model. Takes effect on the run's next stage
+ * (the current stage keeps its model). Optimistically reflected via the returned run + a status event.
+ */
+export async function setModel(id: number, model: string | null): Promise<void> {
+  try {
+    upsertRun(await request<Run>('POST', `/runs/${id}/model`, { model }));
+    if (id === ui.selectedId) await refreshDetail();
+  } catch (err) {
+    banner(`Model change failed: ${(err as Error).message}`, 'err');
   }
 }
 

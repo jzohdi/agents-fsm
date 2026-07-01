@@ -33,6 +33,8 @@ export interface Run {
   archivedAt: string | null;
   /** Operator override of the global cost ceiling (M8 B3): `next_step` = one more stage, `full` = the whole run, `null` = none. */
   costOverride: CostOverride | null;
+  /** Per-run harness model override (the dashboard's model dropdown); `null` = the daemon default. Read by the runner at each stage, so a change takes effect on the next stage. */
+  modelOverride: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -188,6 +190,7 @@ interface RunRow {
   flags: string;
   archived_at: string | null;
   cost_override: CostOverride | null;
+  model_override: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -258,6 +261,7 @@ function mapRun(r: RunRow): Run {
     flags: JSON.parse(r.flags) as Record<string, boolean>,
     archivedAt: r.archived_at,
     costOverride: r.cost_override,
+    modelOverride: r.model_override,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -434,6 +438,15 @@ export class Repository {
   /** Set (or clear, with `null`) a run's cost-ceiling override (M8 B3). See {@link CostOverride}. */
   setCostOverride(id: number, mode: CostOverride | null): void {
     this.db.prepare(`UPDATE runs SET cost_override = ?, updated_at = ${NOW} WHERE id = ?`).run(mode, id);
+  }
+
+  /**
+   * Set (or clear, with `null`) a run's harness model override — the dashboard's model dropdown. The
+   * runner reads it fresh at each stage, so a change takes effect on the run's next stage (the current
+   * stage keeps the model it started with).
+   */
+  setRunModelOverride(id: number, model: string | null): void {
+    this.db.prepare(`UPDATE runs SET model_override = ?, updated_at = ${NOW} WHERE id = ?`).run(model, id);
   }
 
   /**

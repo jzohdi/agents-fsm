@@ -19,8 +19,24 @@ export interface Run {
   archivedAt: string | null;
   /** Operator override of the global cost ceiling (M8 B3): one more stage, the whole run, or none. */
   costOverride?: 'next_step' | 'full' | null;
+  /** Per-run harness model override (the model dropdown); null = the daemon default. Takes effect next stage. */
+  modelOverride: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/** One selectable harness model (the model dropdown), from `GET /models`. */
+export interface HarnessModel {
+  id: string;
+  label: string;
+  group?: string;
+}
+
+/** The active harness's model catalog + the daemon default (`GET /models`). */
+export interface ModelCatalog {
+  harness: string | null;
+  models: HarnessModel[];
+  defaultModel: string | null;
 }
 
 export interface Transition {

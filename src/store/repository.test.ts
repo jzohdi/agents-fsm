@@ -111,6 +111,17 @@ describe('runs', () => {
     expect(repo.sumActiveCost()).toBe(0);
   });
 
+  it('sets and clears a run model override (defaults to null)', () => {
+    const run = newRun();
+    expect(repo.getRun(run.id)!.modelOverride).toBeNull();
+    repo.setRunModelOverride(run.id, 'sonnet');
+    expect(repo.getRun(run.id)!.modelOverride).toBe('sonnet');
+    repo.setRunModelOverride(run.id, 'claude-opus-4-8');
+    expect(repo.getRun(run.id)!.modelOverride).toBe('claude-opus-4-8');
+    repo.setRunModelOverride(run.id, null); // clear → back to the daemon default
+    expect(repo.getRun(run.id)!.modelOverride).toBeNull();
+  });
+
   it('persists the branch (at plan) independently of the PR number (at tdd)', () => {
     const run = newRun();
     // Branch is created when `plan` begins, before any PR exists.

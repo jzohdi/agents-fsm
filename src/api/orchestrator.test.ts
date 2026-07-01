@@ -24,6 +24,7 @@ import {
 } from '../agent/executor';
 import { FakeGitHub } from '../integration/github-fake';
 import type { GitHub } from '../integration/github';
+import { CLAUDE_CODE_CATALOG } from '../agent/harness-models';
 import { EnrolledRepoResolver, singleRepoResolver, type RepoResolver } from '../integration/github-resolver';
 import { ApiError, Orchestrator } from './orchestrator';
 import { Broadcaster, type StreamEvent } from './stream';
@@ -66,6 +67,8 @@ function setup(
     broadcaster,
     suggestionSource: { suggest: (q: string) => github.suggestIssues(q) },
     resolver,
+    modelCatalog: CLAUDE_CODE_CATALOG,
+    defaultModel: 'opus',
     ...(opts.defaultWorkingRoot ? { defaultWorkingRoot: opts.defaultWorkingRoot } : {}),
     ...(opts.configPath ? { configPath: opts.configPath } : {}),
     ...(opts.concurrency !== undefined ? { concurrency: opts.concurrency } : {}),
@@ -238,6 +241,77 @@ describe('Orchestrator — queries', () => {
     const resolver = singleRepoResolver({ github: new FakeGitHub(), baseBranch: 'main' });
     const noGh = new Orchestrator({ repo, runner, config: loaded, broadcaster, resolver }); // suggestionSource omitted
     expect(await noGh.suggestIssues('anything')).toEqual([]);
+  });
+
+  it('reports the harness model catalog + the daemon default (empty when unconfigured)', () => {
+    const { orchestrator } = setup();
+    const models = orchestrator.getModels();
+    expect(models.harness).toBe('claude-code');
+    expect(models.defaultModel).toBe('opus');
+    expect(models.models.map((m) => m.id)).toEqual(expect.arrayContaining(['opus', 'sonnet', 'haiku']));
+
+    const loaded = loadDefaultConfig();
+    const repo = new Repository(openDb(':memory:'));
+    const broadcaster = new Broadcaster();
+    const runner = new AgentRunner(repo, new StubExecutor(goldenPathHandler), loaded.agents, new FakeGitHub());
+    const resolver = singleRepoResolver({ github: new FakeGitHub(), baseBranch: 'main' });
+    const noCatalog = new Orchestrator({ repo, runner, config: loaded, broadcaster, resolver }); // modelCatalog omitted
+    expect(noCatalog.getModels()).toEqual({ harness: null, models: [], defaultModel: null });
+  });
+});
+
+describe('Orchestrator — model selection', () => {
+  it('sets, clears, and validates a run model override; broadcasts the change', async () => {
+    const { orchestrator, repo, events } = setup();
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+
+    orchestrator.setModel(run.id, 'sonnet');
+    expect(repo.getRun(run.id)!.modelOverride).toBe('sonnet');
+    // The change is broadcast so connected dashboards update live.
+    expect(events.some((e) => e.type === 'status' && e.runId === run.id)).toBe(true);
+
+    orchestrator.setModel(run.id, null); // clear → back to the daemon default
+    expect(repo.getRun(run.id)!.modelOverride).toBeNull();
+
+    // A model the harness catalog doesn't list is a 400, and never stored.
+    expect(() => orchestrator.setModel(run.id, 'gpt-4')).toThrow(/unknown model/);
+    expect(repo.getRun(run.id)!.modelOverride).toBeNull();
+
+    await orchestrator.settle();
+  });
+
+  it('404s an unknown run and 409s a terminal run', async () => {
+    const { orchestrator } = setup();
+    expect(() => orchestrator.setModel(99999, 'opus')).toThrow(/not found/);
+
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle(); // drives it to done (terminal)
+    try {
+      orchestrator.setModel(run.id, 'opus');
+      throw new Error('expected setModel to throw on a terminal run');
+    } catch (err) {
+      expect((err as ApiError).status).toBe(409);
+    }
+  });
+
+  it('applies a mid-run model change on the next stage, not the current one (through the loop)', async () => {
+    // Record the model each stage's produce phase asked for, and flip the override while `plan` runs.
+    const seen: Record<string, string> = {};
+    const { orchestrator } = setup({
+      handler: (req) => {
+        if (req.phase === 'produce' && !(req.stage in seen)) seen[req.stage] = req.model;
+        if (req.stage === 'plan' && req.phase === 'produce') orchestrator.setModel(req.runId, 'sonnet');
+        return goldenPathHandler(req);
+      },
+    });
+
+    orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle();
+
+    expect(seen.triage).toBe('frontier'); // before the change
+    expect(seen.plan).toBe('frontier'); // the stage that made the change keeps the model it started with
+    expect(seen.plan_review).toBe('sonnet'); // the NEXT stage's fresh dispatch picks up the override
+    expect(seen.tdd).toBe('sonnet'); // …and every stage after it
   });
 });
 

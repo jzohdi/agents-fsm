@@ -19,6 +19,8 @@ import { FatalExecutorError, StubExecutor, goldenPathHandler } from './agent/exe
 import { FakeGitHub } from './integration/github-fake';
 import type { GitHub } from './integration/github';
 import { GitHubCliAccount, type SuggestionSource } from './integration/github-account';
+import { CLAUDE_CODE_CATALOG } from './agent/harness-models';
+import { DEFAULT_MODEL_MAP } from './agent/subprocess-executor';
 import { EnrolledRepoResolver, singleRepoResolver, type RepoResolver } from './integration/github-resolver';
 import { buildRealGitHub, buildRealRunner } from './real-run';
 import { Orchestrator } from './api/orchestrator';
@@ -164,6 +166,11 @@ export function buildOrchestrator(args: CliArgs): {
     suggestionSource, // powers the new-run autocomplete (GET /suggestions)
     resolver, // per-repo adapter resolution + the start-time enrollment check (Milestone 8)
     defaultWorkingRoot: args.work, // a POST /repos enrollment defaults its working root to the daemon's --work
+    // Model selection (the dashboard's per-run model dropdown). We target Claude Code; the `--model` flag
+    // (or the executor default `opus`) is what a run without an override uses. Mock mode reuses the same
+    // catalog for UI parity — the stub executor just ignores the chosen model.
+    modelCatalog: CLAUDE_CODE_CATALOG,
+    defaultModel: args.model ?? DEFAULT_MODEL_MAP.frontier,
     concurrency: resolveConcurrency(args), // global cap for the parallel drain pump (Milestone 8 Phase B)
     ...(resolveCostCeiling(args) !== undefined ? { costCeiling: resolveCostCeiling(args) } : {}), // global cost ceiling (M8 B3)
     ...(configPath ? { configPath } : {}),

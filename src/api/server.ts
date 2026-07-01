@@ -14,9 +14,10 @@
  *   POST /runs/:id/pause        POST /runs/:id/resume
  *   POST /runs/:id/stop         POST /runs/:id/revert
  *   POST /runs/:id/archive      POST /runs/:id/unarchive
+ *   POST /runs/:id/cost-override POST /runs/:id/model
  *   GET  /repos                 POST /repos
  *   GET  /config                PUT /config
- *   GET  /suggestions[?q=]
+ *   GET  /models                GET /suggestions[?q=]
  *   GET  /stream[?runId=&repo=] GET /health
  */
 
@@ -66,6 +67,9 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
   // --- fleet cost status: the global ceiling (or null) + current active spend (Milestone 8 B3) ---
   if (method === 'GET' && path === '/cost') return sendJson(res, 200, orch.costStatus());
 
+  // --- harness model catalog: selectable models + the daemon default (the model dropdown) ---
+  if (method === 'GET' && path === '/models') return sendJson(res, 200, orch.getModels());
+
   // --- new-run autocomplete: your repos + their open issues matching ?q= (README §3.3 Layer 7) ---
   if (method === 'GET' && path === '/suggestions') {
     return sendJson(res, 200, await orch.suggestIssues(url.searchParams.get('q') ?? ''));
@@ -104,7 +108,7 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
   const runMatch = /^\/runs\/(\d+)$/.exec(path);
   if (runMatch && method === 'GET') return sendJson(res, 200, orch.getRunDetail(Number(runMatch[1])));
 
-  const actionMatch = /^\/runs\/(\d+)\/(pause|resume|stop|revert|archive|unarchive|cost-override)$/.exec(path);
+  const actionMatch = /^\/runs\/(\d+)\/(pause|resume|stop|revert|archive|unarchive|cost-override|model)$/.exec(path);
   if (actionMatch && method === 'POST') {
     const id = Number(actionMatch[1]);
     switch (actionMatch[2]) {
@@ -129,6 +133,14 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
           return sendError(res, new ApiError(400, `invalid cost-override mode "${raw}" (expected next_step | full | none)`));
         }
         return sendJson(res, 200, orch.overrideCost(id, raw === 'none' ? null : raw));
+      }
+      case 'model': {
+        // `model`: a harness model tag to run this run under, or `null` to clear back to the daemon default.
+        const raw = (await readJson(req)).model;
+        if (raw !== null && typeof raw !== 'string') {
+          return sendError(res, new ApiError(400, '"model" (string, or null to clear) is required'));
+        }
+        return sendJson(res, 200, orch.setModel(id, raw));
       }
     }
   }

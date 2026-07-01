@@ -13,7 +13,18 @@ import { FakeGitHub } from '../integration/github-fake';
 import { openDb } from '../store/db';
 import { Repository, type Run } from '../store/repository';
 import { StubExecutor, type AgentRunRequest, type StageExecutor, type StubHandler } from './executor';
-import { AgentRunner, type AgentRunnerOptions } from './runner';
+import { AgentRunner, phaseModel, type AgentRunnerOptions } from './runner';
+
+describe('phaseModel', () => {
+  it('replaces only the frontier role when an override is set', () => {
+    expect(phaseModel('frontier', 'sonnet')).toBe('sonnet'); // primary work → the override
+    expect(phaseModel('cheap', 'sonnet')).toBe('cheap'); // cheap role untouched
+  });
+  it('falls through to the logical model with no override', () => {
+    expect(phaseModel('frontier', null)).toBe('frontier');
+    expect(phaseModel('cheap', null)).toBe('cheap');
+  });
+});
 
 function setup(handler: StubHandler, agents: AgentsConfig = {}, options: AgentRunnerOptions = {}, initialState = 'plan') {
   const repo = new Repository(openDb(':memory:'));
@@ -408,5 +419,40 @@ describe('AgentRunner — malformed output (retry, then escalate, never coerce)'
     if (outcome.kind === 'escalate') {
       expect(outcome.reason).toMatchObject({ kind: 'malformed_output', phase: 'self_review' });
     }
+  });
+});
+
+describe('AgentRunner — per-run model override', () => {
+  /** Run one produce → self_review → simplify stage, capturing the model each phase asked the harness for. */
+  async function modelsForOverride(override: string | null): Promise<Record<string, string>> {
+    const models: Record<string, string> = {};
+    // Reject the first review so `simplify` also runs, giving us all three phases in one stage.
+    let reviewed = false;
+    const { repo, runner, run } = setup((req) => {
+      models[req.phase] = req.model;
+      if (req.phase === 'self_review' && !reviewed) {
+        reviewed = true;
+        return { output: { acceptable: false, notes: 'tighten' } };
+      }
+      if (req.phase === 'self_review') return { output: { acceptable: true } };
+      return { output: { requestedTransition: 'proceed' } };
+    });
+    repo.setRunModelOverride(run.id, override);
+    await runner.runStage(repo.getRun(run.id)!); // fresh snapshot, the way the loop dispatches a stage
+    return models;
+  }
+
+  it('replaces the frontier role (produce + self_review) but leaves the cheap simplify phase', async () => {
+    const models = await modelsForOverride('sonnet');
+    expect(models.produce).toBe('sonnet');
+    expect(models.self_review).toBe('sonnet');
+    expect(models.simplify).toBe('cheap'); // the cheaper pass is untouched by the override
+  });
+
+  it('falls through to the recipe logical models when no override is set', async () => {
+    const models = await modelsForOverride(null);
+    expect(models.produce).toBe('frontier'); // the Layer-5 executor resolves these logical names
+    expect(models.self_review).toBe('frontier');
+    expect(models.simplify).toBe('cheap');
   });
 });

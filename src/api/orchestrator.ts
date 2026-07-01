@@ -32,6 +32,7 @@ import type {
 } from '../store/repository';
 import type { Suggestion } from '../integration/github';
 import type { SuggestionSource } from '../integration/github-account';
+import { catalogHasModel, type HarnessCatalog } from '../agent/harness-models';
 import type { RepoResolver } from '../integration/github-resolver';
 import { parseIssueRef, parseRepoRef, type ParsedIssueRef } from '../integration/refs';
 import { Broadcaster, type StreamListener } from './stream';
@@ -95,6 +96,13 @@ export interface OrchestratorOptions {
   costCeiling?: number;
   /** Called when a background drain throws (e.g. a `FatalExecutorError`). Default: log to stderr. */
   onError?: (err: unknown) => void;
+  /**
+   * The active harness's selectable models — the source of `GET /models` and the allow-list `setModel`
+   * validates against (the dashboard's model dropdown). Omit → model selection is unavailable (empty list).
+   */
+  modelCatalog?: HarnessCatalog;
+  /** The model a run uses when it has no override — what the dropdown shows as "Default". */
+  defaultModel?: string;
 }
 
 /** Statuses a run can no longer advance from — `updateConfig` is safe only when every run is here. */
@@ -111,6 +119,8 @@ export class Orchestrator {
   private readonly defaultWorkingRoot?: string;
   private readonly concurrency: number;
   private readonly costCeiling?: number;
+  private readonly modelCatalog?: HarnessCatalog;
+  private readonly defaultModel?: string;
   private config: LoadedConfig;
 
   // Single-flight drain pump (plans/milestone-5.md §2.2).
@@ -130,6 +140,8 @@ export class Orchestrator {
     this.defaultWorkingRoot = options.defaultWorkingRoot;
     this.concurrency = options.concurrency ?? 1; // the requested cap; `EventLoop.drain` clamps it to a valid ≥ 1
     this.costCeiling = options.costCeiling;
+    this.modelCatalog = options.modelCatalog;
+    this.defaultModel = options.defaultModel;
     this.onError = options.onError ?? ((err) => console.error(`[orchestrator] drain pump error: ${String(err)}`));
     this.loop = new EventLoop(this.repo, this.config.fsm, this.config.version, this.runner, {
       onTransition: (transition, run) => this.broadcaster.publish({ type: 'transition', runId: run.id, transition, run }),
@@ -282,6 +294,26 @@ export class Orchestrator {
   }
 
   /**
+   * Set (or clear, with `null`) a run's harness model — the dashboard's model dropdown. The runner reads
+   * the override fresh at each stage, so it takes effect on the run's **next** stage; the current stage
+   * keeps the model it started with (no `kick` — the run advances on its own event flow). Refuses (`409`)
+   * a terminal run (no next stage to apply it to) and (`400`) a model the active harness doesn't list.
+   */
+  setModel(runId: number, model: string | null): Run {
+    const existing = this.requireRun(runId); // 404
+    if (TERMINAL_STATUSES.has(existing.status)) {
+      throw new ApiError(409, `cannot set the model for a "${existing.status}" run — it has no further stages`);
+    }
+    if (model !== null && (!this.modelCatalog || !catalogHasModel(this.modelCatalog, model))) {
+      throw new ApiError(400, `unknown model "${model}" for the ${this.modelCatalog?.harness ?? 'active'} harness`);
+    }
+    this.repo.setRunModelOverride(runId, model);
+    const run = this.requireRun(runId);
+    this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
+    return run;
+  }
+
+  /**
    * Archive a terminal (done/stopped) run so the dashboard drops it from the Resolved lane. Refuses
    * (`409`) a non-terminal run — you don't hide work that's still in flight. Publishes a `status`
    * event (status unchanged) so connected dashboards update live.
@@ -387,6 +419,19 @@ export class Orchestrator {
   async suggestIssues(query: string): Promise<Suggestion[]> {
     if (!this.suggestionSource) return [];
     return this.suggestionSource.suggest(query);
+  }
+
+  /**
+   * The active harness's selectable models + the daemon's default model (what a run without an override
+   * uses) — powers the dashboard's per-run model dropdown (`GET /models`). With no catalog configured the
+   * model list is empty.
+   */
+  getModels(): { harness: string | null; models: HarnessCatalog['models']; defaultModel: string | null } {
+    return {
+      harness: this.modelCatalog?.harness ?? null,
+      models: this.modelCatalog?.models ?? [],
+      defaultModel: this.defaultModel ?? null,
+    };
   }
 
   // --- config ------------------------------------------------------------------
