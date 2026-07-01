@@ -65,7 +65,7 @@
                   {/if}
                 {/if}
                 <div class="id">{r.id}<small>{r.repo}</small>
-                  {#if r.harness !== ui.defaultHarness}<span class="af-hbadge" title="Harness: {r.harness}">{r.harness}</span>{/if}
+                  {#if r.harness && r.harness !== ui.defaultHarness}<span class="af-hbadge" title="Harness: {r.harness}">{r.harness}</span>{/if}
                 </div>
                 <div class="ttl">{r.issue}</div>
                 <div class="ln">

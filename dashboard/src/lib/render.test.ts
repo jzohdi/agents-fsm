@@ -61,10 +61,14 @@ describe('formatting', () => {
     expect(fmtDuration(64_000)).toBe('1m04s');
   });
 
-  it('humanizes harness ids', () => {
+  it('humanizes harness ids and is null-safe for a mismatched daemon that omits one', () => {
     expect(humanizeHarness('claude-code')).toBe('Claude Code');
     expect(humanizeHarness('cursor')).toBe('Cursor');
     expect(humanizeHarness('')).toBe('');
+    // A daemon that predates / diverges from the harness column can omit it — must not throw (a crash
+    // here would take out the whole RunDetail, hiding the Resume button on a needs_human run).
+    expect(humanizeHarness(undefined)).toBe('');
+    expect(humanizeHarness(null)).toBe('');
   });
 });
 

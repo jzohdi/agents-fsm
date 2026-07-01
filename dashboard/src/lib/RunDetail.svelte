@@ -282,7 +282,7 @@
         {#if run.status === 'running'}<span class="af-live on" style="font-size:10px"><span class="d"></span>stream</span>{/if}
       </span>
       <div class="af-livebox" class:idle={run.status !== 'running'}>
-        <div class="top"><span class="dd"></span><span class="lab">{humanizeHarness(run.harness)} · {run.currentState} agent</span><span class="model">{model}</span></div>
+        <div class="top"><span class="dd"></span><span class="lab">{humanizeHarness(run.harness || 'claude-code')} · {run.currentState} agent</span><span class="model">{model}</span></div>
         <div class="af-stream" bind:this={streamEl}>
           {#if run.status !== 'running'}
             run is {run.status.replace('_', ' ')} — no live model activity

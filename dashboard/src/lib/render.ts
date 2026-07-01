@@ -17,9 +17,10 @@ export function humanizeState(state: string): string {
   return spaced ? spaced[0]!.toUpperCase() + spaced.slice(1) : spaced;
 }
 
-/** Humanize a harness id for display (title case each word): `claude-code` → `Claude Code`, `cursor` → `Cursor`. */
-export function humanizeHarness(harness: string): string {
-  return harness
+/** Humanize a harness id for display (title case each word): `claude-code` → `Claude Code`, `cursor` →
+ *  `Cursor`. Null-safe: a missing harness (an older/mismatched daemon that doesn't report one) → `''`. */
+export function humanizeHarness(harness: string | null | undefined): string {
+  return (harness ?? '')
     .split(/[-_]/)
     .filter(Boolean)
     .map((w) => w[0]!.toUpperCase() + w.slice(1))
@@ -155,7 +156,7 @@ function pipelineRow(r: Run): PipelineRow {
     tokens: r.tokensUsed ?? 0,
     cost: r.costUsed ?? 0,
     costLabel: fmtRunCost(r.harness, r.costUsed, 2),
-    harness: r.harness,
+    harness: r.harness ?? '', // a mismatched daemon may omit it; keep the row type-honest (never undefined)
     resolved,
     archived: r.archivedAt != null,
   };
