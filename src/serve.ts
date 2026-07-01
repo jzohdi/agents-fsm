@@ -44,7 +44,7 @@ export async function serve(args: CliArgs): Promise<void> {
         : `  repos: ${repos.map((r) => r.repoRef).join(', ')} (file a run on any other repo to auto-enroll it)`,
     );
   }
-  console.log('  POST /runs · GET /runs · GET /runs/:id · POST /runs/:id/{pause,resume,stop,revert,archive,unarchive,cost-override,model} · GET|POST /repos · GET /cost · GET /models · GET|PUT /config · GET /stream');
+  console.log('  POST /runs · GET /runs · GET /runs/:id · POST /runs/:id/{pause,resume,stop,revert,archive,unarchive,cost-override,model} · GET|POST /repos · GET /cost · GET /models · GET /settings · PUT /settings/default-harness · GET|PUT /config · GET /stream');
   if (!existsSync(DEFAULT_PUBLIC_DIR)) {
     console.warn('  ⚠ dashboard not built — run `npm run build:dashboard` (or `npm run dev:dashboard` for HMR). The API works regardless.');
   }

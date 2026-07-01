@@ -15,9 +15,11 @@ import {
   issueUrl,
   prUrl,
   costStatusModel,
-  fmtCost,
+  fmtRunCost,
+  tracksCost,
   fmtDuration,
   fmtTokens,
+  humanizeHarness,
   humanizeState,
   pipelineModel,
   repoOverviewModel,
@@ -42,7 +44,8 @@ const FSM: FsmConfig = {
 
 const run = (over: Partial<Run> = {}): Run => ({
   id: 1, issueRef: 'o/r#1', repoRef: 'o/r', currentState: 'plan', status: 'running', fsmConfigVersion: 'v',
-  prNumber: null, branch: null, tokensUsed: 10, costUsed: 0.5, agentRunsCount: 0, flags: {}, archivedAt: null, modelOverride: null, createdAt: '', updatedAt: '', ...over,
+  prNumber: null, branch: null, tokensUsed: 10, costUsed: 0.5, agentRunsCount: 0, flags: {}, archivedAt: null, modelOverride: null,
+  harness: 'claude-code', createdAt: '', updatedAt: '', ...over,
 });
 
 describe('formatting', () => {
@@ -51,13 +54,31 @@ describe('formatting', () => {
     expect(escapeHtml(null)).toBe('');
   });
 
-  it('formats cost and duration', () => {
-    expect(fmtCost(0.012345)).toBe('$0.0123');
-    expect(fmtCost(undefined)).toBe('$0.0000');
+  it('formats duration', () => {
     expect(fmtDuration(0)).toBe('—');
     expect(fmtDuration(820)).toBe('820ms');
     expect(fmtDuration(2400)).toBe('2.4s');
     expect(fmtDuration(64_000)).toBe('1m04s');
+  });
+
+  it('humanizes harness ids', () => {
+    expect(humanizeHarness('claude-code')).toBe('Claude Code');
+    expect(humanizeHarness('cursor')).toBe('Cursor');
+    expect(humanizeHarness('')).toBe('');
+  });
+});
+
+describe('fmtRunCost / tracksCost (cursor cost blindness, §8.2)', () => {
+  it('shows a dollar figure for a cost-reporting harness and n/a for a cost-blind one', () => {
+    expect(tracksCost('claude-code')).toBe(true);
+    expect(tracksCost('cursor')).toBe(false);
+    // Claude Code: real dollars at the requested precision (4dp default, 2dp for the compact card).
+    expect(fmtRunCost('claude-code', 0.012345)).toBe('$0.0123');
+    expect(fmtRunCost('claude-code', 1.5, 2)).toBe('$1.50');
+    expect(fmtRunCost('claude-code', undefined)).toBe('$0.0000');
+    // Cursor: n/a regardless of the (unreliable, always-0) figure — never a deceptive "$0.00".
+    expect(fmtRunCost('cursor', 0)).toBe('n/a');
+    expect(fmtRunCost('cursor', 0, 2)).toBe('n/a');
   });
 });
 
@@ -106,6 +127,19 @@ describe('pipelineModel', () => {
     expect(m.columns.find((c) => c.key === 'plan')!.runs.map((r) => r.id)).toEqual([1]);
     expect(m.columns.find((c) => c.key === 'needs_human')!.runs.map((r) => r.id)).toEqual([2]);
     expect(m.columns.find((c) => c.key === '__resolved__')!.runs.map((r) => r.id)).toEqual([3, 4]);
+  });
+
+  it('carries each row\'s harness and a cost label that reads n/a for a cost-blind harness (§8.2)', () => {
+    const rows = pipelineModel(
+      [
+        run({ id: 1, harness: 'claude-code', costUsed: 1.5 }),
+        run({ id: 2, harness: 'cursor', costUsed: 0 }),
+      ],
+      FSM,
+    ).columns.find((c) => c.key === 'plan')!.runs;
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    expect(byId.get(1)).toMatchObject({ harness: 'claude-code', costLabel: '$1.50' });
+    expect(byId.get(2)).toMatchObject({ harness: 'cursor', costLabel: 'n/a' }); // never a deceptive $0.00
   });
 
   it('hides server-archived resolved runs unless showArchived, reporting the hidden count', () => {

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { ui, control, revertRun, overrideCost, setModel, checkPrFeedback } from './store.svelte';
   import type { HarnessModel } from './types';
-  import { telemetryModel, escalationModel, activityLane, costStatusModel, issueUrl, prUrl, branchUrl, isWatchingPrFeedback, fmtCost, fmtDuration, fmtTokens, escapeHtml, humanizeState } from './render';
+  import { telemetryModel, escalationModel, activityLane, costStatusModel, issueUrl, prUrl, branchUrl, isWatchingPrFeedback, fmtRunCost, fmtDuration, fmtTokens, escapeHtml, humanizeState, humanizeHarness } from './render';
   import StateMachine from './StateMachine.svelte';
   import ScrollArea from './ScrollArea.svelte';
 
@@ -32,8 +32,13 @@
   const revertable = $derived(
     ui.config ? Object.entries(ui.config.fsm.states).filter(([, d]) => !d.terminal).map(([name]) => name) : [],
   );
-  // The run's effective model for the live badge: its override, else the daemon default.
-  const model = $derived(run?.modelOverride ?? ui.models?.defaultModel ?? 'default');
+  // The model catalog (`ui.models`, from GET /models) is the *default* harness's. It only applies to a
+  // run on that same harness — a run on a different harness must not offer that catalog's models (setModel
+  // would 400) nor show its default. Per-harness catalogs for non-default runs are a later enhancement.
+  const catalogMatchesRun = $derived(!!ui.models && ui.models.harness === run?.harness);
+  // The run's effective model for the live badge: its override, else the default (only when the catalog
+  // is this run's harness), else the generic "default".
+  const model = $derived(run?.modelOverride ?? (catalogMatchesRun ? ui.models?.defaultModel : null) ?? 'default');
   // Catalog models grouped for the dropdown's <optgroup>s (ungrouped models under the '' key).
   const modelGroups = $derived.by(() => {
     const cat = ui.models;
@@ -110,7 +115,7 @@
       </div>
     </div>
     <div class="af-controls">
-      {#if !terminal && ui.models && ui.models.models.length}
+      {#if !terminal && catalogMatchesRun && ui.models!.models.length}
         <label class="af-model">
           <span class="lbl">model</span>
           <select
@@ -118,7 +123,7 @@
             onchange={(e) => setModel(run.id, e.currentTarget.value || null)}
             aria-label="run model"
           >
-            <option value="">Default{ui.models.defaultModel ? ` — ${ui.models.defaultModel}` : ''}</option>
+            <option value="">Default{ui.models?.defaultModel ? ` — ${ui.models.defaultModel}` : ''}</option>
             {#each modelGroups as [group, models] (group)}
               {#if group}
                 <optgroup label={group}>
@@ -204,7 +209,7 @@
             {/each}
           </tbody>
           <tfoot>
-            <tr><td>total · {fmtCost(run.costUsed)}</td><td class="num">{tel.totals.invocations}</td><td class="num">{fmtTokens(tel.totals.tokens)}</td><td class="num">{fmtDuration(tel.totals.durationMs)}</td></tr>
+            <tr><td>total · {fmtRunCost(run.harness, run.costUsed)}</td><td class="num">{tel.totals.invocations}</td><td class="num">{fmtTokens(tel.totals.tokens)}</td><td class="num">{fmtDuration(tel.totals.durationMs)}</td></tr>
           </tfoot>
         </table>
       </ScrollArea>
@@ -277,7 +282,7 @@
         {#if run.status === 'running'}<span class="af-live on" style="font-size:10px"><span class="d"></span>stream</span>{/if}
       </span>
       <div class="af-livebox" class:idle={run.status !== 'running'}>
-        <div class="top"><span class="dd"></span><span class="lab">claude · {run.currentState} agent</span><span class="model">{model}</span></div>
+        <div class="top"><span class="dd"></span><span class="lab">{humanizeHarness(run.harness)} · {run.currentState} agent</span><span class="model">{model}</span></div>
         <div class="af-stream" bind:this={streamEl}>
           {#if run.status !== 'running'}
             run is {run.status.replace('_', ' ')} — no live model activity

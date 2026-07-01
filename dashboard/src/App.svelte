@@ -5,7 +5,7 @@
   import Pipeline from './lib/Pipeline.svelte';
   import RunDetail from './lib/RunDetail.svelte';
   import Editor from './lib/Editor.svelte';
-  import { ui, loadConfig, loadRuns, loadCost, loadModels, selectRun, connectStream, banner } from './lib/store.svelte';
+  import { ui, loadConfig, loadRuns, loadCost, loadModels, loadSettings, selectRun, connectStream, banner } from './lib/store.svelte';
   import { costStatusModel } from './lib/render';
 
   onMount(async () => {
@@ -14,6 +14,7 @@
       await loadRuns();
       await loadCost();
       await loadModels();
+      await loadSettings();
       // Open a sensible run by default so the detail view isn't empty on load: prefer a running one.
       if (ui.selectedId === null && ui.runs.length) {
         const first = ui.runs.find((r) => r.status === 'running') ?? ui.runs[0]!;

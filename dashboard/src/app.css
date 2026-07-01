@@ -119,6 +119,11 @@ input, textarea, button, select { font: inherit; }
 .af-filebar input { flex: 1; border: 0; background: transparent; font-family: var(--mono); font-size: 15px; color: var(--ink); padding: 16px 22px; min-width: 0; }
 .af-filebar input::placeholder { color: var(--ink4); }
 .af-filebar input:focus { outline: none; }
+/* Harness selector — the unified control: runtime selector + remembered default, sent on submit. */
+.af-harness { display: flex; align-items: center; gap: 8px; padding: 0 16px; border-left: 1px solid var(--rule); white-space: nowrap; }
+.af-harness .hlab { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink4); }
+.af-harness select { border: 0; background: transparent; font-family: var(--mono); font-size: 12.5px; color: var(--ink); cursor: pointer; padding: 6px 4px; }
+.af-harness select:focus { outline: none; background: var(--paper2); }
 .af-filebar .file-btn { border: 0; background: var(--accent); color: #fff; font-size: 13.5px; font-weight: 600; padding: 0 30px; cursor: pointer; }
 .af-filebar .file-btn:hover { background: #19623f; }
 .af-filebar .file-btn:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -200,6 +205,11 @@ input, textarea, button, select { font: inherit; }
 .af-bucket:first-child .af-unit.sel::before { left: 0; }
 .af-unit .id { font-size: 14px; font-weight: 700; letter-spacing: -0.02em; }
 .af-unit .id small { font-family: var(--mono); font-weight: 400; font-size: 11.5px; color: var(--ink3); margin-left: 6px; }
+/* Harness badge — only shown on a run whose harness isn't the current default. */
+.af-unit .id .af-hbadge {
+  font-family: var(--mono); font-weight: 500; font-size: 9.5px; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--accent); background: var(--paper2); border: 1px solid var(--rule); border-radius: 3px; padding: 1px 5px; margin-left: 7px; vertical-align: 1px;
+}
 .af-unit .ttl { font-size: 11.5px; color: var(--ink3); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .af-unit .ln { display: flex; align-items: center; justify-content: space-between; margin-top: 9px; gap: 8px; }
 .af-unit .sp { font-family: var(--mono); font-size: 11px; color: var(--ink3); }

@@ -277,6 +277,41 @@ describe('Orchestrator — harness selection', () => {
     }
   });
 
+  it('reports + changes the default harness, persisting it and re-pointing getModels (no restart)', () => {
+    const { orchestrator, repo } = setup();
+
+    const before = orchestrator.getSettings();
+    expect(before.defaultHarness).toBe('claude-code');
+    expect(before.harnesses).toContain('cursor');
+    expect(orchestrator.getModels().harness).toBe('claude-code');
+
+    const result = orchestrator.setDefaultHarness('cursor');
+    expect(result.defaultHarness).toBe('cursor');
+    // Live: a harness-less run now defaults to cursor, and the model dropdown follows the new default…
+    expect(orchestrator.getSettings().defaultHarness).toBe('cursor');
+    const models = orchestrator.getModels();
+    expect(models.harness).toBe('cursor');
+    // …and the reported default model stays consistent with the shown catalog — the Claude `opus` default
+    // isn't a Cursor model, so it's dropped rather than mislabeled as Cursor's default.
+    expect(models.models.map((m) => m.id)).not.toContain('opus');
+    expect(models.defaultModel).toBeNull();
+    expect(orchestrator.start({ issueRef: 'o/r#1' }).harness).toBe('cursor');
+    // …and it's persisted, so a future boot (resolveDefaultHarness) reads it back.
+    expect(repo.getSetting('default_harness')).toBe('cursor');
+  });
+
+  it('rejects an unknown default harness (400) and leaves the current default + setting untouched', () => {
+    const { orchestrator, repo } = setup();
+    try {
+      orchestrator.setDefaultHarness('gemini');
+      throw new Error('expected setDefaultHarness to reject an unknown id');
+    } catch (err) {
+      expect((err as ApiError).status).toBe(400);
+    }
+    expect(orchestrator.getSettings().defaultHarness).toBe('claude-code'); // unchanged
+    expect(repo.getSetting('default_harness')).toBeUndefined(); // nothing persisted
+  });
+
   it('validates a model override against the run\'s own harness catalog', async () => {
     const { orchestrator, repo } = setup();
     const cursorRun = orchestrator.start({ issueRef: 'o/r#1', harness: 'cursor' });

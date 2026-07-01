@@ -237,6 +237,26 @@ describe('HTTP API', () => {
     expect((await fetch(`${base}/runs/${run.id}/model`, { method: 'POST', body: JSON.stringify({}) })).status).toBe(400);
   });
 
+  it('serves the harness settings and persists a default-harness change (GET/PUT /settings)', async () => {
+    const { base, repo } = await start();
+
+    const before = (await (await fetch(`${base}/settings`)).json()) as { defaultHarness: string; harnesses: string[] };
+    expect(before.defaultHarness).toBe('claude-code');
+    expect(before.harnesses).toEqual(expect.arrayContaining(['claude-code', 'cursor']));
+
+    // A valid change is persisted and echoed back; GET reflects it, and GET /models re-points to it.
+    const put = await fetch(`${base}/settings/default-harness`, { method: 'PUT', body: JSON.stringify({ harness: 'cursor' }) });
+    expect(put.status).toBe(200);
+    expect(((await put.json()) as { defaultHarness: string }).defaultHarness).toBe('cursor');
+    expect(((await (await fetch(`${base}/settings`)).json()) as { defaultHarness: string }).defaultHarness).toBe('cursor');
+    expect(((await (await fetch(`${base}/models`)).json()) as { harness: string }).harness).toBe('cursor');
+    expect(repo.getSetting('default_harness')).toBe('cursor');
+
+    // A bad id → 400; a missing field → 400.
+    expect((await fetch(`${base}/settings/default-harness`, { method: 'PUT', body: JSON.stringify({ harness: 'gemini' }) })).status).toBe(400);
+    expect((await fetch(`${base}/settings/default-harness`, { method: 'PUT', body: JSON.stringify({}) })).status).toBe(400);
+  });
+
   it('routes POST /runs/:id/check-pr-feedback to an on-demand PR feedback check', async () => {
     const { base, orchestrator, repo, github } = await start();
     const run = orchestrator.start({ issueRef: 'o/r#1' });

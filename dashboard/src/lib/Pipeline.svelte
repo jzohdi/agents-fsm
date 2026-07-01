@@ -64,11 +64,13 @@
                       onclick={(e) => { e.stopPropagation(); archiveRun(r.id); }}>archive</button>
                   {/if}
                 {/if}
-                <div class="id">{r.id}<small>{r.repo}</small></div>
+                <div class="id">{r.id}<small>{r.repo}</small>
+                  {#if r.harness !== ui.defaultHarness}<span class="af-hbadge" title="Harness: {r.harness}">{r.harness}</span>{/if}
+                </div>
                 <div class="ttl">{r.issue}</div>
                 <div class="ln">
                   <span class={r.statusClass}>{r.status.replace('_', ' ')}</span>
-                  <span class="sp">{fmtTokens(r.tokens)} · ${r.cost.toFixed(2)}</span>
+                  <span class="sp">{fmtTokens(r.tokens)} · {r.costLabel}</span>
                 </div>
               </div>
             {/each}

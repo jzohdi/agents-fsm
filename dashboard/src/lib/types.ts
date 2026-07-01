@@ -21,8 +21,16 @@ export interface Run {
   costOverride?: 'next_step' | 'full' | null;
   /** Per-run harness model override (the model dropdown); null = the daemon default. Takes effect next stage. */
   modelOverride: string | null;
+  /** Which agent harness runs this, pinned at start (e.g. `claude-code` | `cursor`). */
+  harness: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/** The daemon's default harness + the selectable set (`GET /settings`; the harness selector). */
+export interface Settings {
+  defaultHarness: string;
+  harnesses: string[];
 }
 
 /** One selectable harness model (the model dropdown), from `GET /models`. */

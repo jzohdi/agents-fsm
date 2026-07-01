@@ -17,6 +17,15 @@ export function humanizeState(state: string): string {
   return spaced ? spaced[0]!.toUpperCase() + spaced.slice(1) : spaced;
 }
 
+/** Humanize a harness id for display (title case each word): `claude-code` → `Claude Code`, `cursor` → `Cursor`. */
+export function humanizeHarness(harness: string): string {
+  return harness
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((w) => w[0]!.toUpperCase() + w.slice(1))
+    .join(' ');
+}
+
 /** A compact token count: `6234` → `6.2k`, `120000` → `120k`, `840` → `840`. */
 export function fmtTokens(value: number | null | undefined): string {
   const n = Number(value ?? 0);
@@ -35,9 +44,25 @@ export function escapeHtml(value: unknown): string {
     .replace(/'/g, '&#39;');
 }
 
-/** A dollar amount to 4 dp, e.g. `$0.0123`. */
-export function fmtCost(value: number | null | undefined): string {
-  return `$${Number(value ?? 0).toFixed(4)}`;
+/**
+ * Harnesses that don't report token/cost usage, so a run's `costUsed` comes back `0` regardless of real
+ * spend (plan §8.2 — Cursor's result carries no usage; a cost estimator is deferred). The dashboard shows
+ * "n/a" for these rather than a misleading "$0.00". Mirror of the harness side; keep in sync when a
+ * harness gains real usage reporting.
+ */
+export const COST_BLIND_HARNESSES = new Set<string>(['cursor']);
+
+/** Whether a harness reports cost/usage — false for a cost-blind harness (plan §8.2). */
+export function tracksCost(harness: string | null | undefined): boolean {
+  return !COST_BLIND_HARNESSES.has(harness ?? '');
+}
+
+/**
+ * A run's cost for display: the dollar figure to `digits` dp, or `n/a` when its harness doesn't report
+ * usage (plan §8.2) — so a Cursor run never looks deceptively free. Pure, so it is unit-tested.
+ */
+export function fmtRunCost(harness: string | null | undefined, costUsed: number | null | undefined, digits = 4): string {
+  return tracksCost(harness) ? `$${Number(costUsed ?? 0).toFixed(digits)}` : 'n/a';
 }
 
 /** A duration in ms as a compact human string (`820ms`, `2.4s`, `1m04s`). */
@@ -99,6 +124,8 @@ export interface PipelineRow {
   statusClass: string;
   tokens: number;
   cost: number;
+  costLabel: string; // `$X.XX`, or `n/a` for a cost-blind harness (plan §8.2)
+  harness: string; // which harness runs this (for the run-card badge when it isn't the default)
   resolved: boolean; // terminal (done/stopped) — eligible for archiving
   archived: boolean; // archived server-side (Run.archivedAt set)
 }
@@ -127,6 +154,8 @@ function pipelineRow(r: Run): PipelineRow {
     statusClass: `af-stat af-stat-${r.status}`,
     tokens: r.tokensUsed ?? 0,
     cost: r.costUsed ?? 0,
+    costLabel: fmtRunCost(r.harness, r.costUsed, 2),
+    harness: r.harness,
     resolved,
     archived: r.archivedAt != null,
   };

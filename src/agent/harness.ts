@@ -24,6 +24,13 @@ export const HARNESS_IDS: readonly HarnessId[] = ['claude-code', 'cursor'];
 /** The harness a run uses when none is chosen: the shipped default (Claude Code). */
 export const DEFAULT_HARNESS: HarnessId = 'claude-code';
 
+/**
+ * Settings-store key the persisted default harness lives under (the tiny KV in the store, Layer 1). The
+ * dashboard's harness selector writes it (`PUT /settings/default-harness`); `resolveDefaultHarness` reads
+ * it at boot. Co-located with the harness ids so its one writer and one reader share a single source.
+ */
+export const DEFAULT_HARNESS_SETTING_KEY = 'default_harness';
+
 /** Narrow an untrusted value to a known {@link HarnessId} — the validation the API applies to a request. */
 export function isHarnessId(value: unknown): value is HarnessId {
   return typeof value === 'string' && (HARNESS_IDS as readonly string[]).includes(value);

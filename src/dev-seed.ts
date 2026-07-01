@@ -33,6 +33,9 @@ interface RunSpec {
   stopped?: boolean;
   /** Pre-archive this resolved run (so the dashboard's "Show archived" affordance appears on load). */
   archived?: boolean;
+  /** Which harness ran this (defaults to the column default, `claude-code`). A non-default one shows the
+   *  run-card harness badge and — for a cost-blind harness like `cursor` — a "cost n/a" figure (§8.2). */
+  harness?: string;
   logs: { level: string; message: string; stage: string }[];
   artifacts: { kind: string; locator: unknown }[];
 }
@@ -78,7 +81,9 @@ const SPECS: RunSpec[] = [
   },
   {
     issue: 290, repo: 'acme/api', title: 'Pagination cursor off-by-one at boundary', currentState: 'tdd',
-    status: 'running', tokens: 22100, cost: 0.49, branch: 'af/290-cursor',
+    // Run on the Cursor harness: shows the run-card harness badge and a "cost n/a" figure (Cursor reports
+    // no usage, §8.2). `cost: 0` mirrors what a real Cursor run records — the UI must not show "$0.00".
+    status: 'running', tokens: 0, cost: 0, branch: 'af/290-cursor', harness: 'cursor',
     path: ['triage', 'plan', 'plan_review', 'interface_design', 'tdd'],
     logs: [{ level: 'info', message: 'Writing failing test for boundary cursor', stage: 'tdd' }],
     artifacts: [{ kind: 'branch', locator: 'af/290-cursor' }],
@@ -168,7 +173,10 @@ function resolved(issue: number, repo: string, title: string, tokens: number, co
 export function seedRuns(repo: Repository, version: string): number[] {
   const ids: number[] = [];
   for (const s of SPECS) {
-    const run = repo.createRun({ issueRef: `${s.repo}#${s.issue}`, repoRef: s.repo, initialState: 'triage', fsmConfigVersion: version });
+    const run = repo.createRun({
+      issueRef: `${s.repo}#${s.issue}`, repoRef: s.repo, initialState: 'triage', fsmConfigVersion: version,
+      ...(s.harness ? { harness: s.harness } : {}),
+    });
     const id = run.id;
     ids.push(id);
 

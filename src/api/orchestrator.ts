@@ -34,7 +34,7 @@ import type {
 import type { Suggestion } from '../integration/github';
 import type { SuggestionSource } from '../integration/github-account';
 import { catalogHasModel, type HarnessCatalog } from '../agent/harness-models';
-import { DEFAULT_HARNESS, isHarnessId, type HarnessId } from '../agent/harness';
+import { DEFAULT_HARNESS, DEFAULT_HARNESS_SETTING_KEY, HARNESS_IDS, isHarnessId, type HarnessId } from '../agent/harness';
 import type { RepoResolver } from '../integration/github-resolver';
 import { parseIssueRef, parseRepoRef, type ParsedIssueRef } from '../integration/refs';
 import { Broadcaster, type StreamListener } from './stream';
@@ -136,7 +136,8 @@ export class Orchestrator {
   private readonly defaultWorkingRoot?: string;
   private readonly concurrency: number;
   private readonly costCeiling?: number;
-  private readonly defaultHarness: HarnessId;
+  // Mutable: the dashboard's harness selector (`setDefaultHarness`) changes it live, without a restart.
+  private defaultHarness: HarnessId;
   private readonly catalogFor?: (harness: string) => HarnessCatalog | undefined;
   private readonly defaultModel?: string;
   private readonly prFeedbackPoller: PrFeedbackPoller;
@@ -506,11 +507,37 @@ export class Orchestrator {
    */
   getModels(): { harness: string | null; models: HarnessCatalog['models']; defaultModel: string | null } {
     const catalog = this.catalogFor?.(this.defaultHarness);
+    // Only report a default model that's actually a selectable model in the shown catalog — so it stays
+    // consistent with the catalog even after a runtime harness change (the daemon's configured
+    // `defaultModel` is the Claude `--model`, meaningless once the default harness is another harness).
+    const defaultModel = this.defaultModel && catalog && catalogHasModel(catalog, this.defaultModel) ? this.defaultModel : null;
     return {
       harness: catalog?.harness ?? null,
       models: catalog?.models ?? [],
-      defaultModel: this.defaultModel ?? null,
+      defaultModel,
     };
+  }
+
+  /**
+   * The daemon's current default harness + every selectable harness id — powers the dashboard's harness
+   * selector (`GET /settings`). The default is what a run gets when its start request omits one, and which
+   * harness's catalog {@link getModels} reports.
+   */
+  getSettings(): { defaultHarness: HarnessId; harnesses: readonly HarnessId[] } {
+    return { defaultHarness: this.defaultHarness, harnesses: HARNESS_IDS };
+  }
+
+  /**
+   * Change the default harness and remember it across restarts (`PUT /settings/default-harness`). Takes
+   * effect immediately for new runs and for {@link getModels}, no daemon restart — and persists to the
+   * settings KV so the next boot (without a `--harness`/`FLEET_HARNESS` session override) starts with it.
+   * A bad id is a `400`; nothing is persisted or changed in that case.
+   */
+  setDefaultHarness(harness: string): { defaultHarness: HarnessId } {
+    if (!isHarnessId(harness)) throw new ApiError(400, `unknown harness "${harness}"`);
+    this.repo.setSetting(DEFAULT_HARNESS_SETTING_KEY, harness);
+    this.defaultHarness = harness;
+    return { defaultHarness: harness };
   }
 
   // --- config ------------------------------------------------------------------

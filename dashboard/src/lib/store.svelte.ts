@@ -7,7 +7,7 @@
  */
 
 import { request } from './api';
-import type { LoadedConfig, LogLine, ModelCatalog, Repo, Run, RunDetail, Suggestion } from './types';
+import type { LoadedConfig, LogLine, ModelCatalog, Repo, Run, RunDetail, Settings, Suggestion } from './types';
 
 export const ui = $state({
   runs: [] as Run[], // newest first
@@ -30,6 +30,12 @@ export const ui = $state({
   costCeiling: null as number | null,
   // The active harness's model catalog + default (the per-run model dropdown), fetched once at startup.
   models: null as ModelCatalog | null,
+  // The daemon's default harness + the selectable set (the harness selector). `defaultHarness` is both
+  // the runtime selector value AND the persisted default (the unified control): changing it persists via
+  // PUT /settings/default-harness and is the harness sent on the next run. `null` until settings load / on
+  // an older daemon without the route (the selector then hides).
+  defaultHarness: null as string | null,
+  harnesses: [] as string[],
 });
 
 /** Runs scoped to the active repo tab (all repos when no filter). */
@@ -150,6 +156,36 @@ export async function loadModels(): Promise<void> {
   }
 }
 
+/** Fetch the harness settings once (the harness selector); tolerant of an older daemon (no route). */
+export async function loadSettings(): Promise<void> {
+  try {
+    const s = await request<Settings>('GET', '/settings');
+    ui.defaultHarness = s.defaultHarness;
+    ui.harnesses = s.harnesses;
+  } catch {
+    ui.defaultHarness = null; // older daemon without /settings — the selector hides
+    ui.harnesses = [];
+  }
+}
+
+/**
+ * Change the default harness (`PUT /settings/default-harness`). This is the unified control: it persists
+ * the new default *and* is the harness the next run is started with. Optimistic — reflect it immediately,
+ * then reload the model catalog (which is the new default harness's) and roll back on failure.
+ */
+export async function setDefaultHarness(harness: string): Promise<void> {
+  const previous = ui.defaultHarness;
+  ui.defaultHarness = harness; // optimistic
+  try {
+    const { defaultHarness } = await request<Settings>('PUT', '/settings/default-harness', { harness });
+    ui.defaultHarness = defaultHarness;
+    await loadModels(); // the model dropdown's catalog follows the default harness
+  } catch (err) {
+    ui.defaultHarness = previous; // roll back a rejected change
+    banner(`Harness change failed: ${(err as Error).message}`, 'err');
+  }
+}
+
 /**
  * Set (or clear, with `null`) the selected run's harness model. Takes effect on the run's next stage
  * (the current stage keeps its model). Optimistically reflected via the returned run + a status event.
@@ -177,7 +213,10 @@ export async function overrideCost(id: number, mode: 'next_step' | 'full' | 'non
 }
 
 export async function startRun(issueRef: string): Promise<void> {
-  const run = await request<Run>('POST', '/runs', { issueRef });
+  // Stamp the run with the currently-selected harness (the unified control's value). Omitted when
+  // unknown (older daemon / settings not loaded) so the server applies its own default.
+  const body = ui.defaultHarness ? { issueRef, harness: ui.defaultHarness } : { issueRef };
+  const run = await request<Run>('POST', '/runs', body);
   upsertRun(run);
   await selectRun(run.id);
   banner(`Started run ${run.id}.`, 'ok');

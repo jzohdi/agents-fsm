@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { startRun, fetchSuggestions } from './store.svelte';
+  import { ui, startRun, fetchSuggestions, setDefaultHarness } from './store.svelte';
+  import { humanizeHarness } from './render';
   import type { Suggestion } from './types';
 
   let value = $state('');
@@ -108,6 +109,20 @@
       autocomplete="off"
       aria-label="issue reference"
     />
+    {#if ui.harnesses.length > 1}
+      <!-- Unified control: this is both the runtime selector and the persisted default, and the harness
+           the run is stamped with on submit. Changing it persists via PUT /settings/default-harness. -->
+      <label class="af-harness" title="Harness for new runs (remembered as the default)">
+        <span class="hlab">harness</span>
+        <select
+          value={ui.defaultHarness ?? ''}
+          onchange={(e) => setDefaultHarness(e.currentTarget.value)}
+          aria-label="harness for new runs"
+        >
+          {#each ui.harnesses as h (h)}<option value={h}>{humanizeHarness(h)}</option>{/each}
+        </select>
+      </label>
+    {/if}
     <button type="submit" class="file-btn" disabled={!value.trim() || busy}>{busy ? 'Starting…' : 'Start run'}</button>
   </form>
 

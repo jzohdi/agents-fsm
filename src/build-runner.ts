@@ -20,7 +20,7 @@ import { FakeGitHub } from './integration/github-fake';
 import type { GitHub } from './integration/github';
 import { GitHubCliAccount, type SuggestionSource } from './integration/github-account';
 import { catalogForHarness } from './agent/harness-models';
-import { DEFAULT_HARNESS, HARNESS_IDS, isHarnessId, type HarnessId } from './agent/harness';
+import { DEFAULT_HARNESS, DEFAULT_HARNESS_SETTING_KEY, HARNESS_IDS, isHarnessId, type HarnessId } from './agent/harness';
 import { DEFAULT_MODEL_MAP } from './agent/subprocess-executor';
 import { EnrolledRepoResolver, singleRepoResolver, type RepoResolver } from './integration/github-resolver';
 import { buildRealGitHub, buildRealRunner } from './real-run';
@@ -140,9 +140,6 @@ export function resolveCostCeiling(args: CliArgs): number | undefined {
   return candidate !== undefined && Number.isFinite(candidate) && candidate >= 0 ? candidate : undefined;
 }
 
-/** The settings key the persisted default harness is stored under (the dashboard selector writes it). */
-export const SETTING_DEFAULT_HARNESS = 'default_harness';
-
 /**
  * Resolve the harness a new run gets when the request omits one (plan §5.2), precedence: the
  * `--harness` flag → the `FLEET_HARNESS` env → the persisted `settings.default_harness` → the shipped
@@ -162,7 +159,7 @@ export function resolveDefaultHarness(args: CliArgs, repo: Repository): HarnessI
     }
     return flag;
   }
-  const persisted = repo.getSetting(SETTING_DEFAULT_HARNESS);
+  const persisted = repo.getSetting(DEFAULT_HARNESS_SETTING_KEY);
   return persisted !== undefined && isHarnessId(persisted) ? persisted : DEFAULT_HARNESS;
 }
 
@@ -203,10 +200,10 @@ export function buildOrchestrator(args: CliArgs): {
     // for UI parity — the stub executor ignores the chosen harness/model.
     defaultHarness,
     catalogFor: catalogForHarness,
-    // The concrete model a run uses when it has no override — the dropdown's "Default". Only meaningful
-    // for Claude Code (its `--model` flag); other harnesses drive the model from the recipe's logical
-    // names, so there's no single concrete default to show.
-    ...(defaultHarness === DEFAULT_HARNESS ? { defaultModel: args.model ?? DEFAULT_MODEL_MAP.frontier } : {}),
+    // The concrete model a run uses when it has no override — the dropdown's "Default". This is the Claude
+    // `--model` flag (or its `opus` default); `getModels` only surfaces it when it's a model in the shown
+    // harness's catalog, so it's ignored for a non-Claude default rather than mislabeled.
+    defaultModel: args.model ?? DEFAULT_MODEL_MAP.frontier,
     concurrency: resolveConcurrency(args), // global cap for the parallel drain pump (Milestone 8 Phase B)
     feedbackReentryState: args.feedbackReentryState, // stage a run re-enters on PR feedback (default plan)
     feedbackMarker: args.feedbackMarker, // marker a PR comment must start with to count as feedback (default `feedback:`)

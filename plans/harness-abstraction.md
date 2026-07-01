@@ -1,6 +1,6 @@
 # Multi-harness support (Claude Code + Cursor) — implementation plan
 
-Status: in progress · Author: design spike · Supersedes nothing · Depends on: Milestone 8 (complete)
+Status: complete (shipped scope; §9 items deferred) · Author: design spike · Supersedes nothing · Depends on: Milestone 8 (complete)
 
 ## Implementation status & revisions
 
@@ -75,10 +75,35 @@ Two things changed since the plan below was first written; read this first.
      validation; `POST /runs` harness passthrough/400; `--harness` parsing; plus catalog↔registry↔
      HarnessId drift guards so a future harness can't be half-added. Full suite stays green (547 passing).
 
-**Next PR (dashboard selector):** the only remaining piece is §7 — the dashboard's harness `<select>` +
-persistence + run-card badge, and its backing HTTP settings routes (§6.5: `GET /settings` /
-`PUT /settings/default-harness` writing `settings.default_harness`, the currently write-less persisted
-default). The §8.1 fleet-abort finding and the strict-registry decision remain honored.
+5. **PR 4 (stacked on `harness-selection-foundation`) — the dashboard harness selector (§7) + settings
+   routes (§6.5).** The multi-harness feature is now user-facing. Delivers:
+   - **Settings routes** (§6.5): `GET /settings` → `{ defaultHarness, harnesses }`; `PUT
+     /settings/default-harness { harness }` (400 on a bad id). Backed by `Orchestrator.getSettings` /
+     `setDefaultHarness` — the latter validates, persists via `Repository.setSetting`, **and** updates the
+     in-memory default so `getModels` + new-run defaulting change live (no restart). This is the write
+     side of the previously write-less persisted default (its key now lives in `agent/harness.ts` as
+     `DEFAULT_HARNESS_SETTING_KEY`, shared by the reader `resolveDefaultHarness` and this writer).
+   - **`getModels` consistency fix:** it now reports a `defaultModel` only when that model is in the shown
+     harness's catalog — so switching the default harness at runtime no longer mislabels the Claude `opus`
+     default as another harness's default. Let the brittle `defaultHarness === DEFAULT_HARNESS` conditional
+     in `build-runner` go away (always pass `defaultModel`; `getModels` filters).
+   - **Dashboard (§7):** the **unified control** (recommended option) — a compact harness `<select>` in
+     the file-run bar (`FileRunBar.svelte`) bound to `ui.defaultHarness`; changing it persists via `PUT`
+     *and* is the harness the next run is stamped with (`store.svelte.ts` `loadSettings`/`setDefaultHarness`;
+     `startRun` sends it). A run-card **harness badge** shows when a run's harness isn't the current default;
+     the RunDetail live-box label + model dropdown now follow the **run's** harness (the dropdown hides for
+     a run whose harness ≠ the loaded catalog, so it can't offer wrong-catalog models).
+   - **Cursor cost blindness (§8.2):** the dashboard shows **"n/a"** (not a deceptive "$0.00") for a
+     cost-blind harness's cost, via `render.ts` `tracksCost`/`fmtRunCost` (`fmtCost` was folded into it).
+   - Tests: settings GET/PUT + persistence + bad-id 400 (server + orchestrator), the `getModels`
+     default-model consistency guard, and pure `render.ts` coverage (`humanizeHarness`, `fmtRunCost`/
+     `tracksCost`, `pipelineModel` carrying `harness` + a `n/a` cost label). Verified in the browser
+     preview (selector persists + flips badges; per-harness dropdown; cursor "n/a"). Full suite green (553).
+
+The multi-harness plan is now **complete** through the shipped scope. The §8.1 fleet-abort finding and the
+strict-registry decision remain honored. Remaining items are all §9 deferrals: per-stage harness override,
+a real Cursor cost estimator (today its runs show "cost n/a"), the `.cursor/rules` system-prompt path, and
+per-harness model catalogs for a *non-default* run's model dropdown (today it hides for those runs).
 
 ## 0. Goal & scope
 

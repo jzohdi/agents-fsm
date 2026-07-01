@@ -19,6 +19,7 @@
  *   GET  /repos                 POST /repos
  *   GET  /config                PUT /config
  *   GET  /models                GET /suggestions[?q=]
+ *   GET  /settings              PUT /settings/default-harness
  *   GET  /stream[?runId=&repo=] GET /health
  */
 
@@ -70,6 +71,12 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
 
   // --- harness model catalog: selectable models + the daemon default (the model dropdown) ---
   if (method === 'GET' && path === '/models') return sendJson(res, 200, orch.getModels());
+
+  // --- settings: the default harness + the selectable set (the dashboard's harness selector) ---
+  if (method === 'GET' && path === '/settings') return sendJson(res, 200, orch.getSettings());
+  if (method === 'PUT' && path === '/settings/default-harness') {
+    return sendJson(res, 200, orch.setDefaultHarness(str(await readJson(req), 'harness')));
+  }
 
   // --- new-run autocomplete: your repos + their open issues matching ?q= (README §3.3 Layer 7) ---
   if (method === 'GET' && path === '/suggestions') {

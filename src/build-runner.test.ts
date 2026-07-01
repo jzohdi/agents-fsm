@@ -11,8 +11,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { loadDefaultConfig } from './fsm/config';
 import { parseCliArgs } from './cli-args';
+import { DEFAULT_HARNESS_SETTING_KEY } from './agent/harness';
 import {
-  SETTING_DEFAULT_HARNESS,
   buildOrchestrator,
   buildRunner,
   loadRunConfig,
@@ -182,28 +182,28 @@ describe('resolveDefaultHarness (default harness: --harness â†’ FLEET_HARNESS â†
   it('prefers the --harness flag over the env var and the persisted setting', () => {
     process.env.FLEET_HARNESS = 'claude-code';
     const r = repo();
-    r.setSetting(SETTING_DEFAULT_HARNESS, 'claude-code');
+    r.setSetting(DEFAULT_HARNESS_SETTING_KEY, 'claude-code');
     expect(resolveDefaultHarness(argsWith('cursor'), r)).toBe('cursor');
   });
 
   it('falls back to FLEET_HARNESS when the flag is absent, over the persisted setting', () => {
     process.env.FLEET_HARNESS = 'cursor';
     const r = repo();
-    r.setSetting(SETTING_DEFAULT_HARNESS, 'claude-code');
+    r.setSetting(DEFAULT_HARNESS_SETTING_KEY, 'claude-code');
     expect(resolveDefaultHarness(argsWith(), r)).toBe('cursor');
   });
 
   it('reads the persisted setting when neither the flag nor the env var is set', () => {
     delete process.env.FLEET_HARNESS;
     const r = repo();
-    r.setSetting(SETTING_DEFAULT_HARNESS, 'cursor');
+    r.setSetting(DEFAULT_HARNESS_SETTING_KEY, 'cursor');
     expect(resolveDefaultHarness(argsWith(), r)).toBe('cursor');
   });
 
   it('reads a stale/garbage persisted value defensively, falling back to claude-code', () => {
     delete process.env.FLEET_HARNESS;
     const r = repo();
-    r.setSetting(SETTING_DEFAULT_HARNESS, 'gemini'); // a removed/unknown id must not wedge boot
+    r.setSetting(DEFAULT_HARNESS_SETTING_KEY, 'gemini'); // a removed/unknown id must not wedge boot
     expect(resolveDefaultHarness(argsWith(), r)).toBe('claude-code');
   });
 
