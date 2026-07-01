@@ -172,6 +172,8 @@ export function buildOrchestrator(args: CliArgs): {
     modelCatalog: CLAUDE_CODE_CATALOG,
     defaultModel: args.model ?? DEFAULT_MODEL_MAP.frontier,
     concurrency: resolveConcurrency(args), // global cap for the parallel drain pump (Milestone 8 Phase B)
+    feedbackReentryState: args.feedbackReentryState, // stage a run re-enters on PR feedback (default plan)
+    feedbackMarker: args.feedbackMarker, // marker a PR comment must start with to count as feedback (default `feedback:`)
     ...(resolveCostCeiling(args) !== undefined ? { costCeiling: resolveCostCeiling(args) } : {}), // global cost ceiling (M8 B3)
     ...(configPath ? { configPath } : {}),
     // A FatalExecutorError (e.g. the harness is unauthenticated) fails every run; surface its remedy

@@ -69,6 +69,23 @@ export interface Comment {
 }
 
 /**
+ * A comment on a **pull request** thread. The PR sibling of {@link IssueComment}: it carries
+ * `author` and `createdAt` so the PR Feedback Poller can tell a human reviewer's comment apart from
+ * the orchestrator's own review comments and anchor a deterministic high-water mark (see the PR
+ * Feedback Poller). A PR is an issue under the hood on GitHub, so these come from the same REST
+ * `issues/<n>/comments` endpoint {@link Comment}s are posted to.
+ */
+export interface PrComment {
+  id: number;
+  prNumber: number;
+  /** GitHub login of the comment's author — the bot's login vs. a human reviewer, for feedback detection. */
+  author: string;
+  body: string;
+  /** ISO-8601 creation timestamp, as GitHub reports it. */
+  createdAt: string;
+}
+
+/**
  * A comment on an **issue** (as opposed to a PR). Triage uses these for its human-in-the-loop:
  * it posts clarifying questions as an issue comment and the reply poller reads the thread to detect
  * a human's answer. Unlike {@link Comment} it carries `author` and `createdAt`, the fields that let
@@ -200,11 +217,24 @@ export interface GitHub {
    * recorded `pr_number` (and `findOpenPrForBranch`) first (README §2 "stage actions are idempotent"). */
   openPr(input: OpenPrInput): Promise<PullRequest>;
 
+  /**
+   * Read a PR by number — chiefly for its `state` (open/closed/merged). The PR Feedback Poller
+   * calls this each tick to stop watching a run once its PR is merged or closed.
+   */
+  getPr(prNumber: number): Promise<PullRequest>;
+
   /** Update an existing PR (the idempotent path when the run already has a PR). */
   updatePr(input: UpdatePrInput): Promise<PullRequest>;
 
   /** Post a comment on a PR (review feedback). */
   postComment(input: { prNumber: number; body: string }): Promise<Comment>;
+
+  /**
+   * The PR's comment thread, oldest first — what the PR Feedback Poller scans for a human reviewer's
+   * `feedback:`-marked comment after a run has finished. Carries `author`/`createdAt` (unlike
+   * {@link Comment}) so the bot's own comments are distinguishable from a human's.
+   */
+  listPrComments(prNumber: number): Promise<PrComment[]>;
 }
 
 /** Thrown by adapters when a referenced GitHub object does not exist. */

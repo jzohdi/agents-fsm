@@ -208,6 +208,29 @@ describe('HTTP API', () => {
     expect((await fetch(`${base}/runs/${run.id}/model`, { method: 'POST', body: JSON.stringify({}) })).status).toBe(400);
   });
 
+  it('routes POST /runs/:id/check-pr-feedback to an on-demand PR feedback check', async () => {
+    const { base, orchestrator, repo, github } = await start();
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle();
+    const prNumber = repo.getRun(run.id)!.prNumber!;
+
+    // With no new feedback, the finished run is still being watched.
+    const first = (await (await fetch(`${base}/runs/${run.id}/check-pr-feedback`, { method: 'POST' })).json()) as { result: string };
+    expect(first.result).toBe('watching');
+
+    // A `feedback:` comment left after the run finished → the next check re-opens it and reports it.
+    const finishedAt = repo.listTransitions(run.id).at(-1)!.createdAt;
+    const after = new Date(Date.parse(finishedAt) + 1000).toISOString();
+    github.seedPrComment(prNumber, { author: 'alice', body: 'feedback: rename it', createdAt: after });
+    const res = await fetch(`${base}/runs/${run.id}/check-pr-feedback`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { run: { status: string }; result: string };
+    expect(body.result).toBe('reopened');
+    expect(body.run.status).toBe('running');
+
+    expect((await fetch(`${base}/runs/99999/check-pr-feedback`, { method: 'POST' })).status).toBe(404);
+  });
+
   it('streams live events over SSE', async () => {
     const { base, orchestrator } = await start();
     const controller = new AbortController();

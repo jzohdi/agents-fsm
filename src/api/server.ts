@@ -15,6 +15,7 @@
  *   POST /runs/:id/stop         POST /runs/:id/revert
  *   POST /runs/:id/archive      POST /runs/:id/unarchive
  *   POST /runs/:id/cost-override POST /runs/:id/model
+ *   POST /runs/:id/check-pr-feedback
  *   GET  /repos                 POST /repos
  *   GET  /config                PUT /config
  *   GET  /models                GET /suggestions[?q=]
@@ -143,6 +144,12 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
         return sendJson(res, 200, orch.setModel(id, raw));
       }
     }
+  }
+
+  // --- on-demand PR-feedback check: poll one run's open PR now (the dashboard's "Check now") ---
+  const feedbackMatch = /^\/runs\/(\d+)\/check-pr-feedback$/.exec(path);
+  if (feedbackMatch && method === 'POST') {
+    return sendJson(res, 200, await orch.checkPrFeedback(Number(feedbackMatch[1])));
   }
 
   // --- config ---

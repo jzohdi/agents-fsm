@@ -21,7 +21,7 @@ import {
   type StubHandler,
 } from '../agent/executor';
 import { FakeGitHub } from '../integration/github-fake';
-import { EVENT_ADVANCE, EventLoop, type EventLoopOptions } from './event-loop';
+import { ADDRESSING_PR_FEEDBACK_FLAG, EVENT_ADVANCE, EventLoop, PR_FEEDBACK_TRIGGER, type EventLoopOptions } from './event-loop';
 
 function setup(handler: StubHandler, opts: EventLoopOptions = {}, fsmOverride?: (fsm: FsmConfig) => FsmConfig) {
   const loaded = loadDefaultConfig();
@@ -884,5 +884,68 @@ describe('fatal executor error aborts the drain (does not escalate one run)', ()
     expect(repo.listTransitions(run.id)).toHaveLength(0); // no escalation transition written
     // The claimed event was left `processing`, so a restart reclaims it → fix-and-rerun resumes.
     expect(loop.recover()).toBe(1);
+  });
+});
+
+describe('reopenForPrFeedback (PR feedback re-entry)', () => {
+  /** Drive a fresh run to `done` on the golden path (so it has an open PR), returning the harness. */
+  async function toDone(opts: EventLoopOptions = {}) {
+    const h = setup(goldenPathHandler, opts);
+    const run = h.loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await h.loop.runUntilIdle();
+    expect(h.repo.getRun(run.id)!.status).toBe('done');
+    return { ...h, run };
+  }
+
+  it('re-opens a done run at the default re-entry stage (plan) with a fresh advance event and reset counters', async () => {
+    const { repo, loop, run } = await toDone();
+
+    loop.reopenForPrFeedback(run.id, { kind: 'pr_feedback', prNumber: 1 });
+
+    const after = repo.getRun(run.id)!;
+    expect(after.status).toBe('running');
+    expect(after.currentState).toBe('plan');
+    expect(after.flags[ADDRESSING_PR_FEEDBACK_FLAG]).toBe(true);
+
+    const last = repo.listTransitions(run.id).at(-1)!;
+    expect(last.toState).toBe('plan');
+    expect(last.trigger).toBe(PR_FEEDBACK_TRIGGER);
+    expect(last.isReset).toBe(true); // fresh budget of rounds for the re-opened cycle
+    expect(last.eventId).toBeNull(); // a control transition, not driven by an event
+    expect(repo.claimNextEvent()).toMatchObject({ runId: run.id, type: 'advance' });
+  });
+
+  it('honors a configured re-entry stage', async () => {
+    const { repo, loop, run } = await toDone({ feedbackReentryState: 'interface_design' });
+    loop.reopenForPrFeedback(run.id, { note: 'x' });
+    expect(repo.getRun(run.id)!.currentState).toBe('interface_design');
+  });
+
+  it('re-opens a needs_human run too', async () => {
+    const escalateAtReview: StubHandler = (req) =>
+      req.stage === 'code_review' && req.phase === 'produce'
+        ? { output: { requestedTransition: 'escalate', reason: { note: 'needs a human' } } }
+        : goldenPathHandler(req);
+    const { repo, loop } = setup(escalateAtReview);
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.runUntilIdle();
+    expect(repo.getRun(run.id)!.status).toBe('needs_human');
+
+    loop.reopenForPrFeedback(run.id, { note: 'address feedback' });
+    expect(repo.getRun(run.id)!.status).toBe('running');
+    expect(repo.getRun(run.id)!.currentState).toBe('plan');
+  });
+
+  it('rejects a run that is not finished, a missing reason, and a terminal re-entry target', async () => {
+    const running = setup(goldenPathHandler);
+    const runningRun = running.loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    expect(() => running.loop.reopenForPrFeedback(runningRun.id, { note: 'x' })).toThrowError(/not a finished/);
+    expect(() => running.loop.reopenForPrFeedback(999, { note: 'x' })).toThrowError(/not found/);
+
+    const { loop, run } = await toDone();
+    expect(() => loop.reopenForPrFeedback(run.id, '')).toThrowError(/reason is required/);
+
+    const { loop: badLoop, run: badRun } = await toDone({ feedbackReentryState: 'done' });
+    expect(() => badLoop.reopenForPrFeedback(badRun.id, { note: 'x' })).toThrowError(/terminal/);
   });
 });

@@ -21,6 +21,7 @@ import {
   type Issue,
   type IssueComment,
   type OpenPrInput,
+  type PrComment,
   type PrepareWorkingTreeInput,
   type Suggestion,
   type PullRequest,
@@ -65,7 +66,9 @@ export interface FakeGitHubOptions {
 export class FakeGitHub implements GitHub {
   private readonly issues = new Map<string, Issue>();
   private readonly prs: PullRequest[] = [];
-  private readonly comments: Comment[] = [];
+  /** PR comments (newest last), across all PRs; filtered by PR number on read. Carries author +
+   *  createdAt so the PR Feedback Poller can distinguish the bot's comments from a human reviewer's. */
+  private readonly prComments: PrComment[] = [];
   /** Issue comments (newest last), across all issues; filtered by issue number on read. */
   private readonly issueComments: IssueComment[] = [];
   /** Commits recorded per working-tree path (newest last). */
@@ -139,9 +142,26 @@ export class FakeGitHub implements GitHub {
     return this.prs.map((pr) => ({ ...pr }));
   }
 
-  /** All comments posted so far (test introspection). */
+  /** All PR comments posted so far, as bare {@link Comment}s (test introspection). */
   listComments(): Comment[] {
-    return this.comments.map((c) => ({ ...c }));
+    return this.prComments.map((c) => ({ id: c.id, prNumber: c.prNumber, body: c.body }));
+  }
+
+  /**
+   * Seed a comment on a PR (newest last). Tests use this to simulate a **human reviewer** leaving
+   * feedback on an open PR — pass an `author` other than the bot login and a body starting with the
+   * feedback marker (e.g. `feedback: …`) so the PR Feedback Poller treats it as actionable.
+   */
+  seedPrComment(prNumber: number, comment: { author: string; body: string; createdAt?: string }): PrComment {
+    const created: PrComment = {
+      id: ++this.commentCounter,
+      prNumber,
+      author: comment.author,
+      body: comment.body,
+      createdAt: comment.createdAt ?? new Date(this.now()).toISOString(),
+    };
+    this.prComments.push(created);
+    return { ...created };
   }
 
   /** Total commits recorded so far (test introspection, e.g. to assert a review stage made none). */
@@ -152,6 +172,29 @@ export class FakeGitHub implements GitHub {
   /** Force a PR's state, e.g. to simulate a human merging a dependency (README §3.5). */
   setPrState(prNumber: number, state: PullRequest['state']): void {
     this.requirePr(prNumber).state = state;
+  }
+
+  /**
+   * Seed a PR with an explicit number + state (test / preview affordance; parallels {@link seedIssue}).
+   * Used when a PR must already exist without going through `openPr` — e.g. the dashboard preview, whose
+   * runs are seeded straight into the store. Idempotent on the number; bumps the auto-number counter so a
+   * later `openPr` never collides.
+   */
+  seedPr(number: number, pr: { branch: string; base?: string; state?: PullRequest['state']; title?: string; body?: string }): PullRequest {
+    const existing = this.prs.find((p) => p.number === number);
+    if (existing) return { ...existing };
+    const created: PullRequest = {
+      number,
+      branch: pr.branch,
+      base: pr.base ?? 'main',
+      title: pr.title ?? `PR #${number}`,
+      body: pr.body ?? '',
+      state: pr.state ?? 'open',
+      url: `https://github.test/pr/${number}`,
+    };
+    this.prs.push(created);
+    this.prCounter = Math.max(this.prCounter, number);
+    return { ...created };
   }
 
   // --- GitHub API -------------------------------------------------------------
@@ -215,6 +258,10 @@ export class FakeGitHub implements GitHub {
     return pr ? { ...pr } : null;
   }
 
+  async getPr(prNumber: number): Promise<PullRequest> {
+    return { ...this.requirePr(prNumber) };
+  }
+
   async openPr(input: OpenPrInput): Promise<PullRequest> {
     const number = ++this.prCounter;
     const pr: PullRequest = {
@@ -239,9 +286,14 @@ export class FakeGitHub implements GitHub {
 
   async postComment(input: { prNumber: number; body: string }): Promise<Comment> {
     this.requirePr(input.prNumber); // reject comments on a non-existent PR, like the real API
-    const comment: Comment = { id: ++this.commentCounter, prNumber: input.prNumber, body: input.body };
-    this.comments.push(comment);
-    return { ...comment };
+    // Recorded like the real API: authored by the orchestrator's bot login, which is what the PR
+    // Feedback Poller relies on the human reviewer's `feedback:` marker to distinguish it from.
+    const created = this.seedPrComment(input.prNumber, { author: this.botLogin, body: input.body });
+    return { id: created.id, prNumber: created.prNumber, body: created.body };
+  }
+
+  async listPrComments(prNumber: number): Promise<PrComment[]> {
+    return this.prComments.filter((c) => c.prNumber === prNumber).map((c) => ({ ...c }));
   }
 
   // --- working tree + git -----------------------------------------------------

@@ -20,6 +20,7 @@
 import { randomBytes } from 'node:crypto';
 
 import { recipeFor, type AgentsConfig, type StageIo } from '../fsm/config';
+import { ADDRESSING_PR_FEEDBACK_FLAG } from '../loop/event-loop';
 import type { GitHub, Issue, IssueComment, PullRequest } from '../integration/github';
 import { isRepoResolver, singleRepoResolver, type RepoContext, type RepoResolver } from '../integration/github-resolver';
 import type { AgentPhase, Repository, Run } from '../store/repository';
@@ -328,6 +329,16 @@ export class AgentRunner {
     // `.agent/plan.md` from the tree, so it needs neither.
     if (io.kind === 'review' && run.prNumber !== null) {
       input.base = baseBranch;
+    }
+    // PR-feedback cycle: a finished run re-opened to address reviewer comments already has an open PR
+    // (the flag is set only by that re-open, so the first build pass is unaffected). Give every stage
+    // the PR + its comment thread so it *iterates on the existing work* — refining the plan/interface/
+    // code and addressing the feedback — instead of rebuilding the PR from scratch. The prompts (base.md)
+    // tell the agent how to use these fields.
+    if (run.flags[ADDRESSING_PR_FEEDBACK_FLAG] === true && run.prNumber !== null) {
+      const prComments = await github.listPrComments(run.prNumber);
+      input.pullRequest = { number: run.prNumber, branch, addressingFeedback: true };
+      input.prFeedback = prComments.map((c) => ({ author: c.author, body: c.body, createdAt: c.createdAt }));
     }
     return { issue, workingDir: tree.path, branch, input };
   }

@@ -223,6 +223,34 @@ export async function revertRun(toState: string, reason: string): Promise<void> 
   }
 }
 
+/**
+ * Ask the daemon to check a finished run's open PR for feedback **now** (the "Check now" button),
+ * instead of waiting for the next background poll. Banners the outcome and refreshes the run so a
+ * re-open (or a stopped-watching flag change) shows immediately.
+ */
+export async function checkPrFeedback(id: number): Promise<void> {
+  try {
+    const { run, result } = await request<{ run: Run; result: 'reopened' | 'watching' | 'stopped' | 'not_watching' }>(
+      'POST',
+      `/runs/${id}/check-pr-feedback`,
+    );
+    upsertRun(run);
+    if (id === ui.selectedId) await refreshDetail();
+    const pr = run.prNumber != null ? `PR #${run.prNumber}` : 'the PR';
+    const msg =
+      result === 'reopened'
+        ? `New feedback found — re-opened run ${id} to address it.`
+        : result === 'stopped'
+          ? `${pr} is merged or closed — stopped watching.`
+          : result === 'watching'
+            ? `No new feedback yet — still watching ${pr}.`
+            : `Run ${id} isn't being watched for PR feedback.`;
+    banner(msg, result === 'not_watching' ? 'err' : 'ok');
+  } catch (err) {
+    banner(`Check failed: ${(err as Error).message}`, 'err');
+  }
+}
+
 export async function saveConfig(raw: unknown): Promise<{ ok: boolean; msg: string }> {
   try {
     const { version } = await request<{ version: string }>('PUT', '/config', raw);

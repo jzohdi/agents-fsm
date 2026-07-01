@@ -17,6 +17,7 @@
 
 import { saveConfig, type LoadedConfig } from '../fsm/config';
 import { EventLoop } from '../loop/event-loop';
+import { PrFeedbackPoller, type PrFeedbackCheck } from '../loop/pr-feedback-poller';
 import type { AgentRunner } from '../agent/runner';
 import type {
   AgentRunRecord,
@@ -94,6 +95,14 @@ export interface OrchestratorOptions {
    * aggregate clears or an operator overrides a run ({@link Orchestrator.overrideCost}). Undefined = off.
    */
   costCeiling?: number;
+  /**
+   * The stage a run re-enters when the PR Feedback Poller re-opens it to address reviewer feedback
+   * ({@link Orchestrator.reopenForPrFeedback}). Must be a defined, non-terminal state. Defaults to
+   * `plan` (see `EventLoop.DEFAULT_FEEDBACK_REENTRY_STATE`).
+   */
+  feedbackReentryState?: string;
+  /** Marker a PR comment must start with to count as actionable feedback. Defaults to `feedback:`. */
+  feedbackMarker?: string;
   /** Called when a background drain throws (e.g. a `FatalExecutorError`). Default: log to stderr. */
   onError?: (err: unknown) => void;
   /**
@@ -121,6 +130,7 @@ export class Orchestrator {
   private readonly costCeiling?: number;
   private readonly modelCatalog?: HarnessCatalog;
   private readonly defaultModel?: string;
+  private readonly prFeedbackPoller: PrFeedbackPoller;
   private config: LoadedConfig;
 
   // Single-flight drain pump (plans/milestone-5.md §2.2).
@@ -148,6 +158,12 @@ export class Orchestrator {
       ...(options.now ? { now: options.now } : {}),
       ...(options.maxIterations !== undefined ? { maxIterations: options.maxIterations } : {}),
       ...(options.costCeiling !== undefined ? { costCeiling: options.costCeiling } : {}),
+      ...(options.feedbackReentryState !== undefined ? { feedbackReentryState: options.feedbackReentryState } : {}),
+    });
+    // The Orchestrator owns the PR Feedback Poller (it is the `PrFeedbackReopener`), so the daemon's
+    // background tick and the dashboard's on-demand "Check now" both drive the *same* instance.
+    this.prFeedbackPoller = new PrFeedbackPoller(this.repo, this.resolver, this, {
+      ...(options.feedbackMarker !== undefined ? { marker: options.feedbackMarker } : {}),
     });
   }
 
@@ -260,6 +276,43 @@ export class Orchestrator {
     this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
     this.kick();
     return run;
+  }
+
+  /**
+   * Re-open a finished run (`done`/`needs_human`) to address reviewer feedback on its open PR — the PR
+   * Feedback Poller calls this in the daemon when it detects a new `feedback:` comment. It re-enters the
+   * run at the configured stage (`plan` by default) with the open-PR context, then kicks the pump so the
+   * loop re-dispatches. Publishes the status change to the stream. Satisfies {@link PrFeedbackReopener}.
+   */
+  reopenForPrFeedback(runId: number, reason: unknown): Run {
+    const run = this.loop.reopenForPrFeedback(runId, reason);
+    this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
+    this.kick();
+    return run;
+  }
+
+  /**
+   * Check one run's open PR for feedback **right now** (the dashboard's "Check now" button), rather than
+   * waiting for the next background tick. Returns the (possibly re-opened) run plus the outcome so the
+   * caller can tell the operator what happened. A `reopened` result already published its status +
+   * kicked the pump (via {@link reopenForPrFeedback}); for any other outcome we publish a `status` event
+   * so connected dashboards pick up a changed watch flag / high-water mark. 404 for an unknown run.
+   */
+  async checkPrFeedback(runId: number): Promise<{ run: Run; result: PrFeedbackCheck }> {
+    this.requireRun(runId); // 404 if missing
+    const result = await this.prFeedbackPoller.checkRun(runId);
+    const run = this.requireRun(runId);
+    if (result !== 'reopened') this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
+    return { run, result };
+  }
+
+  /**
+   * One pass of the PR Feedback Poller over every watched run (the daemon's background tick calls this on
+   * a timer). Returns how many runs were re-opened. Kept on the Orchestrator so the poller has a single
+   * owner shared with {@link checkPrFeedback}.
+   */
+  pollPrFeedbackOnce(): Promise<number> {
+    return this.prFeedbackPoller.checkOnce();
   }
 
   /** Revert a run to an earlier state with a reason, then re-dispatch it (README §3.3 Layer 6). */

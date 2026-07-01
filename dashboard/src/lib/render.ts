@@ -270,6 +270,22 @@ export function prUrl(repoRef: string | null | undefined, prNumber: number | nul
   return prNumber != null && REPO_REF.test(repoRef ?? '') ? `https://github.com/${repoRef}/pull/${prNumber}` : null;
 }
 
+/**
+ * Whether the orchestrator is watching this run's open PR for reviewer feedback: it is a finished run
+ * (`done` / `needs_human`) that has a PR, isn't archived, and hasn't been flagged as merged/closed.
+ * Mirrors the server's `PrFeedbackPoller.isWatchable`; the `pr_feedback_closed` flag is set once its PR
+ * merges/closes. Pure, so it is unit-tested and the RunDetail badge stays a thin derivation.
+ */
+export function isWatchingPrFeedback(run: Run | null | undefined): boolean {
+  if (!run) return false;
+  return (
+    (run.status === 'done' || run.status === 'needs_human') &&
+    run.prNumber != null &&
+    run.archivedAt == null &&
+    run.flags?.pr_feedback_closed !== true
+  );
+}
+
 /** The github.com URL for a run's branch, or `null` when there is no branch / the repo ref is unusable. */
 export function branchUrl(repoRef: string | null | undefined, branch: string | null | undefined): string | null {
   if (!branch || !REPO_REF.test(repoRef ?? '')) return null;

@@ -177,4 +177,25 @@ describe('FakeGitHub — pull requests and comments', () => {
     gh.setPrState(pr.number, 'merged');
     expect(gh.listPrs()[0]!.state).toBe('merged');
   });
+
+  it('reads a PR by number (getPr) and rejects an unknown one', async () => {
+    const gh = new FakeGitHub();
+    const pr = await gh.openPr({ branch: 'b', base: 'main', title: 't', body: '' });
+    expect(await gh.getPr(pr.number)).toMatchObject({ number: pr.number, state: 'open' });
+    await expect(gh.getPr(99)).rejects.toBeInstanceOf(GitHubNotFoundError);
+  });
+
+  it('lists PR comments with author + timestamp: the bot for postComment, the reviewer for seedPrComment', async () => {
+    const gh = new FakeGitHub({ botLogin: 'bot[bot]' });
+    const pr = await gh.openPr({ branch: 'b', base: 'main', title: 't', body: '' });
+    await gh.postComment({ prNumber: pr.number, body: 'automated review note' });
+    gh.seedPrComment(pr.number, { author: 'alice', body: 'feedback: rename it', createdAt: '2026-07-01T00:00:00.000Z' });
+
+    const comments = await gh.listPrComments(pr.number);
+    expect(comments.map((c) => c.author)).toEqual(['bot[bot]', 'alice']);
+    expect(comments.map((c) => c.id)).toEqual([1, 2]); // global monotonic ids, like GitHub
+    expect(comments[1]).toMatchObject({ prNumber: pr.number, body: 'feedback: rename it', createdAt: '2026-07-01T00:00:00.000Z' });
+    // Comments are scoped to their PR.
+    expect(await gh.listPrComments(999)).toEqual([]);
+  });
 });

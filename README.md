@@ -538,7 +538,7 @@ The build order puts the novel, high-risk core first (FSM engine, then event-dri
 - **Live stream** — a typed `StreamEvent = transition | activity | status` over an in-process **`Broadcaster`** (`src/api/stream.ts`). The loop's `onTransition` and the runner's `onActivity` (the seams M2/M4 exposed) plus the Orchestrator's status changes publish to it; `transition`/`status` carry the full updated `Run` so token/cost totals ride along (the "token usage" stream item). Best-effort: a throwing subscriber never wedges the publisher.
 - **HTTP + SSE server** (`src/api/server.ts`): Node's built-in `http` — no web framework (KISS). Routes: `POST /runs`, `GET /runs[?status]`, `GET /runs/:id` (run + transitions + agent runs + artifacts + logs), `POST /runs/:id/{pause,resume,stop,revert}`, `GET|PUT /config`, `GET /stream[?runId]`, `GET /health`. The stream is **SSE** (server→client only, so simpler than WebSocket — no dependency, browser `EventSource` auto-reconnects; README §3.3 Layer 6 allows either). Errors map to `400`/`404`/`409`/`500` JSON.
 - **`get`/`update` FSM config through the API.** `updateConfig` validates via the existing `parseConfigFile` (invalid → `400`, file never overwritten), writes the file (`saveConfig`), recomputes the version, and hot-swaps the loop + runner for **new** runs. It refuses (`409`) while any run is non-terminal, so an in-flight run is never re-pointed at changed rules (README §3.1) without the deferred per-run versioned config store (M6). Without a `--config` path the config is read-only (the bundled default is never overwritten).
-- **`serve` daemon** (`src/serve.ts`, `npm start -- serve [--port 4319] [--config <path>] [--db <path>] [--mock …]`): builds the orchestrator (real by default; `--mock` opts into the no-cost stub/fake) + server, recovers crash-stranded events on startup, runs the Reply Poller in the background, and shuts down cleanly on SIGINT/SIGTERM — force-closing long-lived SSE connections (`closeAllConnections`) so Ctrl-C doesn't hang. It **binds to loopback (`127.0.0.1`)** since the MVP API is unauthenticated and meant for a localhost dashboard (README §1 / Layer 7); remote access stays a deliberate post-MVP add-on. `buildRunner` is now shared (`src/build-runner.ts`) so the one-shot CLI and the daemon wire the runner identically.
+- **`serve` daemon** (`src/serve.ts`, `npm start -- serve [--port 4319] [--config <path>] [--db <path>] [--mock …]`): builds the orchestrator (real by default; `--mock` opts into the no-cost stub/fake) + server, recovers crash-stranded events on startup, runs the Reply Poller **and the PR Feedback Poller** in the background, and shuts down cleanly on SIGINT/SIGTERM — force-closing long-lived SSE connections (`closeAllConnections`) so Ctrl-C doesn't hang. It **binds to loopback (`127.0.0.1`)** since the MVP API is unauthenticated and meant for a localhost dashboard (README §1 / Layer 7); remote access stays a deliberate post-MVP add-on. `buildRunner` is now shared (`src/build-runner.ts`) so the one-shot CLI and the daemon wire the runner identically.
 - **Tests** (+27): `Broadcaster` fan-out/isolation; the `Orchestrator` command + pump + config flows (incl. a pause/stop that lands mid-stage, a revert that discards the stale event, the active-run config-edit guard, and invalid-config rejection); the HTTP server over a real ephemeral port via `fetch` (routing, status codes, and a live SSE read); the new loop control methods directly; and `repo.discardPendingEvents`.
 
 **Added in Milestone 6 — local web dashboard** (design in [plans/milestone-6.md](plans/milestone-6.md)): a browser dashboard served by the daemon on localhost, a **pure client** of the Layer 6 API (README §3.1) — built with **Svelte 5 + Vite**. 323 tests passing (+15 over M5). Verified live in a browser (the built bundle and the HMR dev server: runs render, the FSM graph highlights the current state, controls + the FSM editor work, SSE is live with no console errors).
@@ -554,7 +554,7 @@ The build order puts the novel, high-risk core first (FSM engine, then event-dri
 - **Transactional outbox** (`src/agent/side-effects.ts` + the `side_effects` ledger, schema migration 2): the non-idempotent GitHub calls (issue/PR comments, sub-issue creation) are wrapped in a `SideEffectLedger` keyed `${state}#${visit}:${slot}`. A crash in the post-call / pre-commit window is replayed from the ledger — a completed call is reused (no duplicate comment or sub-issues), and a call left in-flight by a crash escalates `partial_side_effect` rather than retrying a non-idempotent operation. The visit index (transitions into the state) makes automatic recovery dedup within a visit while an operator resume — a fresh visit — deliberately retries clean. Proven by an extended crash-recovery test (a triage split replayed through the loop creates each sub-issue exactly once).
 - **`needs_human` UX** (`escalationModel` in `dashboard/src/lib/render.ts` → the escalation inspector in `RunDetail.svelte`): a `needs_human` run shows *why* it escalated — the trigger, the stage it escalated from, the structured reason, and a one-line operator guidance per trigger (including the `partial_side_effect` GitHub-cleanup step) — alongside the existing Resume / Revert / Stop controls. Resume (from `needs_human`) and Revert both reset the round counters (a fresh budget), now asserted directly in the loop tests.
 
-**On top of Milestone 7 — resolved-lane archive + UI/CLI polish** (current `HEAD`: **446 tests passing, 1 skipped** — the flag-gated real-e2e; the figure now includes Milestone 8 Phase A + B1/B2/B3). Hardening and ergonomics that landed after the M7 core, not a new milestone:
+**On top of Milestone 7 — resolved-lane archive + UI/CLI polish** (current `HEAD`: **495 tests passing, 2 skipped** — the flag-gated real integration tests; the figure now includes Milestone 8 Phase A + B1/B2/B3 and PR feedback re-entry). Hardening and ergonomics that landed after the M7 core, not a new milestone:
 
 - **Archive / unarchive** — a terminal run (`done` / `stopped`) can be archived out of the dashboard's **Resolved** lane to keep it uncluttered, and restored. Backed by `runs.archived_at` (schema migration 1), `Orchestrator.archive` (refuses `409` for a non-terminal run) / `unarchive` (an always-allowed no-op undo), `POST /runs/:id/archive` + `/unarchive`, and the render-layer rule that drops archived runs from the Resolved lane (`pipelineModel`).
 - **New-run autocomplete** — `GET /suggestions[?q=]` backs the dashboard's *File a new run* bar with GitHub-issue search (the same adapter surface a future continuous mode reuses, Milestone 11).
@@ -568,9 +568,50 @@ The build order puts the novel, high-risk core first (FSM engine, then event-dri
 - **Phase B B3 — rate-limit handling + optional global cost ceiling.** The Stage Executor now retries a **rate-limited / overloaded** invocation (a `RateLimitError` classified from either a non-zero exit or an `is_error` result) with capped exponential backoff + equal jitter (injectable `sleep`/`random`) — N parallel agents no longer escalate en masse on a shared limit; exhaustion escalates as a normal `HarnessError`, other failures fail on the first attempt, auth stays fatal (`--max-retries`, default 4). The **global cost ceiling** (loop-level, on top of the untouched per-run FSM budget) aggregates `cost_used` across active runs: at/over the ceiling `Orchestrator.start` refuses new runs (`429`) and the shared claim (`EventLoop.claimNext`) parks existing runs' next stages — a non-deadlocking human-in-the-loop gate. The operator overrides per run (`POST /runs/:id/cost-override`): `next_step` runs one more stage (consumed on use), `full` runs it to completion, `none` clears it. Config: `runs.cost_override` (migration 4), `--cost-ceiling` / `FLEET_COST_CEILING` (off by default). The dashboard shows a header spend/ceiling chip (red + "parked" over the ceiling) and per-run override buttons (`GET /cost` + the pure `costStatusModel`).
 - **Tests:** repos CRUD + `listRuns({ repo })` + the migration-3 retrofit; resolver per-repo/memoize/throws; runner + poller hitting the correct per-repo adapter; the orchestrator enrollment check + repo-filtered runs/stream; an end-to-end multi-repo loop (`multi-repo.test.ts`); the claim's within-run/cross-run serialization; the pool's parallelism + global-cap + per-run-serial witness + fatal-rejects paths; a two-repo concurrent drain; `--concurrency` parsing + `resolveConcurrency` precedence; **concurrent crash recovery across repos** (`concurrent-recovery.test.ts` — no duplicate/lost events, no duplicate transitions, one PR per run on its own adapter with distinct per-run branches, split sub-issues/comments created exactly once); rate-limit classification + backoff + retry-then-succeed / exhaust-then-escalate / no-retry-on-other-failures; the cost-ceiling gate (park / `next_step` / `full` / under-ceiling), the `start` 429 + `overrideCost` command, and `resolveCostCeiling` precedence; and the pure `costStatusModel`.
 
+**Added on top of Milestone 8 — PR feedback re-entry.** A finished run's PR keeps getting reviewed after
+the pipeline stops, so review feedback now flows back into the pipeline. A **PR Feedback Poller**
+(`src/loop/pr-feedback-poller.ts`, the sibling of the Reply Poller) scans each finished run (`done` or
+`needs_human`) that has an **open** PR for a new reviewer comment whose body starts with a deterministic
+marker (default **`feedback:`**, `--feedback-marker`). On a match it re-opens the run via a loop-owned
+`EventLoop.reopenForPrFeedback` — a control transition (like `revert`/`resume`, so **the FSM engine is
+untouched**) back to a configurable re-entry stage (default `plan`, `--feedback-reentry`), with counters
+reset and a run flag (`addressing_pr_feedback`) set. That flag makes the Agent Runner inject the open PR
++ its comment thread into **every** stage's input (`pullRequest` / `prFeedback`), and the prompts tell
+the agent to *iterate on the existing PR* — refining the plan/interface/code to address the feedback —
+rather than rebuild it (so `tdd` adopts the existing PR via its find-or-create path; no duplicate PR).
+A comment counts as unaddressed feedback when it was posted **after the run entered its finished state**
+— the run's most recent transition (the one that moved it into `done`/`needs_human`) is the boundary, so
+its timestamp is exactly "when the run finished." This is anchored in the transition log (like the Reply
+Poller), needs no stored high-water mark, and is restart-safe: after a re-open the run's *new* finish
+transition advances the boundary, so an addressed comment never re-triggers, and a comment left *before*
+completion (a pipeline review comment) is ignored. Polling **stops** once the PR is merged or closed (the
+run is flagged and skipped), and an **archived** run is never watched (archiving files a resolved run
+away). The daemon runs it alongside the Reply Poller, on the same `--poll-interval` and `--poll-timeout 0`
+disable switch.
+
+The **Orchestrator owns the poller**, so the daemon's background tick (`pollPrFeedbackOnce`) and the
+dashboard's on-demand check (`POST /runs/:id/check-pr-feedback` → `checkPrFeedback`) drive the same
+instance. The **dashboard** surfaces it in the run detail: a finished run with an open PR shows a pulsing
+"watching PR #N for feedback" chip plus a **Check now** button (pure `isWatchingPrFeedback`; the button
+banners the outcome — re-opened / still watching / stopped). So the operator can see the watch is live
+and force an immediate check instead of waiting for the next poll.
+
+- **Tests:** `isFeedbackComment` marker matching and the pure `newFeedbackComments` boundary rule
+  (only marker comments newer than the finished-at timestamp); the poller re-opening on a `feedback:`
+  comment left after completion, ignoring one left before completion and benign chatter, not re-detecting
+  it once the run is re-opened, stopping on merge **and** close, re-opening a `needs_human` run, excluding
+  an archived run, per-run adapter isolation (multi-repo), and transient-error isolation; the loop's
+  `reopenForPrFeedback` (done/needs_human re-entry, reset + flag + one advance event, configured re-entry
+  stage, and the not-finished / missing-reason / terminal-target rejections); the runner injecting
+  `pullRequest`/`prFeedback` only when the flag is set; and the fake's `getPr`/`listPrComments`/
+  `seedPrComment`/`seedPr`. The **on-demand check** adds: the poller's `checkRun` outcomes
+  (watching → reopened → not_watching → stopped), the `Orchestrator.checkPrFeedback` command
+  (reopen / watching / stopped / not_watching + a 404), the `POST /runs/:id/check-pr-feedback` route,
+  and the pure `isWatchingPrFeedback` badge helper.
+
 > The per-milestone test counts above record each milestone as it shipped; the authoritative current
-> figure is **446 passing / 1 skipped**. Run `npm test` for the live number rather than trusting a
-> hand-maintained tally.
+> figure is **503 passing / 2 skipped** backend (+ 32 dashboard render-model tests), the two skips being
+> the flag-gated real integration tests. Run `npm test` for the live number rather than a hand tally.
 
 ---
 
@@ -652,4 +693,19 @@ Just restart the daemon (`serve`). On startup it reclaims events stranded `proce
 and re-drains them; idempotent, event-keyed transitions and the transactional outbox (§8 / risk
 register) ensure no duplicate transition, comment, or sub-issue. Nothing manual is required — except
 the rare `partial_side_effect` escalation, handled per §9.5.
+
+### 9.7 Iterate on a finished run via PR feedback
+Once a run finishes (`done`, or parked in `needs_human`) its PR is still open for review. To feed a
+reviewer comment back into the pipeline, **post a PR comment that starts with `feedback:`** — e.g.
+`feedback: rename the endpoint and add a test for the empty case`. The daemon's PR Feedback Poller
+(running on `--poll-interval`, alongside the triage reply poller) picks it up within a tick and
+re-opens the run at `plan` (configurable via `--feedback-reentry`), carrying the open PR + the comment
+thread into every stage so the agents refine the *existing* PR instead of rebuilding it. Comments that
+don't start with the marker are ignored, so ordinary review chatter is safe. Watching stops
+automatically once the PR is **merged or closed** (or if you **archive** the run). Tune the marker with
+`--feedback-marker`; disable both pollers with `--poll-timeout 0`.
+
+Don't want to wait for the next poll? Open the run in the dashboard: a watched run shows a **"watching
+PR #N for feedback"** chip and a **Check now** button that polls that one PR immediately and tells you
+what it found (re-opened / still watching / stopped).
 

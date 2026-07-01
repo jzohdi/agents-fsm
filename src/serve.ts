@@ -52,12 +52,17 @@ export async function serve(args: CliArgs): Promise<void> {
   // Background reply polling: re-arm `awaiting_input` runs when a human replies on the issue (each via
   // its own repo's adapter — the resolver, not a single bound adapter, so multi-repo runs poll correctly).
   const stopPolling = startReplyPolling(orchestrator, repo, resolver, args);
+  // Background PR-feedback polling: re-open a finished run when a human leaves a `feedback:` comment on
+  // its still-open PR, and stop watching once the PR merges/closes (see the PR Feedback Poller). The
+  // Orchestrator owns the poller instance (shared with the dashboard's on-demand "Check now").
+  const stopFeedbackPolling = startPrFeedbackPolling(orchestrator, args);
 
   // Graceful shutdown: stop accepting connections and clear the poll timer so the process can exit.
   await new Promise<void>((resolve) => {
     const shutdown = () => {
       console.log('\nShutting down…');
       stopPolling();
+      stopFeedbackPolling();
       server.close(() => resolve());
       // Long-lived SSE connections would otherwise keep `close` from ever completing — terminate them
       // so the process can exit promptly on Ctrl-C (Node ≥18.2; engines require ≥20).
@@ -96,6 +101,24 @@ function startReplyPolling(
   const poller = new ReplyPoller(repo, resolver, orchestrator);
   const timer = setInterval(() => {
     void poller.checkOnce().catch((err) => console.error(`[reply-poller] ${String(err)}`));
+  }, args.pollIntervalSeconds * 1000);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
+/**
+ * Periodically scan finished runs' open PRs for a new `feedback:` comment and re-open the run to
+ * address it (the daemon's continuous PR-feedback loop). Shares the reply poller's interval and its
+ * `--poll-timeout 0` disable switch. The Orchestrator owns the poller (so the dashboard's "Check now"
+ * drives the same instance); this just ticks it on a timer. Returns a stop function.
+ */
+function startPrFeedbackPolling(
+  orchestrator: ReturnType<typeof buildOrchestrator>['orchestrator'],
+  args: CliArgs,
+): () => void {
+  if (args.pollTimeoutMinutes <= 0) return () => {};
+  const timer = setInterval(() => {
+    void orchestrator.pollPrFeedbackOnce().catch((err) => console.error(`[pr-feedback-poller] ${String(err)}`));
   }, args.pollIntervalSeconds * 1000);
   timer.unref?.();
   return () => clearInterval(timer);
