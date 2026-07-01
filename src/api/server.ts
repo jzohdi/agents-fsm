@@ -9,14 +9,15 @@
  * The live stream is **SSE**, not WebSocket: updates only flow server→client, so SSE is the simpler
  * fit (no extra library, browser `EventSource` auto-reconnects); README §3.3 Layer 6 allows either.
  *
- * Routes (plans/milestone-5.md §3):
- *   POST /runs                  GET /runs            GET /runs/:id
+ * Routes (plans/milestone-5.md §3; /repos is Milestone 8 Phase A):
+ *   POST /runs[?...]            GET /runs[?status=&repo=]   GET /runs/:id
  *   POST /runs/:id/pause        POST /runs/:id/resume
  *   POST /runs/:id/stop         POST /runs/:id/revert
  *   POST /runs/:id/archive      POST /runs/:id/unarchive
+ *   GET  /repos                 POST /repos
  *   GET  /config                PUT /config
  *   GET  /suggestions[?q=]
- *   GET  /stream[?runId=]       GET /health
+ *   GET  /stream[?runId=&repo=] GET /health
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -67,11 +68,28 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
     return sendJson(res, 200, await orch.suggestIssues(url.searchParams.get('q') ?? ''));
   }
 
+  // --- repos (Milestone 8 Phase A: enroll a repo the fleet can run / list enrolled repos) ---
+  if (path === '/repos') {
+    if (method === 'GET') return sendJson(res, 200, orch.listRepos());
+    if (method === 'POST') {
+      const body = await readJson(req);
+      return sendJson(res, 201, orch.enrollRepo({
+        repoRef: str(body, 'repoRef'),
+        workingRoot: optStr(body, 'workingRoot'),
+        baseBranch: optStr(body, 'baseBranch'),
+        cloneUrl: optStr(body, 'cloneUrl'),
+        localRepo: optStr(body, 'localRepo'),
+      }));
+    }
+    return sendError(res, new ApiError(405, `method ${method} not allowed on /repos`));
+  }
+
   // --- runs ---
   if (path === '/runs') {
     if (method === 'GET') {
       const status = url.searchParams.get('status') ?? undefined;
-      return sendJson(res, 200, orch.listRuns(status as RunStatus | undefined));
+      const repo = url.searchParams.get('repo') ?? undefined;
+      return sendJson(res, 200, orch.listRuns({ status: status as RunStatus | undefined, repo }));
     }
     if (method === 'POST') {
       const body = await readJson(req);
@@ -121,6 +139,11 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
 function streamSse(orch: Orchestrator, req: IncomingMessage, res: ServerResponse, url: URL): void {
   const runFilter = url.searchParams.get('runId');
   const onlyRun = runFilter !== null ? Number(runFilter) : undefined;
+  // Repo-scoped stream (Milestone 8 Phase A): the dashboard's repo view subscribes with ?repo= and
+  // sees only that repo's events. Every event carries a run id; we resolve it to its repo (once per
+  // event, only while filtering) since activity events don't carry the repo inline.
+  // An absent or empty `?repo=` means no filter (matches GET /runs); a value scopes to that repo.
+  const onlyRepo = url.searchParams.get('repo')?.toLowerCase() || undefined;
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -141,6 +164,7 @@ function streamSse(orch: Orchestrator, req: IncomingMessage, res: ServerResponse
   write(': connected\n\n');
   const unsubscribe = orch.subscribe((event) => {
     if (onlyRun !== undefined && eventRunId(event) !== onlyRun) return;
+    if (onlyRepo !== undefined && orch.repoOfRun(eventRunId(event))?.toLowerCase() !== onlyRepo) return;
     write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
   });
   const heartbeat = setInterval(() => write(': ping\n\n'), SSE_HEARTBEAT_MS);

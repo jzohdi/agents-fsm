@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import FileRunBar from './lib/FileRunBar.svelte';
+  import RepoTabs from './lib/RepoTabs.svelte';
   import Pipeline from './lib/Pipeline.svelte';
   import RunDetail from './lib/RunDetail.svelte';
   import Editor from './lib/Editor.svelte';
@@ -37,6 +38,10 @@
     </div>
   </div>
 </header>
+
+{#if ui.view === 'run'}
+  <RepoTabs />
+{/if}
 
 <FileRunBar />
 

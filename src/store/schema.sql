@@ -123,6 +123,25 @@ CREATE TABLE IF NOT EXISTS side_effects (
 -- One ledger row per (run, slot): makes the claim atomic (INSERT OR IGNORE relies on this index).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_side_effects_key ON side_effects(run_id, key);
 
+-- Enrolled repositories (Milestone 8 Phase A — README §5). One row per repo the fleet can run.
+-- `runs.repo_ref` references `repos.repo_ref` (enforced in the application layer, not a SQL FK:
+-- `repo_ref` is a string key and SQLite cannot add a FK to the existing `runs` table without a full
+-- rebuild, which buys no safety here). The columns map 1:1 onto the Git/GitHub adapter's config, so
+-- the per-repo adapter resolver builds a `GitHubCli` straight from a row. Secrets stay env-only — no
+-- token column in the MVP (per-repo secrets are Milestone 8 Phase B).
+CREATE TABLE IF NOT EXISTS repos (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  -- COLLATE NOCASE: GitHub repo refs are case-insensitive and `parseRepoRef` preserves casing, so the
+  -- uniqueness + `ON CONFLICT(repo_ref)` upsert must be case-insensitive too — else `--repo Acme/Web`
+  -- and an issue URL's `acme/web` would enroll as two rows the case-insensitive lookups can't tell apart.
+  repo_ref     TEXT    NOT NULL COLLATE NOCASE UNIQUE,  -- canonical `owner/name` (see integration/refs parseRepoRef)
+  clone_url    TEXT,                               -- GitHub remote; NULL → derive https://github.com/<repo_ref>.git
+  local_repo   TEXT,                               -- optional local checkout to clone working trees from (offline/fast)
+  working_root TEXT    NOT NULL,                   -- where this repo's per-run trees clone (`<working_root>/run-<id>`)
+  base_branch  TEXT    NOT NULL DEFAULT 'main',    -- branch PRs target / working trees branch off
+  created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_transitions_run ON transitions(run_id, id);
 CREATE INDEX IF NOT EXISTS idx_events_status ON events(status, id);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_run ON agent_runs(run_id, id);

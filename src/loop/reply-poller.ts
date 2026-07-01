@@ -20,7 +20,8 @@
 
 import { AWAIT_INPUT_TRIGGER } from './event-loop';
 import type { GitHub, IssueComment } from '../integration/github';
-import type { Repository } from '../store/repository';
+import { isRepoResolver, singleRepoResolver, type RepoResolver } from '../integration/github-resolver';
+import type { Repository, Run } from '../store/repository';
 
 /** The minimal re-arm surface the poller needs from the Event Loop (it owns the status + event write). */
 export interface AwaitingResumer {
@@ -46,15 +47,19 @@ const DEFAULT_INTERVAL_MS = 15_000;
 export class ReplyPoller {
   private readonly intervalMs: number;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly resolver: RepoResolver;
 
   constructor(
     private readonly repo: Repository,
-    private readonly github: GitHub,
+    // A single repo's adapter (single-repo / mock / tests) or a multi-repo {@link RepoResolver}; the
+    // poller reads each parked run's issue thread via *its* repo's adapter (M8 Phase A).
+    github: GitHub | RepoResolver,
     private readonly resumer: AwaitingResumer,
     options: ReplyPollerOptions = {},
   ) {
     this.intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.sleep = options.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    this.resolver = isRepoResolver(github) ? github : singleRepoResolver({ github, baseBranch: 'main' });
   }
 
   /**
@@ -64,9 +69,9 @@ export class ReplyPoller {
    */
   async checkOnce(): Promise<number> {
     let rearmed = 0;
-    for (const run of this.repo.listRuns('awaiting_input')) {
+    for (const run of this.repo.listRuns({ status: 'awaiting_input' })) {
       try {
-        const reply = await this.findReply(run.id);
+        const reply = await this.findReply(run);
         if (!reply) continue;
         // Record the wake-up on the run's activity stream before re-arming, so the audit trail shows
         // *why* triage re-ran (the dashboard/CLI surface this; the transition log alone wouldn't).
@@ -96,7 +101,7 @@ export class ReplyPoller {
     const now = opts.now ?? Date.now;
     const deadline = now() + opts.maxWaitMs;
     let total = 0;
-    while (this.repo.listRuns('awaiting_input').length > 0 && now() < deadline) {
+    while (this.repo.listRuns({ status: 'awaiting_input' }).length > 0 && now() < deadline) {
       await this.sleep(this.intervalMs);
       const rearmed = await this.checkOnce();
       if (rearmed > 0) {
@@ -108,10 +113,11 @@ export class ReplyPoller {
   }
 
   /** The human reply (if any) to the run's most recent triage question — a later comment, not the bot's. */
-  private async findReply(runId: number): Promise<IssueComment | undefined> {
-    const question = this.pendingQuestion(runId);
+  private async findReply(run: Run): Promise<IssueComment | undefined> {
+    const question = this.pendingQuestion(run.id);
     if (!question) return undefined;
-    const comments = await this.github.listIssueComments(question.issueNumber);
+    const { github } = this.resolver.for(run.repoRef);
+    const comments = await github.listIssueComments(question.issueNumber);
     return comments.find((c) => c.id > question.commentId && c.author !== question.botLogin);
   }
 

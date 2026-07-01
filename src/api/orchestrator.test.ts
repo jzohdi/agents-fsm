@@ -13,8 +13,18 @@ import { loadDefaultConfig } from '../fsm/config';
 import { openDb } from '../store/db';
 import { Repository } from '../store/repository';
 import { AgentRunner } from '../agent/runner';
-import { FatalExecutorError, StubExecutor, goldenPathHandler, type StageExecutor, type StubHandler } from '../agent/executor';
+import {
+  FatalExecutorError,
+  StubExecutor,
+  goldenPathHandler,
+  type AgentRunRequest,
+  type AgentRunResult,
+  type StageExecutor,
+  type StubHandler,
+} from '../agent/executor';
 import { FakeGitHub } from '../integration/github-fake';
+import type { GitHub } from '../integration/github';
+import { EnrolledRepoResolver, singleRepoResolver, type RepoResolver } from '../integration/github-resolver';
 import { ApiError, Orchestrator } from './orchestrator';
 import { Broadcaster, type StreamEvent } from './stream';
 
@@ -22,24 +32,41 @@ const DEFAULT_CONFIG_PATH = fileURLToPath(new URL('../fsm/default-config.json', 
 
 /** Build an Orchestrator over an in-memory DB + stub + fake GitHub. The handler can reference the
  *  orchestrator via the returned object (e.g. to pause itself mid-stage) through a late binding. */
-function setup(opts: { handler?: StubHandler; configPath?: string; repoRef?: string } = {}) {
+function setup(
+  opts: {
+    handler?: StubHandler;
+    /** Override the stage executor entirely (e.g. a gated one to observe drain concurrency). */
+    executor?: StageExecutor;
+    configPath?: string;
+    /** Build a custom resolver (e.g. an EnrolledRepoResolver) to exercise the enrollment check; the
+     *  default accepts any repo (single-repo/mock behavior). */
+    makeResolver?: (repo: Repository, github: GitHub) => RepoResolver;
+    defaultWorkingRoot?: string;
+    /** Global concurrency cap for the drain pump (Milestone 8 Phase B). Defaults to 1 (serial). */
+    concurrency?: number;
+  } = {},
+) {
   const loaded = loadDefaultConfig();
   const repo = new Repository(openDb(':memory:'));
   const github = new FakeGitHub({ autoSeedIssues: true });
   const broadcaster = new Broadcaster();
   const events: StreamEvent[] = [];
   broadcaster.subscribe((e) => events.push(e));
-  const runner = new AgentRunner(repo, new StubExecutor(opts.handler ?? goldenPathHandler), loaded.agents, github, {
+  const executor = opts.executor ?? new StubExecutor(opts.handler ?? goldenPathHandler);
+  const runner = new AgentRunner(repo, executor, loaded.agents, github, {
     onActivity: (activity) => broadcaster.publish({ type: 'activity', activity }),
   });
+  const resolver = opts.makeResolver?.(repo, github) ?? singleRepoResolver({ github, baseBranch: 'main' });
   const orchestrator = new Orchestrator({
     repo,
     runner,
     config: loaded,
     broadcaster,
     github,
-    ...(opts.repoRef ? { repoRef: opts.repoRef } : {}),
+    resolver,
+    ...(opts.defaultWorkingRoot ? { defaultWorkingRoot: opts.defaultWorkingRoot } : {}),
     ...(opts.configPath ? { configPath: opts.configPath } : {}),
+    ...(opts.concurrency !== undefined ? { concurrency: opts.concurrency } : {}),
   });
   return { orchestrator, repo, github, events };
 }
@@ -93,20 +120,66 @@ describe('Orchestrator — start + drain', () => {
     expect(() => orchestrator.start({ issueRef: 'not a ref' })).toThrow(ApiError);
   });
 
-  it('refuses an issue from a different repo than the daemon is bound to (single-repo guard)', () => {
-    const { orchestrator, repo } = setup({ repoRef: 'jzohdi/tmux-speedrun' });
-    // Same repo (any casing/URL form) is allowed.
+  it('admits a run only for an enrolled repo when the resolver is registry-backed (Milestone 8)', () => {
+    // A real (EnrolledRepoResolver) daemon: only enrolled repos can run; others are a loud 400.
+    const { orchestrator, repo } = setup({
+      makeResolver: (repo, github) => new EnrolledRepoResolver((ref) => repo.getRepo(ref), () => github),
+    });
+    repo.upsertRepo({ repoRef: 'jzohdi/tmux-speedrun', workingRoot: './w' });
+
+    // Enrolled repo (any casing/URL form) is admitted…
     expect(() => orchestrator.start({ issueRef: 'https://github.com/JZohdi/tmux-speedrun/issues/31' })).not.toThrow();
-    // A cross-repo issue (e.g. picked from the cross-repo autocomplete) is a loud 400, not a wrong-repo run.
-    expect(() => orchestrator.start({ issueRef: 'acme/web#318' })).toThrow(/different repo/);
-    // Only the same-repo run exists; the cross-repo start created nothing.
+    // …an unenrolled repo is refused, and no run is created for it.
+    expect(() => orchestrator.start({ issueRef: 'acme/web#318' })).toThrow(/not enrolled/);
     expect(repo.listRuns().map((r) => r.repoRef.toLowerCase())).toEqual(['jzohdi/tmux-speedrun']);
   });
 
-  it('disables the single-repo guard when no repo is configured (mock / no --repo)', () => {
-    const { orchestrator } = setup(); // no repoRef
+  it('admits any repo under the single-repo/mock resolver (no enrollment gate)', () => {
+    const { orchestrator } = setup(); // default: singleRepoResolver, accepts all
     expect(() => orchestrator.start({ issueRef: 'acme/web#1' })).not.toThrow();
     expect(() => orchestrator.start({ issueRef: 'other/repo#2' })).not.toThrow();
+  });
+});
+
+describe('Orchestrator — repos (Milestone 8 Phase A)', () => {
+  it('enrolls a repo (defaulting the working root) and lists it', () => {
+    const { orchestrator } = setup({ defaultWorkingRoot: './work' });
+    const enrolled = orchestrator.enrollRepo({ repoRef: 'acme/web' });
+    expect(enrolled).toMatchObject({ repoRef: 'acme/web', workingRoot: './work', baseBranch: 'main' });
+    expect(orchestrator.listRepos().map((r) => r.repoRef)).toEqual(['acme/web']);
+  });
+
+  it('rejects a malformed repoRef (400) and a missing working root with no daemon default (400)', () => {
+    const { orchestrator } = setup(); // no defaultWorkingRoot
+    expect(() => orchestrator.enrollRepo({ repoRef: 'not a repo' })).toThrow(ApiError);
+    expect(() => orchestrator.enrollRepo({ repoRef: 'acme/web' })).toThrow(/workingRoot is required/);
+  });
+
+  it('re-enrolling updates the config AND invalidates the resolver cache (takes effect without restart)', () => {
+    // The regression guard for the resolver's per-repo cache: a re-enroll must not leave a stale adapter.
+    let resolver: EnrolledRepoResolver;
+    const { orchestrator } = setup({
+      defaultWorkingRoot: './work',
+      makeResolver: (repo, github) => (resolver = new EnrolledRepoResolver((ref) => repo.getRepo(ref), () => github)),
+    });
+
+    orchestrator.enrollRepo({ repoRef: 'acme/web', baseBranch: 'main' });
+    expect(resolver!.for('acme/web').baseBranch).toBe('main'); // resolves and caches
+
+    orchestrator.enrollRepo({ repoRef: 'acme/web', baseBranch: 'develop' }); // re-enroll with new base
+    expect(resolver!.for('acme/web').baseBranch).toBe('develop'); // cache was invalidated, not stale
+    expect(orchestrator.listRepos()).toHaveLength(1); // still one repo
+  });
+
+  it('filters runs by repo and resolves a run to its repo (repoOfRun)', async () => {
+    const { orchestrator } = setup(); // single-repo resolver accepts any repo
+    const web = orchestrator.start({ issueRef: 'acme/web#1' });
+    orchestrator.start({ issueRef: 'acme/api#1' });
+    await orchestrator.settle();
+
+    expect(orchestrator.listRuns({ repo: 'acme/web' }).map((r) => r.repoRef)).toEqual(['acme/web']);
+    expect(orchestrator.repoOfRun(web.id)).toBe('acme/web');
+    expect(orchestrator.repoOfRun(99999)).toBeUndefined();
   });
 });
 
@@ -117,7 +190,7 @@ describe('Orchestrator — queries', () => {
     await orchestrator.settle();
 
     expect(orchestrator.listRuns().map((r) => r.id)).toContain(run.id);
-    expect(orchestrator.listRuns('done').map((r) => r.id)).toContain(run.id);
+    expect(orchestrator.listRuns({ status: 'done' }).map((r) => r.id)).toContain(run.id);
 
     const detail = orchestrator.getRunDetail(run.id);
     expect(detail.run.id).toBe(run.id);
@@ -144,7 +217,8 @@ describe('Orchestrator — queries', () => {
     const repo = new Repository(openDb(':memory:'));
     const broadcaster = new Broadcaster();
     const runner = new AgentRunner(repo, new StubExecutor(goldenPathHandler), loaded.agents, new FakeGitHub());
-    const noGh = new Orchestrator({ repo, runner, config: loaded, broadcaster }); // github omitted
+    const resolver = singleRepoResolver({ github: new FakeGitHub(), baseBranch: 'main' });
+    const noGh = new Orchestrator({ repo, runner, config: loaded, broadcaster, resolver }); // github omitted
     expect(await noGh.suggestIssues('anything')).toEqual([]);
   });
 });
@@ -355,7 +429,8 @@ describe('Orchestrator — drain errors', () => {
     };
     const runner = new AgentRunner(repo, executor, loaded.agents, new FakeGitHub({ autoSeedIssues: true }));
     const errors: unknown[] = [];
-    const orchestrator = new Orchestrator({ repo, runner, config: loaded, broadcaster, onError: (e) => errors.push(e) });
+    const resolver = singleRepoResolver({ github: new FakeGitHub(), baseBranch: 'main' });
+    const orchestrator = new Orchestrator({ repo, runner, config: loaded, broadcaster, resolver, onError: (e) => errors.push(e) });
 
     const run = orchestrator.start({ issueRef: 'o/r#1' });
     await orchestrator.settle(); // must not reject
@@ -365,6 +440,55 @@ describe('Orchestrator — drain errors', () => {
     // The run is NOT escalated (every run would hit this); the claimed event stays recoverable.
     expect(repo.getRun(run.id)!.status).toBe('running');
     expect(repo.recoverProcessingEvents()).toBe(1);
+  });
+});
+
+describe('Orchestrator — parallel drain (Milestone 8 Phase B)', () => {
+  /** A gated executor that overlaps in flight and records peak global concurrency. Drives golden path. */
+  class GatedExecutor implements StageExecutor {
+    active = 0;
+    peak = 0;
+    async run(req: AgentRunRequest): Promise<AgentRunResult> {
+      this.active += 1;
+      this.peak = Math.max(this.peak, this.active);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        const reply = goldenPathHandler(req);
+        return { output: reply.output, usage: { tokens: reply.tokens ?? 1 } };
+      } finally {
+        this.active -= 1;
+      }
+    }
+  }
+
+  it('drives runs in different repos to done concurrently under the global cap', async () => {
+    const executor = new GatedExecutor();
+    const { orchestrator, repo } = setup({ executor, concurrency: 2 });
+
+    // Two runs in different repos, started back-to-back; the pump should advance them in parallel.
+    const a = orchestrator.start({ issueRef: 'a/one#1' });
+    const b = orchestrator.start({ issueRef: 'b/two#1' });
+    await orchestrator.settle();
+
+    expect(repo.getRun(a.id)!.status).toBe('done');
+    expect(repo.getRun(b.id)!.status).toBe('done');
+    expect(repo.getRun(a.id)!.repoRef).toBe('a/one');
+    expect(repo.getRun(b.id)!.repoRef).toBe('b/two');
+    expect(executor.peak).toBeGreaterThan(1); // genuinely concurrent
+    expect(executor.peak).toBeLessThanOrEqual(2); // never exceeds the cap
+  });
+
+  it('defaults to serial (concurrency 1) so at most one stage runs at a time', async () => {
+    const executor = new GatedExecutor();
+    const { orchestrator, repo } = setup({ executor }); // no concurrency → default 1
+
+    const a = orchestrator.start({ issueRef: 'o/r#1' });
+    const b = orchestrator.start({ issueRef: 'o/r#2' });
+    await orchestrator.settle();
+
+    expect(repo.getRun(a.id)!.status).toBe('done');
+    expect(repo.getRun(b.id)!.status).toBe('done');
+    expect(executor.peak).toBe(1);
   });
 });
 

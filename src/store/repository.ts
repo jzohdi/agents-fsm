@@ -75,6 +75,33 @@ export interface CreateRunInput {
   fsmConfigVersion: string;
 }
 
+/** Optional filters for {@link Repository.listRuns}; omit a field to not filter on it. */
+export interface ListRunsFilter {
+  status?: RunStatus;
+  /** Canonical `owner/name`; matched case-insensitively against `runs.repo_ref`. */
+  repo?: string;
+}
+
+/** An enrolled repository the fleet can run (Milestone 8 Phase A). Columns map 1:1 onto the adapter config. */
+export interface Repo {
+  id: number;
+  repoRef: string;
+  cloneUrl: string | null;
+  localRepo: string | null;
+  workingRoot: string;
+  baseBranch: string;
+  createdAt: string;
+}
+
+export interface UpsertRepoInput {
+  repoRef: string;
+  workingRoot: string;
+  /** Defaults to `main` when omitted. */
+  baseBranch?: string;
+  cloneUrl?: string | null;
+  localRepo?: string | null;
+}
+
 export interface AppendTransitionInput {
   runId: number;
   fromState: string;
@@ -191,6 +218,16 @@ interface ArtifactRow {
   created_at: string;
 }
 
+interface RepoRow {
+  id: number;
+  repo_ref: string;
+  clone_url: string | null;
+  local_repo: string | null;
+  working_root: string;
+  base_branch: string;
+  created_at: string;
+}
+
 function parseJson(value: string | null): unknown {
   return value === null ? null : JSON.parse(value);
 }
@@ -251,6 +288,18 @@ function mapArtifact(r: ArtifactRow): Artifact {
   return { id: r.id, runId: r.run_id, kind: r.kind, locator: parseJson(r.locator), createdAt: r.created_at };
 }
 
+function mapRepo(r: RepoRow): Repo {
+  return {
+    id: r.id,
+    repoRef: r.repo_ref,
+    cloneUrl: r.clone_url,
+    localRepo: r.local_repo,
+    workingRoot: r.working_root,
+    baseBranch: r.base_branch,
+    createdAt: r.created_at,
+  };
+}
+
 export class Repository {
   constructor(private readonly db: Db) {}
 
@@ -260,6 +309,45 @@ export class Repository {
    */
   transaction<T>(fn: () => T): T {
     return this.db.transaction(fn)();
+  }
+
+  // --- repos (Milestone 8 Phase A) ---------------------------------------------
+
+  /**
+   * Enroll a repo (or update an already-enrolled one), keyed on `repo_ref`. Idempotent on purpose so
+   * the daemon can re-enroll its bound repo on every boot and the `POST /repos` command can be retried
+   * safely. The conflict update re-points the adapter config (working root, base, remote) to the
+   * latest values.
+   */
+  upsertRepo(input: UpsertRepoInput): Repo {
+    this.db
+      .prepare(
+        `INSERT INTO repos (repo_ref, clone_url, local_repo, working_root, base_branch)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(repo_ref) DO UPDATE SET
+           clone_url = excluded.clone_url,
+           local_repo = excluded.local_repo,
+           working_root = excluded.working_root,
+           base_branch = excluded.base_branch`,
+      )
+      .run(input.repoRef, input.cloneUrl ?? null, input.localRepo ?? null, input.workingRoot, input.baseBranch ?? 'main');
+    const repo = this.getRepo(input.repoRef);
+    if (!repo) throw new Error('upsertRepo: row vanished immediately after insert');
+    return repo;
+  }
+
+  /** Look up an enrolled repo by its canonical `owner/name` ref (case-insensitive). */
+  getRepo(repoRef: string): Repo | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM repos WHERE repo_ref = ? COLLATE NOCASE')
+      .get(repoRef) as RepoRow | undefined;
+    return row ? mapRepo(row) : undefined;
+  }
+
+  /** Every enrolled repo, oldest first (enrollment order — stable for the dashboard's repo selector). */
+  listRepos(): Repo[] {
+    const rows = this.db.prepare('SELECT * FROM repos ORDER BY id ASC').all() as RepoRow[];
+    return rows.map(mapRepo);
   }
 
   // --- runs --------------------------------------------------------------------
@@ -282,14 +370,23 @@ export class Repository {
   }
 
   /**
-   * All runs, newest first. The event loop is driven by the `events` queue, not by
-   * scanning runs; this exists for the CLI/dashboard (list runs) and for operational
-   * queries. Pass `status` to filter (e.g. list `needs_human` runs awaiting an operator).
+   * Runs, newest first. The event loop is driven by the `events` queue, not by scanning runs; this
+   * exists for the CLI/dashboard (list runs) and for operational queries. Pass `status` and/or `repo`
+   * to filter (e.g. `needs_human` runs awaiting an operator, or every run in one repo — Milestone 8).
    */
-  listRuns(status?: RunStatus): Run[] {
-    const rows = status
-      ? (this.db.prepare('SELECT * FROM runs WHERE status = ? ORDER BY id DESC').all(status) as RunRow[])
-      : (this.db.prepare('SELECT * FROM runs ORDER BY id DESC').all() as RunRow[]);
+  listRuns(filter: ListRunsFilter = {}): Run[] {
+    const where: string[] = [];
+    const params: string[] = [];
+    if (filter.status) {
+      where.push('status = ?');
+      params.push(filter.status);
+    }
+    if (filter.repo) {
+      where.push('repo_ref = ? COLLATE NOCASE');
+      params.push(filter.repo);
+    }
+    const clause = where.length ? ` WHERE ${where.join(' AND ')}` : '';
+    const rows = this.db.prepare(`SELECT * FROM runs${clause} ORDER BY id DESC`).all(...params) as RunRow[];
     return rows.map(mapRun);
   }
 
@@ -472,6 +569,14 @@ export class Repository {
    * in at this same point. Without the gate the loop would dispatch a stage for an
    * escalated or paused run, and processing a stray event for a terminal run would
    * call the engine on a terminal state and throw.
+   *
+   * Within-run serialization (Milestone 8 Phase B): the `NOT EXISTS … status =
+   * 'processing'` guard skips any run that already has a stage in flight, so under the
+   * worker pool the loop is **parallel across runs but serial within a run** — two
+   * stages of one run never overlap (they share a working tree and a state cursor).
+   * A run's follow-up event is enqueued inside the stage's commit transaction, before
+   * `markEventDone`, so this guard holds it back until the in-flight stage finalizes.
+   * Same predicate as {@link hasProcessingEvent}, enforced atomically at pickup.
    */
   claimNextEvent(): EventRow | undefined {
     const row = this.db
@@ -481,6 +586,9 @@ export class Repository {
            SELECT events.id FROM events
            JOIN runs ON runs.id = events.run_id
            WHERE events.status = 'pending' AND runs.status = 'running'
+             AND NOT EXISTS (
+               SELECT 1 FROM events p WHERE p.run_id = events.run_id AND p.status = 'processing'
+             )
            ORDER BY events.id ASC LIMIT 1
          )
          RETURNING *`,

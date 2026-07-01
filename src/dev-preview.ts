@@ -56,7 +56,7 @@ function main(): void {
   if (github instanceof FakeGitHub) seedSuggestions(github);
   // The dashboard opens the highest-id running run by default; aim the live feed at the same one so
   // the "model thinking" stream animates on the run the operator first sees.
-  const running = repo.listRuns('running');
+  const running = repo.listRuns({ status: 'running' });
   const runningId = running.length ? Math.max(...running.map((r) => r.id)) : ids[0]!;
 
   const server: Server = createApiServer(orchestrator);

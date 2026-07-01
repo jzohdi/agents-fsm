@@ -58,8 +58,8 @@ describe('runs', () => {
     repo.setRunStatus(b.id, 'needs_human');
 
     expect(repo.listRuns().map((r) => r.id)).toEqual([b.id, a.id]);
-    expect(repo.listRuns('running').map((r) => r.id)).toEqual([a.id]);
-    expect(repo.listRuns('needs_human').map((r) => r.id)).toEqual([b.id]);
+    expect(repo.listRuns({ status: 'running' }).map((r) => r.id)).toEqual([a.id]);
+    expect(repo.listRuns({ status: 'needs_human' }).map((r) => r.id)).toEqual([b.id]);
   });
 
   it('updates state, status, PR, and usage', () => {
@@ -194,14 +194,39 @@ describe('events (at-least-once queue)', () => {
     expect(first.payload).toEqual({ stage: 'triage' });
     expect(first.status).toBe('processing');
 
-    const second = repo.claimNextEvent()!;
-    expect(second.payload).toEqual({ stage: 'plan' });
-
-    // both claimed → nothing left pending
+    // Within-run serialization: the run already has a stage in flight, so its next
+    // (older) event is held back until the first finalizes — never two at once.
     expect(repo.claimNextEvent()).toBeUndefined();
 
     repo.markEventDone(first.id);
+    const second = repo.claimNextEvent()!;
+    expect(second.payload).toEqual({ stage: 'plan' });
+
+    repo.markEventDone(second.id);
     expect(repo.claimNextEvent()).toBeUndefined();
+  });
+
+  it('serializes within a run but stays parallel across runs (Milestone 8 Phase B)', () => {
+    const a = newRun();
+    const b = newRun();
+    repo.enqueueEvent({ runId: a.id, type: 'stage_done' });
+    repo.enqueueEvent({ runId: a.id, type: 'stage_done' });
+    repo.enqueueEvent({ runId: b.id, type: 'stage_done' });
+
+    // Worker 1 claims run A's first event → A now has a stage in flight.
+    const first = repo.claimNextEvent()!;
+    expect(first.runId).toBe(a.id);
+
+    // Worker 2 claims next: A is skipped (in flight); run B's event is served instead.
+    const second = repo.claimNextEvent()!;
+    expect(second.runId).toBe(b.id);
+
+    // Both runs are now busy → nothing else claimable, even though A has a pending event.
+    expect(repo.claimNextEvent()).toBeUndefined();
+
+    // A finishes → its second event becomes claimable again (serial within the run).
+    repo.markEventDone(first.id);
+    expect(repo.claimNextEvent()!.runId).toBe(a.id);
   });
 
   it('only claims events whose run is dispatchable (status = running)', () => {
@@ -250,14 +275,16 @@ describe('events (at-least-once queue)', () => {
   });
 
   it('reclaims stranded `processing` events on recovery so they are re-claimable', () => {
-    const run = newRun();
-    repo.enqueueEvent({ runId: run.id, type: 'stage_done' });
-    repo.enqueueEvent({ runId: run.id, type: 'stage_done' });
+    // Two runs so two events can be in flight at once (within a run, stages are serial).
+    const a = newRun();
+    const b = newRun();
+    repo.enqueueEvent({ runId: a.id, type: 'stage_done' });
+    repo.enqueueEvent({ runId: b.id, type: 'stage_done' });
 
-    // Simulate a crash mid-flight: both events claimed (now `processing`), one done.
-    const a = repo.claimNextEvent()!;
+    // Simulate a crash mid-flight under the pool: both events claimed (now `processing`), one done.
+    const claimedA = repo.claimNextEvent()!;
     repo.claimNextEvent();
-    repo.markEventDone(a.id);
+    repo.markEventDone(claimedA.id);
 
     // The one left in `processing` is invisible to claimNextEvent until reclaimed.
     expect(repo.claimNextEvent()).toBeUndefined();
@@ -424,5 +451,59 @@ describe('on-disk persistence (restart correctness, README Milestone 7)', () => 
     expect(repo2.getRun(run.id)).toMatchObject({ currentState: 'plan' });
     expect(repo2.listTransitions(run.id)).toHaveLength(1);
     second.close();
+  });
+});
+
+describe('repos registry (Milestone 8 Phase A)', () => {
+  it('enrolls a repo and reads it back with sane defaults', () => {
+    const enrolled = repo.upsertRepo({ repoRef: 'owner/repo', workingRoot: './work/owner-repo' });
+    expect(enrolled).toMatchObject({
+      repoRef: 'owner/repo',
+      workingRoot: './work/owner-repo',
+      baseBranch: 'main', // defaulted
+      cloneUrl: null,
+      localRepo: null,
+    });
+    expect(repo.getRepo('owner/repo')).toEqual(enrolled);
+  });
+
+  it('upsert is idempotent on repo_ref and re-points the adapter config', () => {
+    repo.upsertRepo({ repoRef: 'o/r', workingRoot: './a', baseBranch: 'main' });
+    const updated = repo.upsertRepo({ repoRef: 'o/r', workingRoot: './b', baseBranch: 'develop', cloneUrl: 'git@host:o/r.git' });
+
+    expect(updated).toMatchObject({ workingRoot: './b', baseBranch: 'develop', cloneUrl: 'git@host:o/r.git' });
+    expect(repo.listRepos()).toHaveLength(1); // still one row, not a duplicate
+  });
+
+  it('upsert dedups across casing (case-insensitive uniqueness, not two rows)', () => {
+    // `--repo Acme/Web` and an issue URL's `acme/web` are the same repo; the registry must not split
+    // them — else the case-insensitive `getRepo` would match a row ambiguously (repo_ref is COLLATE NOCASE).
+    repo.upsertRepo({ repoRef: 'Acme/Web', workingRoot: './a' });
+    repo.upsertRepo({ repoRef: 'acme/web', workingRoot: './b' });
+
+    expect(repo.listRepos()).toHaveLength(1);
+    expect(repo.getRepo('ACME/WEB')?.workingRoot).toBe('./b'); // the second upsert updated the one row
+  });
+
+  it('looks up case-insensitively and returns undefined when unenrolled', () => {
+    repo.upsertRepo({ repoRef: 'Owner/Repo', workingRoot: './w' });
+    expect(repo.getRepo('owner/repo')?.repoRef).toBe('Owner/Repo');
+    expect(repo.getRepo('other/repo')).toBeUndefined();
+  });
+
+  it('lists repos in enrollment order (oldest first)', () => {
+    repo.upsertRepo({ repoRef: 'a/one', workingRoot: './1' });
+    repo.upsertRepo({ repoRef: 'b/two', workingRoot: './2' });
+    expect(repo.listRepos().map((r) => r.repoRef)).toEqual(['a/one', 'b/two']);
+  });
+
+  it('filters runs by repo (case-insensitive), alone and combined with status', () => {
+    const a1 = repo.createRun({ issueRef: 'a/one#1', repoRef: 'a/one', initialState: 'triage', fsmConfigVersion: 'v1' });
+    const b1 = repo.createRun({ issueRef: 'b/two#1', repoRef: 'b/two', initialState: 'triage', fsmConfigVersion: 'v1' });
+    repo.setRunStatus(b1.id, 'needs_human');
+
+    expect(repo.listRuns({ repo: 'A/ONE' }).map((r) => r.id)).toEqual([a1.id]);
+    expect(repo.listRuns({ repo: 'b/two', status: 'needs_human' }).map((r) => r.id)).toEqual([b1.id]);
+    expect(repo.listRuns({ repo: 'b/two', status: 'running' })).toHaveLength(0);
   });
 });

@@ -102,3 +102,12 @@ export interface IssueSuggestion {
   number: number;
   title: string;
 }
+
+/** An enrolled repository the fleet can run (`GET/POST /repos`, Milestone 8 Phase A). */
+export interface Repo {
+  repoRef: string;
+  cloneUrl: string | null;
+  localRepo: string | null;
+  workingRoot: string;
+  baseBranch: string;
+}

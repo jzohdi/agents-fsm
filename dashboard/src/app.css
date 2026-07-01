@@ -80,6 +80,34 @@ input, textarea, button, select { font: inherit; }
 .af-live.on .d::after { content: ""; position: absolute; inset: -4px; border-radius: 50%; border: 1px solid var(--accent); opacity: 0.55; animation: af-rip 2.2s infinite; }
 @keyframes af-rip { 0% { transform: scale(0.5); opacity: 0.6; } 100% { transform: scale(1.9); opacity: 0; } }
 
+/* --- multi-repo tabs strip (Milestone 8 Phase A) --- */
+.af-repos { border-bottom: 1px solid var(--rule); background: var(--paper2); }
+.af-repotabs { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding-top: 9px; padding-bottom: 9px; }
+.af-repotab {
+  display: inline-flex; align-items: baseline; gap: 8px; border: 1px solid transparent;
+  background: transparent; color: var(--ink2); font-family: var(--ui); font-size: 12.5px; font-weight: 600;
+  padding: 5px 12px; cursor: pointer; border-radius: 2px; transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.af-repotab:hover { color: var(--ink); background: var(--paper); }
+.af-repotab.on { color: var(--ink); background: var(--accent-soft); border-color: var(--accent-line); }
+.af-repotab .nm { letter-spacing: -0.01em; }
+.af-repotab .ct { font-family: var(--mono); font-size: 11px; color: var(--ink3); }
+.af-repotab.on .ct { color: var(--accent); }
+.af-repotab .warn { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--rose); }
+.af-repoadd {
+  margin-left: auto; border: 1px solid var(--rule2); background: transparent; color: var(--ink3);
+  font-size: 15px; line-height: 1; width: 26px; height: 26px; border-radius: 2px; cursor: pointer;
+}
+.af-repoadd:hover, .af-repoadd.on { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+.af-enroll { display: flex; align-items: center; gap: 10px; padding-bottom: 12px; flex-wrap: wrap; }
+.af-enroll input {
+  border: 1px solid var(--rule2); background: var(--paper); font-family: var(--mono); font-size: 13px;
+  color: var(--ink); padding: 7px 11px; border-radius: 2px; min-width: 180px;
+}
+.af-enroll input:focus { outline: none; border-color: var(--accent-line); }
+.af-enroll-go { border: 0; background: var(--accent); color: #fff; font-size: 12.5px; font-weight: 600; padding: 8px 18px; border-radius: 2px; cursor: pointer; }
+.af-enroll-go:hover { background: #19623f; }
+
 /* --- file-a-run bar (Broadsheet) + autocomplete --- */
 .af-filebar { border-bottom: 1px solid var(--rule); position: relative; }
 .af-filebar .inner { display: flex; align-items: stretch; }

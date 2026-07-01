@@ -38,6 +38,12 @@ export interface CliArgs {
   config?: string;
   /** Port the `serve` daemon listens on — `--port`. Default 4319. */
   port: number;
+  /**
+   * Global concurrency cap for the `serve` daemon's drain pump (Milestone 8 Phase B) — `--concurrency`.
+   * Undefined here means "not set on the command line"; the daemon then falls back to `FLEET_CONCURRENCY`
+   * or its default (see `build-runner`). The one-shot CLI drains serially regardless of this flag.
+   */
+  concurrency?: number;
 }
 
 export function parseCliArgs(argv: string[]): CliArgs {
@@ -60,6 +66,7 @@ export function parseCliArgs(argv: string[]): CliArgs {
       'poll-interval': { type: 'string' },
       config: { type: 'string' },
       port: { type: 'string' },
+      concurrency: { type: 'string' },
     },
   });
   return {
@@ -79,5 +86,6 @@ export function parseCliArgs(argv: string[]): CliArgs {
     pollIntervalSeconds: values['poll-interval'] !== undefined ? Number(values['poll-interval']) : 15,
     config: values.config,
     port: values.port !== undefined ? Number(values.port) : 4319,
+    ...(values.concurrency !== undefined ? { concurrency: Number(values.concurrency) } : {}),
   };
 }

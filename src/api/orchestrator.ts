@@ -21,13 +21,16 @@ import type { AgentRunner } from '../agent/runner';
 import type {
   AgentRunRecord,
   Artifact,
+  ListRunsFilter,
   LogRecord,
+  Repo,
   Repository,
   Run,
   RunStatus,
   Transition,
 } from '../store/repository';
 import type { GitHub, IssueSuggestion } from '../integration/github';
+import type { RepoResolver } from '../integration/github-resolver';
 import { parseIssueRef, parseRepoRef, type ParsedIssueRef } from '../integration/refs';
 import { Broadcaster, type StreamListener } from './stream';
 
@@ -60,17 +63,24 @@ export interface OrchestratorOptions {
   /** GitHub adapter, used (read-only) to power the new-run autocomplete. Omit → suggestions are empty. */
   github?: GitHub;
   /**
-   * The single repo this daemon's adapter is bound to (`owner/repo`, or any form {@link parseRepoRef}
-   * accepts). When set, {@link Orchestrator.start} refuses an issue from a *different* repo — the MVP is
-   * single-repo (the adapter operates only on this repo), and the cross-repo new-run autocomplete makes
-   * a mismatched pick easy, so we fail loud rather than silently run the wrong repo's issue. Omit (mock /
-   * no `--repo`) to disable the guard. Multi-repo support lifts this (README Milestone 8).
+   * Resolves the per-repo adapter for a run's repo (Milestone 8 Phase A). {@link Orchestrator.start}
+   * validates against it — a run is admitted only for a repo the daemon can service (an enrolled repo in
+   * real mode; any repo under the single-repo/mock resolver). It replaces the pre-M8 single-repo guard.
    */
-  repoRef?: string;
+  resolver: RepoResolver;
+  /** Working-tree root a `POST /repos` enrollment defaults to when the request omits one (the daemon's
+   *  `--work`). Runs clone into `<workingRoot>/run-<id>` (run ids are global, so a shared root is safe). */
+  defaultWorkingRoot?: string;
   /** Path the FSM config is persisted to; required for `updateConfig` (omit → config is read-only). */
   configPath?: string;
   now?: () => number;
   maxIterations?: number;
+  /**
+   * Global concurrency cap (Milestone 8 Phase B): the max number of stages the drain pump runs at
+   * once — parallel across runs, serial within a run. Defaults to `1` (serial, the pre-B1 behavior),
+   * so unit tests are unchanged; the daemon passes a higher cap (see `build-runner`).
+   */
+  concurrency?: number;
   /** Called when a background drain throws (e.g. a `FatalExecutorError`). Default: log to stderr. */
   onError?: (err: unknown) => void;
 }
@@ -85,8 +95,9 @@ export class Orchestrator {
   private readonly loop: EventLoop;
   private readonly configPath?: string;
   private readonly github?: GitHub;
-  /** Canonical `owner/repo` this daemon is bound to, or undefined to disable the single-repo guard. */
-  private readonly configuredRepo?: string;
+  private readonly resolver: RepoResolver;
+  private readonly defaultWorkingRoot?: string;
+  private readonly concurrency: number;
   private config: LoadedConfig;
 
   // Single-flight drain pump (plans/milestone-5.md §2.2).
@@ -102,8 +113,9 @@ export class Orchestrator {
     this.config = options.config;
     this.configPath = options.configPath;
     this.github = options.github;
-    // Normalize the bound repo for the start guard; a malformed value just disables it (never crashes the daemon).
-    this.configuredRepo = safeParseRepoRef(options.repoRef);
+    this.resolver = options.resolver;
+    this.defaultWorkingRoot = options.defaultWorkingRoot;
+    this.concurrency = Math.max(1, Math.floor(options.concurrency ?? 1));
     this.onError = options.onError ?? ((err) => console.error(`[orchestrator] drain pump error: ${String(err)}`));
     this.loop = new EventLoop(this.repo, this.config.fsm, this.config.version, this.runner, {
       onTransition: (transition, run) => this.broadcaster.publish({ type: 'transition', runId: run.id, transition, run }),
@@ -132,15 +144,17 @@ export class Orchestrator {
     } catch (err) {
       throw new ApiError(400, err instanceof Error ? err.message : String(err));
     }
-    // Single-repo guard: the adapter operates only on the daemon's bound repo, so refuse an issue from a
-    // different one (the cross-repo autocomplete makes a mismatched pick easy). Fail loud, not silent.
-    if (this.configuredRepo && parsed.repo.toLowerCase() !== this.configuredRepo.toLowerCase()) {
-      throw new ApiError(
-        400,
-        `this daemon is bound to ${this.configuredRepo}, but ${parsed.ref} is in a different repo; restart with --repo ${parsed.repo} to run it`,
-      );
+    // Enrollment check (Milestone 8 Phase A): admit a run only for a repo the daemon can service.
+    // The resolver decides — any repo under the single-repo/mock resolver, an enrolled repo under the
+    // real one — and throws an actionable "not enrolled" message otherwise (which we surface as a 400,
+    // never a run that would later fail deep in the loop). This replaces the pre-M8 single-repo guard.
+    const repoRef = input.repoRef ?? parsed.repo;
+    try {
+      this.resolver.for(repoRef);
+    } catch (err) {
+      throw new ApiError(400, err instanceof Error ? err.message : String(err));
     }
-    const run = this.loop.startRun({ issueRef: parsed.ref, repoRef: input.repoRef ?? parsed.repo });
+    const run = this.loop.startRun({ issueRef: parsed.ref, repoRef });
     this.kick();
     return run;
   }
@@ -251,8 +265,51 @@ export class Orchestrator {
     };
   }
 
-  listRuns(status?: RunStatus): Run[] {
-    return this.repo.listRuns(status);
+  listRuns(filter: ListRunsFilter = {}): Run[] {
+    return this.repo.listRuns(filter);
+  }
+
+  /** The repo a run belongs to (for the repo-scoped live stream). Undefined for an unknown run id. */
+  repoOfRun(runId: number): string | undefined {
+    return this.repo.getRun(runId)?.repoRef;
+  }
+
+  // --- repos (Milestone 8 Phase A) ---------------------------------------------
+
+  /** Every enrolled repo (the dashboard's repo selector reads this). */
+  listRepos(): Repo[] {
+    return this.repo.listRepos();
+  }
+
+  /**
+   * Enroll a repo (or re-enroll to replace its adapter config), so runs can be started for it. `repoRef`
+   * is normalized to canonical `owner/name` (a malformed one is a `400`); `workingRoot` defaults to the
+   * daemon's `--work` when omitted. Invalidates the resolver's cache so the change takes effect without a
+   * restart. Mock/single-repo daemons accept runs for any repo regardless, so enrolling is a no-op there.
+   *
+   * Re-enroll is a **full replace** (upsert), not a patch: an omitted optional field resets to its
+   * default (e.g. re-enrolling without `cloneUrl` clears it back to the derived GitHub URL). The
+   * dashboard's enroll form posts the complete config, so this matches a form-based UI.
+   */
+  enrollRepo(input: { repoRef: string; workingRoot?: string; baseBranch?: string; cloneUrl?: string; localRepo?: string }): Repo {
+    if (!input.repoRef) throw new ApiError(400, 'repoRef is required');
+    let ref: string;
+    try {
+      ref = parseRepoRef(input.repoRef);
+    } catch (err) {
+      throw new ApiError(400, err instanceof Error ? err.message : String(err));
+    }
+    const workingRoot = input.workingRoot ?? this.defaultWorkingRoot;
+    if (!workingRoot) throw new ApiError(400, 'workingRoot is required (the daemon has no default --work configured)');
+    const repo = this.repo.upsertRepo({
+      repoRef: ref,
+      workingRoot,
+      ...(input.baseBranch ? { baseBranch: input.baseBranch } : {}),
+      ...(input.cloneUrl ? { cloneUrl: input.cloneUrl } : {}),
+      ...(input.localRepo ? { localRepo: input.localRepo } : {}),
+    });
+    this.resolver.invalidate(ref); // a re-enroll changed the config → drop any cached adapter
+    return repo;
   }
 
   /**
@@ -322,7 +379,7 @@ export class Orchestrator {
     try {
       do {
         this.rerun = false;
-        await this.loop.runUntilIdle();
+        await this.loop.drain(this.concurrency);
       } while (this.rerun);
     } catch (err) {
       // A throwing drain (e.g. a FatalExecutorError when the harness is unauthenticated) aborts the
@@ -350,15 +407,5 @@ export class Orchestrator {
     const run = this.repo.getRun(runId);
     if (!run) throw new ApiError(404, `run ${runId} not found`);
     return run;
-  }
-}
-
-/** Normalize a configured repo for the start guard, or undefined if absent/unparseable (guard off). */
-function safeParseRepoRef(repoRef: string | undefined): string | undefined {
-  if (!repoRef) return undefined;
-  try {
-    return parseRepoRef(repoRef);
-  } catch {
-    return undefined;
   }
 }

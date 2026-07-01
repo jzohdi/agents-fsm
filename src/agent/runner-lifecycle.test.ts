@@ -91,6 +91,25 @@ describe('AgentRunner lifecycle — produce stages', () => {
   });
 });
 
+describe('AgentRunner lifecycle — per-repo base branch (Milestone 8 Phase A)', () => {
+  it('cuts the working tree and opens the PR against the run’s repo base, not a global default', async () => {
+    const repo = new Repository(openDb(':memory:'));
+    const github = new FakeGitHub({ autoSeedIssues: true });
+    // The resolver supplies this repo's base branch (as the daemon does from the registry row); the
+    // runner must thread *it* through to prepareWorkingTree and openPr — not the DEFAULT_BASE_BRANCH.
+    const runner = new AgentRunner(repo, new StubExecutor(goldenPathHandler), agents, {
+      for: () => ({ github, baseBranch: 'release' }),
+      invalidate: () => {},
+    });
+    const run = repo.createRun({ issueRef: 'o/r#7', repoRef: 'o/r', initialState: 'tdd', fsmConfigVersion: 'v1' });
+    repo.setRunBranch(run.id, `agent/run-${run.id}`);
+
+    await runner.runStage(repo.getRun(run.id)!);
+
+    expect(github.listPrs()[0]!.base).toBe('release');
+  });
+});
+
 describe('AgentRunner lifecycle — tdd opens the PR idempotently', () => {
   it('opens the PR once and adopts (never duplicates) it on a re-run', async () => {
     const { repo, github, runner } = setup();

@@ -32,7 +32,7 @@ import { openDb } from './store/db';
 import { Repository } from './store/repository';
 import type { PhaseActivity } from './agent/runner';
 import { FatalExecutorError } from './agent/executor';
-import type { GitHub } from './integration/github';
+import type { RepoResolver } from './integration/github-resolver';
 import { parseIssueRef } from './integration/refs';
 import { EventLoop } from './loop/event-loop';
 import { ReplyPoller } from './loop/reply-poller';
@@ -45,18 +45,18 @@ function printActivity(a: PhaseActivity): void {
   console.log(`     · [${a.stage}:${a.phase}] ${a.activity.summary}`);
 }
 
-function buildLoop(args: CliArgs, repoRef: string): { repo: Repository; loop: EventLoop; version: string; github: GitHub } {
+function buildLoop(args: CliArgs, repoRef: string): { repo: Repository; loop: EventLoop; version: string; resolver: RepoResolver } {
   const { fsm, agents, version } = loadDefaultConfig();
   const repo = new Repository(openDb(args.db));
   if (!args.mock) {
     const model = args.cheap ? 'cheap (haiku, plumbing only)' : args.model ?? 'default (opus)';
     console.log(`[real mode] repo=${args.repo ?? repoRef} base=${args.base} work=${args.work} model=${model} — spends tokens, opens a real PR. (pass --mock for a no-cost run)`);
   }
-  const { runner, github } = buildRunner(args, repo, agents, repoRef, { onActivity: printActivity });
+  const { runner, resolver } = buildRunner(args, repo, agents, repoRef, { onActivity: printActivity });
   const loop = new EventLoop(repo, fsm, version, runner, {
     onTransition: (t) => console.log(`  ${t.fromState.padEnd(18)} --${t.trigger}-->  ${t.toState}`),
   });
-  return { repo, loop, version, github };
+  return { repo, loop, version, resolver };
 }
 
 /**
@@ -64,9 +64,9 @@ function buildLoop(args: CliArgs, repoRef: string): { repo: Repository; loop: Ev
  * issue thread for the answer and resume, until everything settles or the poll budget runs out. This
  * is the cheap, polling-based human-in-the-loop the operator opts into via `--poll-timeout`.
  */
-async function drainWithReplyPolling(args: CliArgs, repo: Repository, loop: EventLoop, github: GitHub): Promise<void> {
+async function drainWithReplyPolling(args: CliArgs, repo: Repository, loop: EventLoop, resolver: RepoResolver): Promise<void> {
   await loop.runUntilIdle();
-  const awaiting = repo.listRuns('awaiting_input');
+  const awaiting = repo.listRuns({ status: 'awaiting_input' });
   if (awaiting.length === 0 || args.pollTimeoutMinutes <= 0) {
     if (awaiting.length > 0) {
       console.log(`\n⏸  ${awaiting.length} run(s) awaiting a human reply on the issue. Polling disabled (--poll-timeout 0); reply, then re-run to resume.`);
@@ -76,7 +76,7 @@ async function drainWithReplyPolling(args: CliArgs, repo: Repository, loop: Even
   console.log(
     `\n⏳ ${awaiting.length} run(s) awaiting your reply on the issue. Polling every ${args.pollIntervalSeconds}s for up to ${args.pollTimeoutMinutes}m…`,
   );
-  const poller = new ReplyPoller(repo, github, loop, { intervalMs: args.pollIntervalSeconds * 1000 });
+  const poller = new ReplyPoller(repo, resolver, loop, { intervalMs: args.pollIntervalSeconds * 1000 });
   await poller.poll({ maxWaitMs: args.pollTimeoutMinutes * 60_000, drain: () => loop.runUntilIdle() });
 }
 
@@ -147,21 +147,21 @@ async function start(args: CliArgs): Promise<void> {
   } catch {
     repoRef = issueRef.split('#')[0] ?? issueRef;
   }
-  const { repo, loop, version, github } = buildLoop(args, repoRef);
+  const { repo, loop, version, resolver } = buildLoop(args, repoRef);
 
   console.log(`Config version ${version}; starting run for issue ${issueRef}`);
   loop.recover(); // no-op on a fresh DB; proves the startup sweep is wired
   const run = loop.startRun({ issueRef, repoRef });
   console.log(`Run ${run.id} created in state "${run.currentState}". Transitions:`);
 
-  await drainWithReplyPolling(args, repo, loop, github);
+  await drainWithReplyPolling(args, repo, loop, resolver);
   report(repo, run.id);
 }
 
 async function resume(args: CliArgs): Promise<void> {
   const runId = Number(args.positionals[1]);
   if (!Number.isInteger(runId)) throw new Error('usage: cli.ts resume <runId> [--repo o/r ...] [--mock] [--db <path>]');
-  const { repo, loop, github } = buildLoop(args, '');
+  const { repo, loop, resolver } = buildLoop(args, '');
 
   loop.recover();
   const run = repo.getRun(runId);
@@ -175,7 +175,7 @@ async function resume(args: CliArgs): Promise<void> {
     console.log(`Resuming run ${runId}. Transitions:`);
     loop.resumeRun(runId);
   }
-  await drainWithReplyPolling(args, repo, loop, github);
+  await drainWithReplyPolling(args, repo, loop, resolver);
   report(repo, runId);
 }
 

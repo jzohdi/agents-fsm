@@ -10,6 +10,7 @@ import { goldenPathHandler, StubExecutor, type StubHandler } from '../agent/exec
 import { AgentRunner } from '../agent/runner';
 import { loadDefaultConfig } from '../fsm/config';
 import { FakeGitHub } from '../integration/github-fake';
+import type { RepoResolver } from '../integration/github-resolver';
 import { openDb } from '../store/db';
 import { Repository, type Run } from '../store/repository';
 import { EventLoop } from './event-loop';
@@ -147,5 +148,36 @@ describe('ReplyPoller — poll driver', () => {
 
     expect(total).toBe(0);
     expect(repo.getRun(run.id)!.status).toBe('awaiting_input'); // still parked, just gave up waiting
+  });
+});
+
+describe('ReplyPoller — multi-repo (Milestone 8 Phase A)', () => {
+  it('polls each parked run via its own repo’s adapter, not a single shared one', async () => {
+    const repo = new Repository(openDb(':memory:'));
+    const webGh = new FakeGitHub({ repoRef: 'acme/web', botLogin: BOT }).seedIssue('acme/web#1', { number: 1 });
+    const apiGh = new FakeGitHub({ repoRef: 'acme/api', botLogin: BOT }).seedIssue('acme/api#1', { number: 1 });
+    const resolver: RepoResolver = { for: (ref) => ({ github: ref === 'acme/web' ? webGh : apiGh, baseBranch: 'main' }), invalidate: () => {} };
+    const runner = new AgentRunner(repo, new StubExecutor(alwaysClarify), agents, resolver);
+    const loop = new EventLoop(repo, fsm, version, runner);
+
+    const webRun = loop.startRun({ issueRef: 'acme/web#1', repoRef: 'acme/web' });
+    const apiRun = loop.startRun({ issueRef: 'acme/api#1', repoRef: 'acme/api' });
+    await loop.runUntilIdle();
+    expect(repo.getRun(webRun.id)!.status).toBe('awaiting_input');
+    expect(repo.getRun(apiRun.id)!.status).toBe('awaiting_input');
+
+    // A human replies only on the web repo's issue. A single-adapter poller would read the wrong repo's
+    // thread; the resolver-driven poller re-arms exactly the web run and leaves the api run parked.
+    webGh.seedIssueComment(1, { author: 'alice', body: 'Use Postgres.' });
+    const poller = new ReplyPoller(repo, resolver, loop, { sleep: noopSleep });
+
+    expect(await poller.checkOnce()).toBe(1);
+    expect(repo.getRun(webRun.id)!.status).toBe('running');
+    expect(repo.getRun(apiRun.id)!.status).toBe('awaiting_input');
+
+    // The api run re-arms only once *its* repo's thread gets a reply.
+    apiGh.seedIssueComment(1, { author: 'bob', body: 'Use SQLite.' });
+    expect(await poller.checkOnce()).toBe(1);
+    expect(repo.getRun(apiRun.id)!.status).toBe('running');
   });
 });

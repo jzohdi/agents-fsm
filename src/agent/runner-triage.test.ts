@@ -11,6 +11,7 @@ import { describe, expect, it } from 'vitest';
 
 import { loadDefaultConfig } from '../fsm/config';
 import { FakeGitHub } from '../integration/github-fake';
+import type { RepoResolver } from '../integration/github-resolver';
 import { openDb } from '../store/db';
 import { Repository, type Run } from '../store/repository';
 import { StubExecutor, type StubHandler } from './executor';
@@ -142,5 +143,26 @@ describe('AgentRunner triage — malformed output', () => {
     if (outcome.kind === 'escalate') expect(outcome.trigger).toBe('malformed_output');
     // No GitHub side effects on malformed output.
     expect(await github.listIssueComments(7)).toHaveLength(0);
+  });
+});
+
+describe('AgentRunner — multi-repo (Milestone 8 Phase A)', () => {
+  it('routes each run to its own repo’s adapter, not a single shared one', async () => {
+    const repo = new Repository(openDb(':memory:'));
+    const webGh = new FakeGitHub({ repoRef: 'acme/web', botLogin: 'bot[bot]' }).seedIssue('acme/web#1', { number: 1 });
+    const apiGh = new FakeGitHub({ repoRef: 'acme/api', botLogin: 'bot[bot]' }).seedIssue('acme/api#1', { number: 1 });
+    // A resolver mapping each repoRef to its own adapter — what the daemon builds from the repos registry.
+    const resolver: RepoResolver = { for: (ref) => ({ github: ref === 'acme/web' ? webGh : apiGh, baseBranch: 'main' }), invalidate: () => {} };
+    const runner = new AgentRunner(repo, new StubExecutor(triageStub({ decision: 'proceed', message: 'ok' })), agents, resolver);
+
+    const webRun = repo.createRun({ issueRef: 'acme/web#1', repoRef: 'acme/web', initialState: 'triage', fsmConfigVersion: 'v1' });
+    const apiRun = repo.createRun({ issueRef: 'acme/api#1', repoRef: 'acme/api', initialState: 'triage', fsmConfigVersion: 'v1' });
+
+    await runner.runStage(webRun);
+    await runner.runStage(apiRun);
+
+    // Each repo's adapter saw exactly its own run's sign-off — never the other's.
+    expect(await webGh.listIssueComments(1)).toHaveLength(1);
+    expect(await apiGh.listIssueComments(1)).toHaveLength(1);
   });
 });

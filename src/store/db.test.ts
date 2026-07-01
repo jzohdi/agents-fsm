@@ -94,4 +94,29 @@ describe('migrate', () => {
     fresh.close();
     db.close();
   });
+
+  it('retrofits a database created before the repos registry existed', () => {
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, flags TEXT NOT NULL DEFAULT '{}', archived_at TEXT)`);
+    db.pragma('user_version = 2'); // already past migrations 1–2; only migration 3 (repos) should run
+    expect(tableExists(db, 'repos')).toBe(false);
+
+    runMigrations(db); // the migration creates the registry on a pre-existing DB
+
+    expect(tableExists(db, 'repos')).toBe(true);
+    expect(userVersion(db)).toBe(LATEST_VERSION);
+
+    // Drift guard: a retrofitted registry must be schema-identical to a fresh DB's.
+    const fresh = openDb();
+    expect(columns(db, 'repos')).toEqual(columns(fresh, 'repos'));
+    fresh.close();
+
+    // ...including the COLLATE NOCASE on repo_ref (which `table_info` above can't see): the migration's
+    // uniqueness must be case-insensitive, so a second casing of the same repo is rejected, not stored.
+    db.prepare("INSERT INTO repos (repo_ref, working_root) VALUES ('Acme/Web', './w')").run();
+    expect(() => db.prepare("INSERT INTO repos (repo_ref, working_root) VALUES ('acme/web', './w2')").run()).toThrow(
+      /UNIQUE/,
+    );
+    db.close();
+  });
 });

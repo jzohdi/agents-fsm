@@ -46,6 +46,24 @@ export const MIGRATIONS: Migration[] = [
          CREATE UNIQUE INDEX IF NOT EXISTS idx_side_effects_key ON side_effects(run_id, key);`,
       ),
   },
+  {
+    version: 3,
+    name: 'create repos registry',
+    // Multi-repo Phase A (Milestone 8). Mirrors schema.sql; `CREATE TABLE IF NOT EXISTS` makes this a
+    // no-op on a fresh DB the baseline already provisioned and a retrofit on a pre-existing one.
+    apply: (db) =>
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS repos (
+           id           INTEGER PRIMARY KEY AUTOINCREMENT,
+           repo_ref     TEXT    NOT NULL COLLATE NOCASE UNIQUE,
+           clone_url    TEXT,
+           local_repo   TEXT,
+           working_root TEXT    NOT NULL,
+           base_branch  TEXT    NOT NULL DEFAULT 'main',
+           created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         );`,
+      ),
+  },
 ];
 
 /** The schema version a fully-migrated database reports — the highest defined migration. */

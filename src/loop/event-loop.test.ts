@@ -11,7 +11,15 @@ import type { FsmConfig } from '../fsm/types';
 import { openDb } from '../store/db';
 import { Repository } from '../store/repository';
 import { AgentRunner } from '../agent/runner';
-import { StubExecutor, goldenPathHandler, FatalExecutorError, type StageExecutor, type StubHandler } from '../agent/executor';
+import {
+  StubExecutor,
+  goldenPathHandler,
+  FatalExecutorError,
+  type AgentRunRequest,
+  type AgentRunResult,
+  type StageExecutor,
+  type StubHandler,
+} from '../agent/executor';
 import { FakeGitHub } from '../integration/github-fake';
 import { EVENT_ADVANCE, EventLoop, type EventLoopOptions } from './event-loop';
 
@@ -650,6 +658,95 @@ describe('M5 control methods (pause / resume-paused / stop / revert)', () => {
     expect(() => loop.revertRun(run.id, 'plan', '')).toThrowError(/reason is required/);
     expect(() => loop.revertRun(run.id, 'ghost', { note: 'x' })).toThrowError(/unknown state/);
     expect(() => loop.revertRun(run.id, 'done', { note: 'x' })).toThrowError(/terminal/);
+  });
+});
+
+describe('bounded worker pool (Milestone 8 Phase B — drain concurrency)', () => {
+  /**
+   * A stage executor that stays in flight for a macrotask, so multiple stages genuinely overlap under
+   * the pool, and records the peak concurrency both globally and per run. `perRunPeak` is the safety
+   * witness: within-run serialization means it must never exceed 1 (two stages of one run overlapping
+   * would corrupt the shared working tree / state cursor). It otherwise drives the golden path.
+   */
+  class PoolExecutor implements StageExecutor {
+    active = 0;
+    peak = 0;
+    perRunPeak = 0;
+    private readonly activeByRun = new Map<number, number>();
+
+    async run(req: AgentRunRequest): Promise<AgentRunResult> {
+      this.active += 1;
+      this.peak = Math.max(this.peak, this.active);
+      const perRun = (this.activeByRun.get(req.runId) ?? 0) + 1;
+      this.activeByRun.set(req.runId, perRun);
+      this.perRunPeak = Math.max(this.perRunPeak, perRun);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        const reply = goldenPathHandler(req);
+        return { output: reply.output, usage: { tokens: reply.tokens ?? 1 } };
+      } finally {
+        this.active -= 1;
+        this.activeByRun.set(req.runId, (this.activeByRun.get(req.runId) ?? 1) - 1);
+      }
+    }
+  }
+
+  function poolSetup() {
+    const loaded = loadDefaultConfig();
+    const repo = new Repository(openDb(':memory:'));
+    const executor = new PoolExecutor();
+    const runner = new AgentRunner(repo, executor, loaded.agents, new FakeGitHub({ autoSeedIssues: true }));
+    const loop = new EventLoop(repo, loaded.fsm, loaded.version, runner);
+    return { repo, loop, executor };
+  }
+
+  it('runs stages in parallel across runs, serial within a run, each event exactly once', async () => {
+    const { repo, loop, executor } = poolSetup();
+    const runs = Array.from({ length: 5 }, (_, i) => loop.startRun({ issueRef: `o/r#${i + 1}`, repoRef: 'o/r' }));
+
+    await loop.drain(3);
+
+    // Every run completed on a clean golden path: a duplicate-processed event would show as a re-run
+    // or (blocked by the UNIQUE event-id index) a missing transition — neither happens.
+    for (const run of runs) {
+      expect(repo.getRun(run.id)!.status).toBe('done');
+      expect(sequence(repo, run.id)).toEqual(GOLDEN_PATH);
+    }
+    expect(executor.peak).toBeGreaterThan(1); // genuinely parallel, not accidentally serial
+    expect(executor.peak).toBeLessThanOrEqual(3); // never exceeds the global cap
+    expect(executor.perRunPeak).toBe(1); // serial within a run — two stages of one run never overlap
+  });
+
+  it('drain(1) is exactly the serial drain — never more than one stage at a time', async () => {
+    const { repo, loop, executor } = poolSetup();
+    const a = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    const b = loop.startRun({ issueRef: 'o/r#2', repoRef: 'o/r' });
+
+    await loop.drain(1);
+
+    expect(executor.peak).toBe(1);
+    expect(repo.getRun(a.id)!.status).toBe('done');
+    expect(repo.getRun(b.id)!.status).toBe('done');
+  });
+
+  it('a fatal executor error rejects the pooled drain (in-flight settles, work stays recoverable)', async () => {
+    const repo = new Repository(openDb(':memory:'));
+    const { fsm, agents, version } = loadDefaultConfig();
+    const executor: StageExecutor = {
+      run: () => Promise.reject(new FatalExecutorError('harness not authenticated', 'run `claude login`')),
+    };
+    const runner = new AgentRunner(repo, executor, agents, new FakeGitHub({ autoSeedIssues: true }));
+    const loop = new EventLoop(repo, fsm, version, runner);
+    const a = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    const b = loop.startRun({ issueRef: 'o/r#2', repoRef: 'o/r' });
+
+    await expect(loop.drain(3)).rejects.toBeInstanceOf(FatalExecutorError);
+
+    // Neither run escalated; both claimed events are left `processing` → reclaimable on restart.
+    expect(repo.getRun(a.id)!.status).toBe('running');
+    expect(repo.getRun(b.id)!.status).toBe('running');
+    expect(repo.listTransitions(a.id)).toHaveLength(0);
+    expect(loop.recover()).toBe(2);
   });
 });
 

@@ -15,6 +15,7 @@ import { AgentRunner, type AgentRunnerOptions, type PhaseActivity } from './agen
 import { DEFAULT_MODEL_MAP, SubprocessStageExecutor, type SubprocessExecutorOptions } from './agent/subprocess-executor';
 import { GitHubCli } from './integration/github-cli';
 import type { GitHub } from './integration/github';
+import type { RepoResolver } from './integration/github-resolver';
 import type { AgentsConfig } from './fsm/config';
 import type { AgentPhase, Repository } from './store/repository';
 
@@ -80,8 +81,11 @@ export function buildRealGitHub(config: RealRunConfig): GitHubCli {
 export interface BuildRealRunnerOptions {
   /** Receives the harness's live progress (the "what is the agent doing now" feed); also persisted. */
   onActivity?: (activity: PhaseActivity) => void;
-  /** A pre-built GitHub adapter to reuse (e.g. shared with the Reply Poller). Built from `config` if omitted. */
-  github?: GitHub;
+  /**
+   * A pre-built GitHub adapter, or a multi-repo {@link RepoResolver}, for the runner to use (e.g. shared
+   * with the Reply Poller). A single adapter built from `config` is used if omitted (single-repo).
+   */
+  github?: GitHub | RepoResolver;
 }
 
 /**

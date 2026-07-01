@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ui, selectRun, archiveRun, unarchiveRun, toggleShowArchived } from './store.svelte';
+  import { ui, selectRun, archiveRun, unarchiveRun, toggleShowArchived, filteredRuns } from './store.svelte';
   import { pipelineModel, fmtTokens } from './render';
 
   // Restrained per-lane accent dots (default to the brand accent for unknown states).
@@ -9,10 +9,12 @@
     needs_human: '#b0443a', __resolved__: '#928c80',
   };
 
-  const model = $derived(pipelineModel(ui.runs, ui.config?.fsm, { showArchived: ui.showArchived }));
-  const total = $derived(ui.runs.length);
-  const active = $derived(ui.runs.filter((r) => r.status === 'running' || r.status === 'paused').length);
-  const awaiting = $derived(ui.runs.filter((r) => r.status === 'needs_human' || r.status === 'awaiting_input' || r.status === 'blocked').length);
+  // Scope the board to the active repo tab (all repos when no filter is set).
+  const runs = $derived(filteredRuns());
+  const model = $derived(pipelineModel(runs, ui.config?.fsm, { showArchived: ui.showArchived }));
+  const total = $derived(runs.length);
+  const active = $derived(runs.filter((r) => r.status === 'running' || r.status === 'paused').length);
+  const awaiting = $derived(runs.filter((r) => r.status === 'needs_human' || r.status === 'awaiting_input' || r.status === 'blocked').length);
 
   // index of the first terminal lane so we can draw a single divider before it
   const firstTermIdx = $derived(model.columns.findIndex((c) => c.terminal));

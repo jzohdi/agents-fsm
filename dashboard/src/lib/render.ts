@@ -173,6 +173,36 @@ export function pipelineModel(
   return { columns: [...columns, needsHuman, resolved], archivedCount };
 }
 
+// --- multi-repo overview (Milestone 8 Phase A) --------------------------------
+
+/** Per-repo run counts for the repo-tabs strip: `active` = in-flight/waiting, `needsHuman` = escalated. */
+export interface RepoSummary {
+  repoRef: string;
+  active: number;
+  needsHuman: number;
+}
+
+/**
+ * Group runs by repo into the tab-strip summaries — every repo with at least one run gets an entry
+ * (even if all its runs are resolved), sorted by repo ref. `active` counts runs still moving through
+ * the pipeline (anything not terminal and not escalated); `needsHuman` counts escalations. Resolved
+ * runs are intentionally not surfaced on a tab — they live in the board's Resolved lane. Pure, so it
+ * is unit-tested alongside the other view-models; the "All" tab is the caller summing these.
+ */
+export function repoOverviewModel(runs: Run[] | undefined): RepoSummary[] {
+  const byRepo = new Map<string, RepoSummary>();
+  for (const r of runs ?? []) {
+    let s = byRepo.get(r.repoRef);
+    if (!s) {
+      s = { repoRef: r.repoRef, active: 0, needsHuman: 0 };
+      byRepo.set(r.repoRef, s);
+    }
+    if (r.status === 'needs_human') s.needsHuman += 1;
+    else if (r.status !== 'done' && r.status !== 'stopped') s.active += 1;
+  }
+  return [...byRepo.values()].sort((a, b) => a.repoRef.localeCompare(b.repoRef));
+}
+
 // --- state-machine stepper ----------------------------------------------------
 
 export interface StepperNode {

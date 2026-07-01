@@ -17,6 +17,7 @@ import { Repository } from '../store/repository';
 import { AgentRunner } from '../agent/runner';
 import { StubExecutor, goldenPathHandler } from '../agent/executor';
 import { FakeGitHub } from '../integration/github-fake';
+import { singleRepoResolver } from '../integration/github-resolver';
 import { Orchestrator } from './orchestrator';
 import { Broadcaster } from './stream';
 import { createApiServer } from './server';
@@ -27,7 +28,7 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((s) => new Promise<void>((r) => s.close(() => r()))));
 });
 
-async function start(opts: { publicDir?: string } = {}): Promise<{ base: string; orchestrator: Orchestrator; github: FakeGitHub }> {
+async function start(opts: { publicDir?: string } = {}): Promise<{ base: string; orchestrator: Orchestrator; repo: Repository; github: FakeGitHub }> {
   const loaded = loadDefaultConfig();
   const repo = new Repository(openDb(':memory:'));
   const github = new FakeGitHub({ autoSeedIssues: true });
@@ -35,12 +36,13 @@ async function start(opts: { publicDir?: string } = {}): Promise<{ base: string;
   const runner = new AgentRunner(repo, new StubExecutor(goldenPathHandler), loaded.agents, github, {
     onActivity: (activity) => broadcaster.publish({ type: 'activity', activity }),
   });
-  const orchestrator = new Orchestrator({ repo, runner, config: loaded, broadcaster, github });
+  const resolver = singleRepoResolver({ github, baseBranch: 'main' });
+  const orchestrator = new Orchestrator({ repo, runner, config: loaded, broadcaster, github, resolver, defaultWorkingRoot: './w' });
   const server = createApiServer(orchestrator, opts.publicDir ? { publicDir: opts.publicDir } : {});
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const { port } = server.address() as AddressInfo;
-  return { base: `http://127.0.0.1:${port}`, orchestrator, github };
+  return { base: `http://127.0.0.1:${port}`, orchestrator, repo, github };
 }
 
 /** A throwaway dashboard dir so the static-serving test doesn't depend on a real `build:dashboard`. */
@@ -192,6 +194,47 @@ describe('HTTP API', () => {
     const text = await readUntil(reader, (acc) => acc.includes('"toState":"done"'));
     expect(text).toContain('"runId":1');
     expect(text).not.toContain('"runId":2'); // run 2's events were filtered out
+
+    await reader.cancel();
+    controller.abort();
+  });
+
+  it('enrolls a repo (POST /repos), lists them (GET /repos), and filters runs by ?repo= (Milestone 8)', async () => {
+    const { base, orchestrator } = await start();
+
+    const enroll = await fetch(`${base}/repos`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web', baseBranch: 'develop' }) });
+    expect(enroll.status).toBe(201);
+    expect(await enroll.json()).toMatchObject({ repoRef: 'acme/web', baseBranch: 'develop' });
+    // A malformed ref is a 400, not a row.
+    expect((await fetch(`${base}/repos`, { method: 'POST', body: JSON.stringify({ repoRef: 'not a repo' }) })).status).toBe(400);
+
+    const repos = (await (await fetch(`${base}/repos`)).json()) as Array<{ repoRef: string }>;
+    expect(repos.map((r) => r.repoRef)).toEqual(['acme/web']);
+
+    // Runs in two repos (the single-repo resolver admits both); ?repo= scopes the list.
+    await fetch(`${base}/runs`, { method: 'POST', body: JSON.stringify({ issueRef: 'acme/web#1' }) });
+    await fetch(`${base}/runs`, { method: 'POST', body: JSON.stringify({ issueRef: 'acme/api#1' }) });
+    await orchestrator.settle();
+
+    const webRuns = (await (await fetch(`${base}/runs?repo=ACME/WEB`)).json()) as Array<{ repoRef: string }>;
+    expect(webRuns.map((r) => r.repoRef)).toEqual(['acme/web']); // case-insensitive filter
+  });
+
+  it('filters the SSE stream by ?repo', async () => {
+    const { base, orchestrator } = await start();
+    const controller = new AbortController();
+
+    const res = await fetch(`${base}/stream?repo=acme/web`, { signal: controller.signal });
+    const reader = res.body!.getReader();
+
+    // Two runs in different repos; only acme/web's events should reach this repo-scoped stream.
+    await fetch(`${base}/runs`, { method: 'POST', body: JSON.stringify({ issueRef: 'acme/web#1' }) });
+    await fetch(`${base}/runs`, { method: 'POST', body: JSON.stringify({ issueRef: 'acme/api#1' }) });
+    await orchestrator.settle();
+
+    const text = await readUntil(reader, (acc) => acc.includes('"toState":"done"'));
+    expect(text).toContain('acme/web');
+    expect(text).not.toContain('acme/api'); // the other repo's events were filtered out
 
     await reader.cancel();
     controller.abort();

@@ -222,13 +222,67 @@ export class EventLoop {
     return true;
   }
 
-  /** Drain the queue. Serial MVP: one stage at a time. */
+  /** Drain the queue. Serial: one stage at a time. Used by the one-shot CLI and the Reply Poller. */
   async runUntilIdle(): Promise<void> {
     const max = this.options.maxIterations ?? 1000;
     for (let i = 0; i < max; i++) {
       if (!(await this.tick())) return;
     }
     throw new Error('EventLoop.runUntilIdle exceeded maxIterations — possible runaway');
+  }
+
+  /**
+   * Drain the queue with a bounded worker pool (Milestone 8 Phase B — the daemon path). Up to
+   * `concurrency` stages run at once: **parallel across runs, serial within a run** — the claim's
+   * within-run guard ({@link Repository.claimNextEvent}) never hands out a second event for a run
+   * with a stage already in flight, so two stages of one run can't overlap (they share a working
+   * tree and a state cursor). Resolves once the queue is idle *and* every worker has settled.
+   *
+   * `concurrency = 1` is exactly the serial drain (why the Orchestrator defaults to 1 and existing
+   * tests are unchanged); the daemon runs a higher global cap. A worker's throw — only a
+   * {@link FatalExecutorError} escapes `processEvent`, since escalate/await are commits, not throws —
+   * stops new dispatch and, once the already-running workers settle, rejects the drain, mirroring the
+   * serial path: the triggering event stays recoverable and the entry point surfaces the remedy. In
+   * flight stages always finish (a fatal error never abandons a mid-flight commit).
+   *
+   * The DB claim/commit calls are synchronous (better-sqlite3), so the pump's `inFlight` bookkeeping
+   * runs on the single JS thread with no interleaving; the only real concurrency is the overlapping
+   * `await runner.runStage(...)` calls.
+   */
+  async drain(concurrency: number): Promise<void> {
+    const limit = Math.max(1, Math.floor(concurrency));
+    let inFlight = 0;
+    let firstError: unknown;
+    let stopped = false;
+
+    await new Promise<void>((resolve) => {
+      const pump = (): void => {
+        while (!stopped && inFlight < limit) {
+          const event = this.repo.claimNextEvent();
+          if (!event) break;
+          inFlight++;
+          void this.processEvent(event).then(
+            () => {
+              inFlight--;
+              pump();
+            },
+            (err) => {
+              inFlight--;
+              if (!stopped) {
+                stopped = true;
+                firstError = err;
+              }
+              pump();
+            },
+          );
+        }
+        // Idle once no worker is running and the pump found nothing more to claim.
+        if (inFlight === 0) resolve();
+      };
+      pump();
+    });
+
+    if (stopped) throw firstError;
   }
 
   /**

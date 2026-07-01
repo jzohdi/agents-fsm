@@ -21,6 +21,7 @@ import { randomBytes } from 'node:crypto';
 
 import { recipeFor, type AgentsConfig, type StageIo } from '../fsm/config';
 import type { GitHub, Issue, IssueComment, PullRequest } from '../integration/github';
+import { isRepoResolver, singleRepoResolver, type RepoContext, type RepoResolver } from '../integration/github-resolver';
 import type { AgentPhase, Repository, Run } from '../store/repository';
 import type { AgentActivity, AgentRunResult, StageExecutor } from './executor';
 import {
@@ -104,7 +105,7 @@ interface StagePrep {
 
 export class AgentRunner {
   private readonly systemPrompt: SystemPromptFn;
-  private readonly baseBranch: string;
+  private readonly githubResolver: RepoResolver;
   private readonly malformedRetryCap: number;
   private readonly onActivity?: (activity: PhaseActivity) => void;
 
@@ -112,13 +113,23 @@ export class AgentRunner {
     private readonly repo: Repository,
     private readonly executor: StageExecutor,
     private agents: AgentsConfig,
-    private readonly github: GitHub,
+    // A single repo's adapter (single-repo / mock / tests) or a multi-repo {@link RepoResolver}; the
+    // former is normalized to a one-repo resolver so the rest of the runner is repo-agnostic (M8).
+    github: GitHub | RepoResolver,
     options: AgentRunnerOptions = {},
   ) {
     this.systemPrompt = options.systemPrompt ?? defaultSystemPrompt;
-    this.baseBranch = options.baseBranch ?? DEFAULT_BASE_BRANCH;
+    this.githubResolver = isRepoResolver(github)
+      ? github
+      : singleRepoResolver({ github, baseBranch: options.baseBranch ?? DEFAULT_BASE_BRANCH });
     this.malformedRetryCap = options.malformedRetryCap ?? DEFAULT_MALFORMED_RETRY_CAP;
     this.onActivity = options.onActivity;
+  }
+
+  /** The adapter + base branch for a run's repo (M8 Phase A). Memoized inside the resolver, so the
+   *  repeated calls across a stage's helper methods all return the same adapter instance. */
+  private repoContext(run: Run): RepoContext {
+    return this.githubResolver.for(run.repoRef);
   }
 
   /**
@@ -179,11 +190,12 @@ export class AgentRunner {
    * (improve the issue, ask the human, split into smaller issues) and map it to a {@link StageOutcome}.
    */
   private async runTriageStage(run: Run, recipe: Recipe): Promise<StageOutcome> {
+    const { github } = this.repoContext(run);
     let issue: Issue;
     let comments: IssueComment[];
     try {
-      issue = await this.github.readIssue(run.issueRef);
-      comments = await this.github.listIssueComments(issue.number);
+      issue = await github.readIssue(run.issueRef);
+      comments = await github.listIssueComments(issue.number);
     } catch (err) {
       return gitError(run, 'prepare', err);
     }
@@ -214,13 +226,14 @@ export class AgentRunner {
    * blindly retrying. Editing the issue stays a direct call (re-writing the same text is harmless).
    */
   private async applyTriageDecision(run: Run, issue: Issue, output: TriageOutput): Promise<StageOutcome> {
+    const { github } = this.repoContext(run);
     const ledger = this.ledgerFor(run);
 
     // Improve the issue first, if the agent rewrote it, so every downstream stage reads the scoped
     // spec. Editing to the same text is harmless, which keeps a back-edge re-run idempotent.
     let current = issue;
     if (output.issueUpdate) {
-      current = await this.github.updateIssue({
+      current = await github.updateIssue({
         number: issue.number,
         ...(output.issueUpdate.title !== undefined ? { title: output.issueUpdate.title } : {}),
         body: output.issueUpdate.body,
@@ -231,13 +244,13 @@ export class AgentRunner {
       case 'proceed': {
         // Sign off with a human-visible audit comment, then hand to plan. The FSM transition is the
         // machine sign-off later stages key off; this comment is for people reading the issue.
-        await ledger.once('signoff', () => this.github.postIssueComment({ issueNumber: current.number, body: signoffComment(output.message) }));
+        await ledger.once('signoff', () => github.postIssueComment({ issueNumber: current.number, body: signoffComment(output.message) }));
         return { kind: 'handoff', envelope: { requestedTransition: 'proceed', reason: { kind: 'triage_signoff' } } };
       }
 
       case 'clarify': {
         const questions = output.questions ?? [];
-        const comment = await ledger.once('clarify', () => this.github.postIssueComment({ issueNumber: current.number, body: clarifyComment(questions, output.message) }));
+        const comment = await ledger.once('clarify', () => github.postIssueComment({ issueNumber: current.number, body: clarifyComment(questions, output.message) }));
         // The await_input reason carries everything the Reply Poller needs to detect the human's
         // answer — the issue, the question comment to measure replies against, and the bot login that
         // distinguishes the agent's own comment from a human reply. The loop records it in the
@@ -254,9 +267,9 @@ export class AgentRunner {
         // Each child gets its own ledger slot, so a crash partway through never re-creates the ones
         // already made (the duplicate-sub-issues case the outbox exists to prevent — README M7).
         for (let i = 0; i < subIssues.length; i++) {
-          created.push(await ledger.once(`subissue:${i}`, () => this.github.createIssue(subIssues[i]!)));
+          created.push(await ledger.once(`subissue:${i}`, () => github.createIssue(subIssues[i]!)));
         }
-        await ledger.once('split', () => this.github.postIssueComment({ issueNumber: current.number, body: splitComment(created, output.message) }));
+        await ledger.once('split', () => github.postIssueComment({ issueNumber: current.number, body: splitComment(created, output.message) }));
 
         if (output.handoff === undefined) {
           // No handoff: the operator starts runs for the children; this run stops with them recorded.
@@ -277,11 +290,12 @@ export class AgentRunner {
   // --- stage preparation ------------------------------------------------------
 
   private async prepareStage(run: Run, io: StageIo): Promise<StagePrep> {
-    const issue = await this.github.readIssue(run.issueRef);
+    const { github, baseBranch } = this.repoContext(run);
+    const issue = await github.readIssue(run.issueRef);
 
     // produce/review: ensure the working tree exists, creating the branch the first time.
     const branch = run.branch ?? branchName(run);
-    const tree = await this.github.prepareWorkingTree({ runId: run.id, branch, base: this.baseBranch });
+    const tree = await github.prepareWorkingTree({ runId: run.id, branch, base: baseBranch });
     if (run.branch === null) this.repo.setRunBranch(run.id, branch);
 
     const input: Record<string, unknown> = { issue };
@@ -290,7 +304,7 @@ export class AgentRunner {
     // harness manages its own context (plans/milestone-4.md §3.6). plan_review has no PR and reads
     // `.agent/plan.md` from the tree, so it needs neither.
     if (io.kind === 'review' && run.prNumber !== null) {
-      input.base = this.baseBranch;
+      input.base = baseBranch;
     }
     return { issue, workingDir: tree.path, branch, input };
   }
@@ -434,6 +448,7 @@ export class AgentRunner {
   // --- git/GitHub side effects ------------------------------------------------
 
   private async applyStageEffects(run: Run, io: StageIo, prep: StagePrep, envelope: AgentEnvelope): Promise<AgentEnvelope> {
+    const { github } = this.repoContext(run);
     if (io.kind === 'review') {
       // Post review comments to the PR (if any). plan_review has no PR — its feedback travels
       // back to `plan` via the envelope's `reason`, handled by the normal back-edge mechanism.
@@ -444,7 +459,7 @@ export class AgentRunner {
       const ledger = this.ledgerFor(run);
       for (let i = 0; i < comments.length; i++) {
         const body = comments[i]!;
-        await ledger.once(`comment:${i}`, () => this.github.postComment({ prNumber, body }));
+        await ledger.once(`comment:${i}`, () => github.postComment({ prNumber, body }));
       }
       return appendArtifact(envelope, { kind: 'review', locator: { prNumber, comments: comments.length } });
     }
@@ -452,7 +467,7 @@ export class AgentRunner {
     // produce: commit the agent's work, enrich its artifacts with the real branch + sha, and
     // (for `tdd`) find-or-open the PR.
     const branch = prep.branch!;
-    const commit = await this.github.commitAndPush({ workingDir: prep.workingDir!, branch, message: commitMessage(run, prep.issue) });
+    const commit = await github.commitAndPush({ workingDir: prep.workingDir!, branch, message: commitMessage(run, prep.issue) });
     let envelopeOut: AgentEnvelope = { ...envelope, artifacts: enrichArtifacts(envelope.artifacts, { branch, sha: commit.sha }) };
     if (io.opensPr) {
       const pr = await this.ensurePr(run, branch, prep.issue);
@@ -467,14 +482,15 @@ export class AgentRunner {
    * the adapter whether an open PR already exists for the branch and adopt it (plans/milestone-4.md §3.3).
    */
   private async ensurePr(run: Run, branch: string, issue: Issue): Promise<PullRequest> {
-    const existing = await this.github.findOpenPrForBranch(branch);
+    const { github, baseBranch } = this.repoContext(run);
+    const existing = await github.findOpenPrForBranch(branch);
     if (existing) {
       if (run.prNumber === null) this.repo.setRunPr(run.id, existing.number);
       return existing;
     }
-    const pr = await this.github.openPr({
+    const pr = await github.openPr({
       branch,
-      base: this.baseBranch,
+      base: baseBranch,
       title: issue.title || `Run ${run.id}`,
       body: prBody(run, issue),
     });

@@ -7,7 +7,7 @@
  */
 
 import { request } from './api';
-import type { IssueSuggestion, LoadedConfig, LogLine, Run, RunDetail } from './types';
+import type { IssueSuggestion, LoadedConfig, LogLine, Repo, Run, RunDetail } from './types';
 
 export const ui = $state({
   runs: [] as Run[], // newest first
@@ -21,7 +21,33 @@ export const ui = $state({
   // `showArchived` is a client-side view preference; whether a run *is* archived lives on the server
   // (Run.archivedAt), set via the archive/unarchive endpoints below.
   showArchived: false,
+  // Multi-repo (Milestone 8 Phase A): the active board filter (null = all repos). The board filters
+  // client-side from `ui.runs`, so the SSE stream stays global (no reconnect on tab change). The tabs
+  // themselves derive from the runs on screen, so no separate repo list is fetched.
+  repoFilter: null as string | null,
 });
+
+/** Runs scoped to the active repo tab (all repos when no filter). */
+export function filteredRuns(): Run[] {
+  return ui.repoFilter === null ? ui.runs : ui.runs.filter((r) => r.repoRef === ui.repoFilter);
+}
+
+export function setRepoFilter(repoRef: string | null): void {
+  ui.repoFilter = repoRef;
+}
+
+/** Enroll a repo (`POST /repos`) so runs can be started for it. Returns whether it succeeded. */
+export async function enrollRepo(repoRef: string, baseBranch?: string): Promise<boolean> {
+  try {
+    const body = baseBranch?.trim() ? { repoRef, baseBranch: baseBranch.trim() } : { repoRef };
+    const repo = await request<Repo>('POST', '/repos', body);
+    banner(`Enrolled ${repo.repoRef}.`, 'ok');
+    return true;
+  } catch (err) {
+    banner(`Enroll failed: ${(err as Error).message}`, 'err');
+    return false;
+  }
+}
 
 /** Archive a resolved (done/stopped) run server-side so it drops out of the Resolved lane. */
 export async function archiveRun(id: number): Promise<void> {

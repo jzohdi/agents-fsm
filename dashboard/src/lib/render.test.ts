@@ -18,6 +18,7 @@ import {
   fmtTokens,
   humanizeState,
   pipelineModel,
+  repoOverviewModel,
   stepperModel,
   telemetryModel,
   traversedBackEdges,
@@ -115,6 +116,29 @@ describe('pipelineModel', () => {
     const shown = pipelineModel(runs, FSM, { showArchived: true }).columns.at(-1)!.runs;
     expect(shown.map((r) => r.id)).toEqual([3, 5]);
     expect(shown.find((r) => r.id === 5)!.archived).toBe(true);
+  });
+});
+
+describe('repoOverviewModel', () => {
+  it('groups by repo (sorted) with active vs needs-human counts; resolved runs are not surfaced', () => {
+    const runs = [
+      run({ id: 1, repoRef: 'acme/web', status: 'running' }),
+      run({ id: 2, repoRef: 'acme/web', status: 'awaiting_input' }),
+      run({ id: 3, repoRef: 'acme/web', status: 'needs_human' }),
+      run({ id: 4, repoRef: 'acme/web', status: 'done' }), // resolved → not counted as active
+      run({ id: 5, repoRef: 'acme/api', status: 'running' }),
+    ];
+    expect(repoOverviewModel(runs)).toEqual([
+      { repoRef: 'acme/api', active: 1, needsHuman: 0 },
+      { repoRef: 'acme/web', active: 2, needsHuman: 1 },
+    ]);
+  });
+
+  it('still lists a repo whose runs are all resolved (active 0), and handles empty input', () => {
+    expect(repoOverviewModel([run({ repoRef: 'old/done', status: 'done' })])).toEqual([
+      { repoRef: 'old/done', active: 0, needsHuman: 0 },
+    ]);
+    expect(repoOverviewModel(undefined)).toEqual([]);
   });
 });
 

@@ -27,20 +27,21 @@ export async function serve(args: CliArgs): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  const { orchestrator, repo, github } = buildOrchestrator(args);
+  const { orchestrator, repo, resolver } = buildOrchestrator(args);
   orchestrator.recover(); // reclaim crash-stranded events and resume any queued work on startup
 
   const server = createApiServer(orchestrator);
   await listen(server, args.port);
   const config = orchestrator.getConfig();
   console.log(`agent-fleet daemon listening on http://localhost:${args.port} (FSM config ${config.version}${args.mock ? ', mock mode' : ', real mode'})`);
-  console.log('  POST /runs · GET /runs · GET /runs/:id · POST /runs/:id/{pause,resume,stop,revert} · GET|PUT /config · GET /stream');
+  console.log('  POST /runs · GET /runs · GET /runs/:id · POST /runs/:id/{pause,resume,stop,revert} · GET|POST /repos · GET|PUT /config · GET /stream');
   if (!existsSync(DEFAULT_PUBLIC_DIR)) {
     console.warn('  ⚠ dashboard not built — run `npm run build:dashboard` (or `npm run dev:dashboard` for HMR). The API works regardless.');
   }
 
-  // Background reply polling: re-arm `awaiting_input` runs when a human replies on the issue.
-  const stopPolling = startReplyPolling(orchestrator, repo, github, args);
+  // Background reply polling: re-arm `awaiting_input` runs when a human replies on the issue (each via
+  // its own repo's adapter — the resolver, not a single bound adapter, so multi-repo runs poll correctly).
+  const stopPolling = startReplyPolling(orchestrator, repo, resolver, args);
 
   // Graceful shutdown: stop accepting connections and clear the poll timer so the process can exit.
   await new Promise<void>((resolve) => {
@@ -77,12 +78,12 @@ function listen(server: Server, port: number): Promise<void> {
 function startReplyPolling(
   orchestrator: ReturnType<typeof buildOrchestrator>['orchestrator'],
   repo: ReturnType<typeof buildOrchestrator>['repo'],
-  github: ReturnType<typeof buildOrchestrator>['github'],
+  resolver: ReturnType<typeof buildOrchestrator>['resolver'],
   args: CliArgs,
 ): () => void {
   if (args.pollTimeoutMinutes <= 0) return () => {};
   // The Orchestrator satisfies the poller's `AwaitingResumer` (it re-arms the run and kicks the pump).
-  const poller = new ReplyPoller(repo, github, orchestrator);
+  const poller = new ReplyPoller(repo, resolver, orchestrator);
   const timer = setInterval(() => {
     void poller.checkOnce().catch((err) => console.error(`[reply-poller] ${String(err)}`));
   }, args.pollIntervalSeconds * 1000);

@@ -22,13 +22,16 @@ describe('parseCliArgs', () => {
     // Daemon defaults (M5): a fixed port, no config file (so PUT /config is read-only).
     expect(args.port).toBe(4319);
     expect(args.config).toBeUndefined();
+    // Concurrency is unset on the command line by default; the daemon resolves its own fallback.
+    expect(args.concurrency).toBeUndefined();
   });
 
   it('reads the serve daemon flags', () => {
-    const args = parseCliArgs(['serve', '--port', '8080', '--config=/etc/af/fsm.json']);
+    const args = parseCliArgs(['serve', '--port', '8080', '--config=/etc/af/fsm.json', '--concurrency', '8']);
     expect(args.positionals).toEqual(['serve']);
     expect(args.port).toBe(8080);
     expect(args.config).toBe('/etc/af/fsm.json');
+    expect(args.concurrency).toBe(8);
   });
 
   it('reads the reply-poll overrides', () => {

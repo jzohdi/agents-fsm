@@ -7,11 +7,13 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import { loadDefaultConfig } from './fsm/config';
 import { parseCliArgs } from './cli-args';
-import { buildOrchestrator, loadRunConfig } from './build-runner';
+import { buildOrchestrator, buildRunner, loadRunConfig, resolveConcurrency } from './build-runner';
+import { openDb } from './store/db';
+import { Repository } from './store/repository';
 
 const DEFAULT_CONFIG_PATH = fileURLToPath(new URL('./fsm/default-config.json', import.meta.url));
 
@@ -21,6 +23,62 @@ describe('buildOrchestrator (stub/fake mode)', () => {
     const run = orchestrator.start({ issueRef: 'o/r#1' });
     await orchestrator.settle();
     expect(orchestrator.getRun(run.id).status).toBe('done');
+  });
+});
+
+describe('buildRunner (real mode — boot-time enrollment, Milestone 8)', () => {
+  // Constructing the real executor + adapter is side-effect-free (no spawn, no network until used),
+  // so this exercises the registry-backed resolver without spending tokens or touching GitHub.
+  it('enrolls the bound repo and returns a registry-backed resolver', () => {
+    const repo = new Repository(openDb(':memory:'));
+    const { agents } = loadDefaultConfig();
+    const args = parseCliArgs(['acme/web#1', '--repo', 'acme/web', '--base', 'develop']);
+
+    const { resolver } = buildRunner(args, repo, agents, 'acme/web');
+
+    // The bound repo was enrolled from the CLI args…
+    expect(repo.getRepo('acme/web')).toMatchObject({ workingRoot: args.work, baseBranch: 'develop' });
+    // …and the resolver serves it from the registry (its base branch flows through)…
+    expect(resolver.for('acme/web')).toMatchObject({ baseBranch: 'develop' });
+    // …while an unenrolled repo is a loud error, not a silent default (proves it isn't a single-repo stub).
+    expect(() => resolver.for('ghost/repo')).toThrow(/not enrolled/);
+  });
+});
+
+describe('resolveConcurrency (global cap: --concurrency → FLEET_CONCURRENCY → default, Milestone 8 Phase B)', () => {
+  const originalEnv = process.env.FLEET_CONCURRENCY;
+  afterEach(() => {
+    if (originalEnv === undefined) delete process.env.FLEET_CONCURRENCY;
+    else process.env.FLEET_CONCURRENCY = originalEnv;
+  });
+
+  const argsWith = (concurrency?: number): ReturnType<typeof parseCliArgs> => ({
+    ...parseCliArgs(['serve']),
+    ...(concurrency !== undefined ? { concurrency } : {}),
+  });
+
+  it('defaults to 4 when neither the flag nor the env var is set', () => {
+    delete process.env.FLEET_CONCURRENCY;
+    expect(resolveConcurrency(argsWith())).toBe(4);
+  });
+
+  it('prefers the --concurrency flag over the env var', () => {
+    process.env.FLEET_CONCURRENCY = '8';
+    expect(resolveConcurrency(argsWith(3))).toBe(3);
+  });
+
+  it('falls back to FLEET_CONCURRENCY when the flag is absent', () => {
+    process.env.FLEET_CONCURRENCY = '6';
+    expect(resolveConcurrency(argsWith())).toBe(6);
+  });
+
+  it('ignores a non-positive or non-numeric value and uses the default (never wedges at 0)', () => {
+    process.env.FLEET_CONCURRENCY = '0';
+    expect(resolveConcurrency(argsWith())).toBe(4);
+    process.env.FLEET_CONCURRENCY = 'nonsense';
+    expect(resolveConcurrency(argsWith())).toBe(4);
+    delete process.env.FLEET_CONCURRENCY;
+    expect(resolveConcurrency(argsWith(-2))).toBe(4);
   });
 });
 
