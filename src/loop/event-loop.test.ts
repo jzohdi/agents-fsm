@@ -430,6 +430,40 @@ describe('loop-owned guards escalate', () => {
     // The resume is recorded as a manual transition (needs_human → plan) with no event id.
     const resumeT = repo.listTransitions(run.id).find((t) => t.trigger === 'resume')!;
     expect(resumeT).toMatchObject({ fromState: 'needs_human', toState: 'plan', eventId: null, isReset: true });
+    expect(resumeT.reason).toBeNull(); // a plain resume carries no operator guidance
+  });
+
+  it('records operator notes on a guided resume, and the retried stage receives them as re-entry context', async () => {
+    const seen: Record<string, unknown>[] = [];
+    let failed = false;
+    const handler: StubHandler = (req) => {
+      seen.push(req.input as Record<string, unknown>);
+      if (req.stage === 'plan' && req.phase === 'produce' && !failed) {
+        failed = true;
+        throw new Error('transient harness failure');
+      }
+      return goldenPathHandler(req);
+    };
+    const { repo, loop } = setup(handler);
+
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.runUntilIdle();
+    expect(repo.getRun(run.id)!.status).toBe('needs_human');
+
+    loop.resumeRun(run.id, { notes: 'the harness hiccuped — retry, nothing to change' });
+    await loop.runUntilIdle();
+    expect(repo.getRun(run.id)!.status).toBe('done');
+
+    // One record serves both: the audit trail on the resume transition…
+    const resumeT = repo.listTransitions(run.id).find((t) => t.trigger === 'resume')!;
+    expect(resumeT.reason).toEqual({ kind: 'operator_resume', notes: 'the harness hiccuped — retry, nothing to change' });
+    // …and the delivered `reentry` input on the retried stage (escalation cause + the operator's words).
+    const retried = seen.find((input) => input.reentry !== undefined)!;
+    expect(retried.reentry).toMatchObject({
+      kind: 'operator_resume',
+      trigger: 'executor_error',
+      operatorNotes: 'the harness hiccuped — retry, nothing to change',
+    });
   });
 
   it('restores a fresh round budget when resuming after a round-limit escalation', async () => {

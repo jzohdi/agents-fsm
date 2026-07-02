@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   activityLane,
   branchUrl,
+  escalationDetail,
   escalationModel,
   escapeHtml,
   isAtBottom,
@@ -457,6 +458,63 @@ describe('escalationModel', () => {
   it('honors a custom escalation state', () => {
     const model = escalationModel([t({ toState: 'parked', trigger: 'budget_exceeded' })], 'parked');
     expect(model).toMatchObject({ trigger: 'budget_exceeded' });
+  });
+
+  it('embeds the human-first detail rendering of the reason', () => {
+    const model = escalationModel(
+      [t({ toState: 'needs_human', fromState: 'interface_design', trigger: 'internal_review_cap', reason: { kind: 'internal_review_cap', cap: 2, notes: { issues: ['a'] } } })],
+      'needs_human',
+    );
+    expect(model!.detail.headline).toContain('2 rounds');
+    expect(model!.detail.bullets).toEqual(['a']);
+  });
+});
+
+describe('escalationDetail', () => {
+  it('renders internal_review_cap as a headline plus the unresolved review findings', () => {
+    const d = escalationDetail('internal_review_cap', {
+      kind: 'internal_review_cap',
+      cap: 2,
+      notes: { kind: 'interface_review', issues: ['seriesRequired enforcement is broken', 'metadata contract is contradictory'] },
+    });
+    expect(d.headline).toContain('2 rounds');
+    expect(d.headline).toMatch(/unresolved findings/i);
+    expect(d.bullets).toEqual(['seriesRequired enforcement is broken', 'metadata contract is contradictory']);
+  });
+
+  it('tolerates an internal_review_cap payload without the expected notes shape', () => {
+    const d = escalationDetail('internal_review_cap', { cap: 'x', notes: 'free text' });
+    expect(d.headline).not.toBe('');
+    expect(d.bullets).toEqual([]);
+  });
+
+  it('renders the error-carrying triggers with their error text as bullets', () => {
+    expect(escalationDetail('malformed_output', { phase: 'produce', error: 'unexpected key "foo"' })).toEqual({
+      headline: 'The produce phase produced output that failed validation, even after a retry.',
+      bullets: ['unexpected key "foo"'],
+    });
+    expect(escalationDetail('git_error', { op: 'effects', detail: 'push rejected' }).bullets).toEqual(['push rejected']);
+    expect(escalationDetail('executor_error', { error: 'harness exited 1' }).bullets).toEqual(['harness exited 1']);
+  });
+
+  it('renders budget_exceeded with used-vs-allowed lines for the configured ceilings only', () => {
+    const d = escalationDetail('budget_exceeded', {
+      budget: { maxTokens: 1000 },
+      usage: { tokens: 1200, agentRuns: 9, wallClockMs: 5 },
+    });
+    expect(d.bullets).toEqual(['tokens: 1200 used of 1000 allowed']);
+  });
+
+  it('lists created sub-issues for should_split and members for dependency_cycle', () => {
+    expect(escalationDetail('should_split', { created: [{ ref: 'o/r#7', number: 7, title: 'Part one' }] }).bullets).toEqual(['#7 Part one']);
+    expect(
+      escalationDetail('dependency_cycle', { runs: [1, 2], issues: [{ number: 4, title: 'A' }, { number: 5, title: 'B' }] }).bullets,
+    ).toEqual(['#4 A', '#5 B']);
+  });
+
+  it('renders empty for an unknown trigger or a null reason payload, so the panel falls back to raw JSON', () => {
+    expect(escalationDetail('mystery', { any: 'thing' })).toEqual({ headline: '', bullets: [] });
+    expect(escalationDetail('mystery', null)).toEqual({ headline: '', bullets: [] });
   });
 });
 

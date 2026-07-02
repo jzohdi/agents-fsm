@@ -40,6 +40,15 @@ export const AWAIT_INPUT_TRIGGER = 'await_input';
 export const PR_FEEDBACK_TRIGGER = 'pr_feedback';
 
 /**
+ * Triggers recorded on the two operator control transitions ({@link EventLoop.resumeRun} /
+ * {@link EventLoop.revertRun}). Exported so the Agent Runner can recognize them when it builds the
+ * re-entry context it hands the re-dispatched stage (the delivery half of README §2 "the target
+ * state knows why it is being re-run").
+ */
+export const RESUME_TRIGGER = 'resume';
+export const REVERT_TRIGGER = 'revert';
+
+/**
  * Trigger recorded when the Scheduler finds the run's issue in a dependency cycle (Milestone 9):
  * every member escalates to `needs_human` rather than deadlocking forever (README §3.3). A control
  * transition like `revert`/`resume` — the FSM engine never sees it.
@@ -125,10 +134,16 @@ export class EventLoop {
    * the round counters (a fresh budget, per README §3.3 Layer 6), and enqueues an advance event so
    * the loop re-dispatches that stage — safely, because every stage side effect is idempotent.
    *
+   * Optional `notes` are the operator's guidance for the retry ("accept the reviewer's findings",
+   * "drop requirement X"). They are recorded as the resume transition's reason — one record that is
+   * both the audit trail and what the Agent Runner delivers to the re-dispatched stage as its
+   * re-entry context — so a guided resume actually changes the stage's behavior instead of
+   * re-running it blind.
+   *
    * Part of the M5 control surface alongside {@link pauseRun} / {@link stopRun} / {@link revertRun}.
    * Returns the updated run; the caller (`Orchestrator`) kicks the drain pump.
    */
-  resumeRun(runId: number): Run {
+  resumeRun(runId: number, options: { notes?: string } = {}): Run {
     const run = this.repo.getRun(runId);
     if (!run) throw new Error(`resumeRun: run ${runId} not found`);
     if (run.status !== 'needs_human') throw new Error(`resumeRun: run ${runId} is "${run.status}", not needs_human`);
@@ -136,13 +151,15 @@ export class EventLoop {
     const escalation = [...this.repo.listTransitions(runId)].reverse().find((t) => t.toState === this.fsm.escalationState);
     if (!escalation) throw new Error(`resumeRun: run ${runId} has no escalation transition to resume from`);
     const target = escalation.fromState;
+    const notes = options.notes?.trim();
 
     const transition = this.repo.transaction(() => {
       const t = this.repo.commitTransition({
         runId,
         fromState: this.fsm.escalationState,
         toState: target,
-        trigger: 'resume',
+        trigger: RESUME_TRIGGER,
+        ...(notes ? { reason: { kind: 'operator_resume', notes } } : {}),
         isReset: true, // reset round counters → a fresh budget of rounds for the resumed loop
         status: 'running',
         eventId: null, // a manual operator transition, not driven by an event
@@ -299,7 +316,7 @@ export class EventLoop {
         runId,
         fromState: run.currentState,
         toState,
-        trigger: 'revert',
+        trigger: REVERT_TRIGGER,
         reason,
         isReset: true, // fresh budget of rounds for the reverted-to loop
         status: 'running',

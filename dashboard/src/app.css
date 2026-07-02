@@ -345,6 +345,16 @@ input, textarea, button, select { font: inherit; }
 .af-esc-head .from { color: var(--ink3); font-size: 12.5px; }
 .af-esc-guide { margin: 10px 0 0; color: var(--ink2); font-size: 13.5px; line-height: 1.5; }
 .af-esc-reason { margin: 10px 0 0; font-family: var(--mono); font-size: 11.5px; color: var(--ink2); white-space: pre-wrap; word-break: break-word; max-height: 160px; overflow: auto; }
+.af-esc-what { margin: 12px 0 0; color: var(--ink); font-size: 13.5px; font-weight: 600; line-height: 1.5; }
+.af-esc-issues { margin: 8px 0 0; padding-left: 20px; color: var(--ink2); font-size: 13px; line-height: 1.55; max-height: 220px; overflow: auto; }
+.af-esc-issues li { margin: 6px 0; }
+.af-esc-raw { margin-top: 10px; }
+.af-esc-raw summary { cursor: pointer; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink3); }
+.af-esc-resolve { display: flex; align-items: stretch; gap: 10px; margin-top: 14px; }
+.af-esc-resolve textarea { flex: 1; resize: vertical; min-height: 42px; border: 1px solid var(--rule2); background: var(--paper2); padding: 8px 10px; font-size: 13px; color: var(--ink); }
+.af-esc-resolve textarea:focus { outline: none; border-color: var(--ink3); }
+.af-esc-resolve button { border: 1px solid var(--rule2); background: var(--paper2); font-size: 13px; font-weight: 600; color: var(--ink2); padding: 9px 18px; cursor: pointer; white-space: nowrap; }
+.af-esc-resolve button:hover { background: var(--paper); color: var(--ink); }
 
 /* --- state machine (stepper + back-edge arcs) --- */
 .af-sm-wrap { position: relative; margin-top: 36px; padding-top: 58px; overflow-x: auto; }

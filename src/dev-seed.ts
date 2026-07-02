@@ -201,7 +201,19 @@ export function seedRuns(repo: Repository, version: string): number[] {
         fromState: s.escalateFrom,
         toState: 'needs_human',
         trigger: 'internal_review_cap',
-        reason: { kind: 'internal_review_cap', cap: 3, notes: 'layout regressions persist after 3 fix rounds' },
+        // Notes shaped like a real self-review verdict ({ issues }) so the inspector's readable
+        // findings list renders in the preview, not just the headline.
+        reason: {
+          kind: 'internal_review_cap',
+          cap: 3,
+          notes: {
+            kind: 'code_review',
+            issues: [
+              'The checkout summary re-renders on every cart mutation because the memo key includes the full cart object; key on cart.version instead.',
+              'The retry path swallows the AbortError, so a cancelled payment intent is reported as succeeded.',
+            ],
+          },
+        },
       });
     }
     if (s.stopped) {

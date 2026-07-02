@@ -20,11 +20,11 @@
 import { randomBytes } from 'node:crypto';
 
 import { recipeFor, type AgentsConfig, type StageIo } from '../fsm/config';
-import { ADDRESSING_PR_FEEDBACK_FLAG } from '../loop/event-loop';
+import { ADDRESSING_PR_FEEDBACK_FLAG, RESUME_TRIGGER, REVERT_TRIGGER } from '../loop/event-loop';
 import type { GitHub, Issue, IssueComment, PullRequest } from '../integration/github';
 import { defaultScheduling, parseMarker, upsertMarker, type SchedulingDecl } from '../integration/issue-markers';
 import { isRepoResolver, singleRepoResolver, type RepoContext, type RepoResolver } from '../integration/github-resolver';
-import type { AgentPhase, Repository, Run } from '../store/repository';
+import type { AgentPhase, Repository, Run, Transition } from '../store/repository';
 import type { AgentActivity, AgentRunResult, StageExecutor } from './executor';
 import { isHarnessResolver, singleHarness, type HarnessResolver } from './harness';
 import {
@@ -84,6 +84,66 @@ export type SystemPromptFn = (stage: string, phase: AgentPhase) => string;
 
 /** Default used by stub/fake runs that don't inject real prompts (the demo CLI, most unit tests). */
 const defaultSystemPrompt: SystemPromptFn = (stage, phase) => `[${stage}:${phase}] system prompt (stub — inject createSystemPromptFn for real runs)`;
+
+/**
+ * Why the current stage is being *re-run* rather than visited for the first time — delivered to the
+ * agent as the `reentry` input field (documented in prompts/base.md). This is the delivery half of
+ * README §2's "every back-edge carries a structured reason so the target state knows why it is being
+ * re-run": the reasons were always *recorded* in the transition log; this hands them to the stage.
+ */
+export interface ReentryContext {
+  kind: 'operator_resume' | 'operator_revert' | 'back_edge';
+  /** What sent the run back: the escalation trigger (e.g. `internal_review_cap`), `revert`, or the back-edge trigger. */
+  trigger: string;
+  /** The structured payload that sent the run back (the escalation reason / the reviewing stage's issues). */
+  reason?: unknown;
+  /** Free-text guidance the operator typed (resume notes / a string revert reason). */
+  operatorNotes?: string;
+}
+
+/**
+ * Derive the {@link ReentryContext} for a stage dispatch from the run's transition log: the latest
+ * transition, when it re-entered `currentState` via an operator resume/revert or an agent back-edge.
+ * A first visit, a forward handoff, or an `await_input` re-arm (triage reads the human's reply from
+ * the issue thread instead) yields `undefined`. Pure, so the classification is unit-tested directly.
+ */
+export function reentryContext(transitions: readonly Transition[], currentState: string): ReentryContext | undefined {
+  const last = transitions[transitions.length - 1];
+  if (!last || last.toState !== currentState) return undefined;
+
+  if (last.trigger === RESUME_TRIGGER) {
+    // The escalation this resume undoes: the latest transition out of this stage into the state the
+    // resume came from (the escalation state — matched structurally so no FSM config is needed here).
+    const escalation = [...transitions].reverse().find((t) => t.fromState === currentState && t.toState === last.fromState);
+    const notes = operatorResumeNotes(last.reason);
+    return {
+      kind: 'operator_resume',
+      trigger: escalation?.trigger ?? RESUME_TRIGGER,
+      ...(escalation?.reason != null ? { reason: escalation.reason } : {}),
+      ...(notes !== undefined ? { operatorNotes: notes } : {}),
+    };
+  }
+  if (last.trigger === REVERT_TRIGGER) {
+    return {
+      kind: 'operator_revert',
+      trigger: REVERT_TRIGGER,
+      // The dashboard's revert form sends a plain string — surface it as the operator's words.
+      ...(typeof last.reason === 'string' ? { operatorNotes: last.reason } : last.reason != null ? { reason: last.reason } : {}),
+    };
+  }
+  if (last.backEdge) {
+    return { kind: 'back_edge', trigger: last.trigger, ...(last.reason != null ? { reason: last.reason } : {}) };
+  }
+  return undefined;
+}
+
+/** The operator's notes from a guided-resume transition reason (`{ kind: 'operator_resume', notes }`). */
+function operatorResumeNotes(reason: unknown): string | undefined {
+  if (reason && typeof reason === 'object' && typeof (reason as { notes?: unknown }).notes === 'string') {
+    return (reason as { notes: string }).notes;
+  }
+  return undefined;
+}
 
 /** One live activity from a running stage, carrying the run context the bare {@link AgentActivity} lacks. */
 export interface PhaseActivity {
@@ -423,6 +483,9 @@ export class AgentRunner {
     // The run's reasoning-effort override pairs with the model override: both target the frontier role
     // (the primary produce/review work), so the cheaper `simplify` pass isn't pushed to high effort.
     const effort = run.effortOverride && logical === OVERRIDE_ROLE ? run.effortOverride : undefined;
+    // Why this stage is being re-run (operator resume/revert, agent back-edge), if it is — the
+    // escalation reason + operator guidance would otherwise sit unread in the transition log.
+    const reentry = reentryContext(this.repo.listTransitions(run.id), run.currentState);
     const input = {
       issueRef: run.issueRef,
       repoRef: run.repoRef,
@@ -430,6 +493,7 @@ export class AgentRunner {
       phase,
       // Durable artifacts + minimal state slice — never prior transcripts (README §3.3 Layer 4).
       artifacts: this.repo.listArtifacts(run.id),
+      ...(reentry ? { reentry } : {}),
       ...prep.input,
       ...extra,
     };

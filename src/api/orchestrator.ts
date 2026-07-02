@@ -292,8 +292,12 @@ export class Orchestrator {
    * Resume a parked run — dispatching on its status: a `paused` run flips back to `running`; a
    * `needs_human` run resumes from where it escalated (counter reset). Any other status is a `409`.
    * An `awaiting_input` run is resumed by the Reply Poller on a human reply, not by this command.
+   *
+   * Optional `notes` (needs_human only — a paused run re-runs nothing, so there is nothing to guide)
+   * are the operator's guidance for the retried stage; the loop records them on the resume transition
+   * and the Agent Runner delivers them to the stage as its re-entry context.
    */
-  resume(runId: number): Run {
+  resume(runId: number, notes?: string): Run {
     const existing = this.requireRun(runId);
     if (existing.status === 'paused') {
       const run = this.loop.resumePausedRun(runId);
@@ -302,7 +306,7 @@ export class Orchestrator {
       return run;
     }
     if (existing.status === 'needs_human') {
-      const run = this.conflictOnThrow(() => this.loop.resumeRun(runId)); // emits its own transition event
+      const run = this.conflictOnThrow(() => this.loop.resumeRun(runId, notes !== undefined ? { notes } : {})); // emits its own transition event
       this.kick();
       return run;
     }

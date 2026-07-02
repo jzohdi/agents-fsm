@@ -163,8 +163,14 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
     switch (actionMatch[2]) {
       case 'pause':
         return sendJson(res, 200, orch.pause(id));
-      case 'resume':
-        return sendJson(res, 200, orch.resume(id));
+      case 'resume': {
+        // Optional `notes`: operator guidance for the retried stage (delivered as its re-entry context).
+        const raw = (await readJson(req)).notes;
+        if (raw !== undefined && typeof raw !== 'string') {
+          return sendError(res, new ApiError(400, '"notes" must be a string when provided'));
+        }
+        return sendJson(res, 200, orch.resume(id, raw));
+      }
       case 'stop':
         return sendJson(res, 200, orch.stop(id));
       case 'archive':

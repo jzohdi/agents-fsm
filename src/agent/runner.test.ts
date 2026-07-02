@@ -11,10 +11,10 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AgentsConfig } from '../fsm/config';
 import { FakeGitHub } from '../integration/github-fake';
 import { openDb } from '../store/db';
-import { Repository, type Run } from '../store/repository';
+import { Repository, type Run, type Transition } from '../store/repository';
 import { StubExecutor, type AgentRunRequest, type StageExecutor, type StubHandler } from './executor';
 import { HarnessRegistry } from './harness';
-import { AgentRunner, phaseModel, type AgentRunnerOptions } from './runner';
+import { AgentRunner, phaseModel, reentryContext, type AgentRunnerOptions } from './runner';
 import { ADDRESSING_PR_FEEDBACK_FLAG } from '../loop/event-loop';
 
 describe('phaseModel', () => {
@@ -552,5 +552,134 @@ describe('AgentRunner — per-run harness dispatch', () => {
     // non-fatal throw into an `executor_error` escalation, so one bad harness parks its run, not the fleet.
     await expect(runner.runStage(ghost)).rejects.toThrowError(/no executor registered for harness "ghost"/);
     expect(repo.listAgentRuns(ghost.id).some((r) => !r.success)).toBe(true);
+  });
+});
+
+describe('reentryContext — why a stage is being re-run (README §2 reason delivery)', () => {
+  const tr = (over: Partial<Transition>): Transition => ({
+    id: 1,
+    runId: 1,
+    fromState: 'triage',
+    toState: 'plan',
+    trigger: 'proceed',
+    reason: null,
+    backEdge: false,
+    counterKey: null,
+    isReset: false,
+    eventId: null,
+    createdAt: '',
+    ...over,
+  });
+
+  it('is undefined on a first visit and on a normal forward handoff', () => {
+    expect(reentryContext([], 'plan')).toBeUndefined();
+    expect(reentryContext([tr({})], 'plan')).toBeUndefined();
+  });
+
+  it('is undefined when the latest transition does not target the current state', () => {
+    expect(reentryContext([tr({ trigger: 'revert', reason: 'notes', toState: 'plan' })], 'tdd')).toBeUndefined();
+  });
+
+  it('classifies an operator resume, attaching the escalation it undoes and the operator notes', () => {
+    const transitions = [
+      tr({ id: 1, fromState: 'plan', toState: 'needs_human', trigger: 'internal_review_cap', reason: { kind: 'internal_review_cap', cap: 2, notes: { issues: ['x'] } } }),
+      tr({ id: 2, fromState: 'needs_human', toState: 'plan', trigger: 'resume', reason: { kind: 'operator_resume', notes: 'accept the findings' } }),
+    ];
+    expect(reentryContext(transitions, 'plan')).toEqual({
+      kind: 'operator_resume',
+      trigger: 'internal_review_cap',
+      reason: { kind: 'internal_review_cap', cap: 2, notes: { issues: ['x'] } },
+      operatorNotes: 'accept the findings',
+    });
+  });
+
+  it('resolves the escalation for the stage actually resumed, not an earlier one from another stage', () => {
+    const transitions = [
+      tr({ id: 1, fromState: 'tdd', toState: 'needs_human', trigger: 'git_error', reason: { kind: 'git_error' } }),
+      tr({ id: 2, fromState: 'needs_human', toState: 'tdd', trigger: 'resume' }),
+      tr({ id: 3, fromState: 'tdd', toState: 'backend', trigger: 'proceed' }),
+      tr({ id: 4, fromState: 'backend', toState: 'needs_human', trigger: 'executor_error', reason: { kind: 'executor_error', error: 'boom' } }),
+      tr({ id: 5, fromState: 'needs_human', toState: 'backend', trigger: 'resume' }),
+    ];
+    expect(reentryContext(transitions, 'backend')).toEqual({
+      kind: 'operator_resume',
+      trigger: 'executor_error',
+      reason: { kind: 'executor_error', error: 'boom' },
+    });
+  });
+
+  it('classifies an operator revert, surfacing a string reason as the operator notes', () => {
+    const transitions = [tr({ fromState: 'needs_human', toState: 'plan', trigger: 'revert', reason: 'scope this down to the API only' })];
+    expect(reentryContext(transitions, 'plan')).toEqual({
+      kind: 'operator_revert',
+      trigger: 'revert',
+      operatorNotes: 'scope this down to the API only',
+    });
+  });
+
+  it('classifies an agent back-edge with its structured reason', () => {
+    const transitions = [tr({ fromState: 'plan_review', toState: 'plan', trigger: 'request_changes', backEdge: true, reason: { kind: 'plan_changes', issues: ['missing rollout plan'] } })];
+    expect(reentryContext(transitions, 'plan')).toEqual({
+      kind: 'back_edge',
+      trigger: 'request_changes',
+      reason: { kind: 'plan_changes', issues: ['missing rollout plan'] },
+    });
+  });
+
+  it('is undefined for an await_input re-arm (triage reads the reply from the issue thread instead)', () => {
+    const transitions = [tr({ fromState: 'triage', toState: 'triage', trigger: 'await_input', reason: { kind: 'needs_more_detail' } })];
+    expect(reentryContext(transitions, 'triage')).toBeUndefined();
+  });
+});
+
+describe('AgentRunner — re-entry context delivery', () => {
+  it('injects the escalation reason + operator notes into every phase input of the resumed stage', async () => {
+    const seen: Record<string, unknown>[] = [];
+    const { repo, runner, run } = setup((req) => {
+      seen.push(req.input as Record<string, unknown>);
+      return req.phase === 'self_review' ? { output: { acceptable: true } } : { output: { requestedTransition: 'proceed' } };
+    });
+    repo.commitTransition({
+      runId: run.id,
+      fromState: 'plan',
+      toState: 'needs_human',
+      trigger: 'internal_review_cap',
+      reason: { kind: 'internal_review_cap', cap: 2, notes: { issues: ['naming is wrong'] } },
+      status: 'needs_human',
+    });
+    repo.commitTransition({
+      runId: run.id,
+      fromState: 'needs_human',
+      toState: 'plan',
+      trigger: 'resume',
+      reason: { kind: 'operator_resume', notes: 'rename per the review' },
+      isReset: true,
+      status: 'running',
+    });
+
+    await runner.runStage(run);
+
+    expect(seen.length).toBeGreaterThan(1);
+    for (const input of seen) {
+      expect(input.reentry).toEqual({
+        kind: 'operator_resume',
+        trigger: 'internal_review_cap',
+        reason: { kind: 'internal_review_cap', cap: 2, notes: { issues: ['naming is wrong'] } },
+        operatorNotes: 'rename per the review',
+      });
+    }
+  });
+
+  it('omits the reentry field entirely on a first visit', async () => {
+    const seen: Record<string, unknown>[] = [];
+    const { runner, run } = setup((req) => {
+      seen.push(req.input as Record<string, unknown>);
+      return req.phase === 'self_review' ? { output: { acceptable: true } } : { output: { requestedTransition: 'proceed' } };
+    });
+
+    await runner.runStage(run);
+
+    expect(seen.length).toBeGreaterThan(0);
+    for (const input of seen) expect('reentry' in input).toBe(false);
   });
 });

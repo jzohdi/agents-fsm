@@ -52,6 +52,9 @@
 
   let revertTo = $state('');
   let revertReason = $state('');
+  // Operator guidance typed into the escalation panel; sent with resume and delivered to the
+  // retried stage as its `reentry.operatorNotes` (so a guided resume changes the retry's behavior).
+  let guidance = $state('');
   $effect(() => {
     if (revertable.length && !revertable.includes(revertTo)) revertTo = revertable[0]!;
   });
@@ -88,6 +91,12 @@
     e.preventDefault();
     await revertRun(revertTo, revertReason);
     revertReason = '';
+  }
+
+  async function submitGuidedResume(e: SubmitEvent) {
+    e.preventDefault();
+    await control('resume', guidance);
+    guidance = '';
   }
 </script>
 
@@ -185,7 +194,33 @@
         <span class="from">escalated from {humanizeState(escalation.fromState)}</span>
       </div>
       <p class="af-esc-guide">{escalation.guidance}</p>
-      {#if escalation.reason}<pre class="af-esc-reason">{reasonText(escalation.reason)}</pre>{/if}
+      {#if escalation.detail.headline}
+        <p class="af-esc-what">{escalation.detail.headline}</p>
+      {/if}
+      {#if escalation.detail.bullets.length}
+        <ul class="af-esc-issues">
+          {#each escalation.detail.bullets as b, i (i)}<li>{b}</li>{/each}
+        </ul>
+      {/if}
+      {#if escalation.reason}
+        {#if escalation.detail.headline}
+          <details class="af-esc-raw">
+            <summary>raw payload</summary>
+            <pre class="af-esc-reason">{reasonText(escalation.reason)}</pre>
+          </details>
+        {:else}
+          <pre class="af-esc-reason">{reasonText(escalation.reason)}</pre>
+        {/if}
+      {/if}
+      <form class="af-esc-resolve" onsubmit={submitGuidedResume}>
+        <textarea
+          bind:value={guidance}
+          rows="2"
+          placeholder="Guidance for the retry — what should the stage do differently? (optional; delivered to the agent)"
+          aria-label="resume guidance"
+        ></textarea>
+        <button type="submit">{guidance.trim() ? 'Resume with guidance' : 'Resume'}</button>
+      </form>
     </div>
   {/if}
     </div>

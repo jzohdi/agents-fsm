@@ -613,6 +613,8 @@ export interface EscalationModel {
   guidance: string;
   /** The structured reason payload, for the operator to inspect (the full cause). */
   reason: unknown;
+  /** Human-first rendering of the reason ({@link escalationDetail}); the raw payload stays behind a toggle. */
+  detail: EscalationDetail;
 }
 
 /** Operator guidance per escalation trigger — the "fix" half of inspect → fix → resume/revert. */
@@ -632,6 +634,114 @@ const ESCALATION_GUIDANCE: Record<string, string> = {
 };
 
 /**
+ * Human-first rendering of an escalation reason: what happened in one sentence, and the particulars
+ * as readable list items. The reason payloads are written *for the agents* (structured JSON); this is
+ * the translation for the operator who has to act on them. An unknown trigger — or a known one whose
+ * payload doesn't match the expected shape — renders empty, and the panel falls back to the raw JSON.
+ */
+export interface EscalationDetail {
+  /** One-sentence account of what happened; '' when this trigger has no human rendering. */
+  headline: string;
+  /** The particulars (unresolved findings, error text, created issues) as list items; may be empty. */
+  bullets: string[];
+}
+
+/** The blocking findings from a self-review verdict's notes (`{ issues: string[] }`), if shaped so. */
+function reviewIssues(notes: unknown): string[] {
+  const issues = (notes as { issues?: unknown } | null | undefined)?.issues;
+  return Array.isArray(issues) ? issues.filter((i): i is string => typeof i === 'string') : [];
+}
+
+const asText = (v: unknown): string[] => (typeof v === 'string' && v !== '' ? [v] : []);
+
+/** Per-trigger reason renderers. Each tolerates a malformed payload by rendering fewer bullets. */
+const ESCALATION_DETAIL: Record<string, (r: Record<string, unknown>) => EscalationDetail> = {
+  internal_review_cap: (r) => {
+    const cap = typeof r.cap === 'number' ? r.cap : null;
+    const issues = reviewIssues(r.notes);
+    return {
+      headline:
+        `The stage kept producing work its own reviewer rejected${cap !== null ? ` (${cap} round${cap === 1 ? '' : 's'} of produce → review → fix)` : ''}.` +
+        (issues.length ? ' The unresolved findings:' : ''),
+      bullets: issues,
+    };
+  },
+  malformed_output: (r) => ({
+    headline: `The ${typeof r.phase === 'string' ? r.phase : 'agent'} phase produced output that failed validation, even after a retry.`,
+    bullets: asText(r.error),
+  }),
+  git_error: (r) => ({
+    headline: `A git/GitHub operation failed${typeof r.op === 'string' ? ` while running "${r.op}"` : ''}.`,
+    bullets: asText(r.detail),
+  }),
+  executor_error: (r) => ({
+    headline: 'The agent harness failed even after its own retries.',
+    bullets: asText(r.error),
+  }),
+  budget_exceeded: (r) => {
+    const budget = (r.budget ?? {}) as Record<string, unknown>;
+    const usage = (r.usage ?? {}) as Record<string, unknown>;
+    const line = (label: string, used: unknown, max: unknown): string[] =>
+      typeof max === 'number' && typeof used === 'number' ? [`${label}: ${used} used of ${max} allowed`] : [];
+    return {
+      headline: 'The run hit its budget ceiling before finishing.',
+      bullets: [
+        ...line('tokens', usage.tokens, budget.maxTokens),
+        ...line('agent runs', usage.agentRuns, budget.maxAgentRuns),
+        ...line('wall-clock ms', usage.wallClockMs, budget.maxWallClockMs),
+      ],
+    };
+  },
+  should_split: (r) => {
+    const created = Array.isArray(r.created) ? r.created : [];
+    return {
+      headline: 'Triage split this issue into smaller ones; start runs for the children (this run can be stopped).',
+      bullets: created.map((c) => {
+        const i = (c ?? {}) as { number?: unknown; title?: unknown };
+        return `#${typeof i.number === 'number' ? i.number : '?'} ${typeof i.title === 'string' ? i.title : ''}`.trim();
+      }),
+    };
+  },
+  dependency_cycle: (r) => {
+    const issues = Array.isArray(r.issues) ? r.issues : [];
+    return {
+      headline: 'These issues declare depends_on each other, so none can ever start. Break the cycle on the issues, then resume.',
+      bullets: issues.map((i) => {
+        const s = (i ?? {}) as { number?: unknown; title?: unknown };
+        return `#${typeof s.number === 'number' ? s.number : '?'} ${typeof s.title === 'string' ? s.title : ''}`.trim();
+      }),
+    };
+  },
+  config_version_mismatch: (r) => ({
+    headline: 'The run was started under a different FSM config version than the daemon is running.',
+    bullets: [
+      ...(typeof r.runVersion === 'string' ? [`run pinned to: ${r.runVersion}`] : []),
+      ...(typeof r.loopVersion === 'string' ? [`daemon running: ${r.loopVersion}`] : []),
+    ],
+  }),
+  partial_side_effect: (r) => ({
+    headline: 'A GitHub side effect (a comment or sub-issue) may have been partly created before a crash.',
+    bullets: [...(typeof r.key === 'string' ? [`in-flight outbox slot: ${r.key}`] : []), ...asText(r.note)],
+  }),
+  invalid_transition: (r) => ({
+    headline: `The agent requested a transition the FSM does not allow${typeof r.requested === 'string' ? ` ("${r.requested}")` : ''}.`,
+    bullets: asText(r.error),
+  }),
+  missing_reason: (r) => ({
+    headline: `The agent requested a back-edge${typeof r.to === 'string' ? ` to ${r.to}` : ''} without the required reason.`,
+    bullets: asText(r.note),
+  }),
+};
+
+/** Render one escalation's reason for the operator; empty (`headline: ''`) → show the raw payload instead. */
+export function escalationDetail(trigger: string, reason: unknown): EscalationDetail {
+  const render = ESCALATION_DETAIL[trigger];
+  if (!render) return { headline: '', bullets: [] };
+  const r = reason !== null && typeof reason === 'object' ? (reason as Record<string, unknown>) : {};
+  return render(r);
+}
+
+/**
  * The escalation inspector for a `needs_human` run: the trigger, the stage it escalated from, the
  * structured reason, and a one-line operator guidance — the "inspect" half of the needs_human loop.
  * Returns `null` when the run has no escalation transition (so the panel renders only when relevant).
@@ -647,6 +757,7 @@ export function escalationModel(
     fromState: esc.fromState,
     reason: esc.reason,
     guidance: ESCALATION_GUIDANCE[esc.trigger] ?? 'Inspect the reason below, fix the cause, then resume or revert.',
+    detail: escalationDetail(esc.trigger, esc.reason),
   };
 }
 

@@ -364,10 +364,12 @@ export async function refreshDetail(): Promise<void> {
   ui.logs = detail.logs.map((l) => toLogLine(l.level, l.message, l.data));
 }
 
-export async function control(action: 'pause' | 'resume' | 'stop'): Promise<void> {
+/** Run-control command. `notes` (resume of a needs_human run only): operator guidance the daemon
+ *  records on the resume transition and delivers to the retried stage as its re-entry context. */
+export async function control(action: 'pause' | 'resume' | 'stop', notes?: string): Promise<void> {
   if (ui.selectedId === null) return;
   try {
-    await request('POST', `/runs/${ui.selectedId}/${action}`);
+    await request('POST', `/runs/${ui.selectedId}/${action}`, notes?.trim() ? { notes: notes.trim() } : undefined);
     await refreshDetail();
   } catch (err) {
     banner(`${action} failed: ${(err as Error).message}`, 'err');

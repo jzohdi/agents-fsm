@@ -19,6 +19,12 @@ Your user message is a single JSON object. The fields you may see:
   see this, the branch already holds prior stages' committed work — build on it, do not start over.
 - `prFeedback` — (present with `pullRequest`) the PR's comment thread as `{ author, body, createdAt }[]`.
   The reviewer comments that start with `feedback:` are the changes being requested — address them.
+- `reentry` — present only when this stage is being **re-run** rather than visited for the first
+  time: `{ kind: "operator_resume" | "operator_revert" | "back_edge", trigger, reason?, operatorNotes? }`.
+  `reason` is the structured payload that sent the run back — e.g. the unresolved review issues that
+  escalated it, or a reviewing stage's requested changes. `operatorNotes` is guidance a human typed
+  when resuming or reverting the run. **Address what it says; do not simply repeat your prior
+  output.** When `operatorNotes` conflicts with anything else, the human's guidance wins.
 - `producedEnvelope` / `reviewNotes` — (self-review / fix phases) the output under review and the
   review's findings.
 - `retry` — present only when your previous attempt produced output that failed validation;

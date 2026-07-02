@@ -529,6 +529,29 @@ describe('Orchestrator — pause / resume', () => {
     await orchestrator.settle();
     expect(repo.getRun(run.id)!.status).toBe('done');
   });
+
+  it('threads guided-resume notes through to the resume transition', async () => {
+    let failed = false;
+    const handler: StubHandler = (req) => {
+      if (req.stage === 'plan' && req.phase === 'produce' && !failed) {
+        failed = true;
+        throw new Error('transient harness failure');
+      }
+      return goldenPathHandler(req);
+    };
+    const { orchestrator, repo } = setup({ handler });
+
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle();
+    expect(repo.getRun(run.id)!.status).toBe('needs_human');
+
+    orchestrator.resume(run.id, 'just retry');
+    await orchestrator.settle();
+
+    const resumeT = repo.listTransitions(run.id).find((t) => t.trigger === 'resume')!;
+    expect(resumeT.reason).toEqual({ kind: 'operator_resume', notes: 'just retry' });
+    expect(repo.getRun(run.id)!.status).toBe('done');
+  });
 });
 
 describe('Orchestrator — stop', () => {

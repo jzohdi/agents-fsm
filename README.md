@@ -737,13 +737,22 @@ read-only (the bundled default is never overwritten).
 
 ### 9.5 Resolve a `needs_human` run (inspect → fix → resume/revert)
 When a run escalates, open it in the dashboard. The **escalation inspector** shows the trigger, the
-stage it escalated from, the reason, and guidance:
-1. **Inspect** — read the trigger + reason. For `partial_side_effect`, check the issue/PR on GitHub
-   and delete any partial comment or sub-issue first.
-2. **Fix** — address the cause (credentials, a conflict, the issue text, the budget, …).
+stage it escalated from, a human-readable account of what happened (e.g. the self-review findings
+that never converged, as a list; the raw payload stays behind a *raw payload* toggle), and guidance:
+1. **Inspect** — read the account + findings. For `partial_side_effect`, check the issue/PR on
+   GitHub and delete any partial comment or sub-issue first.
+2. **Fix** — address the cause (credentials, a conflict, the issue text, the budget, …) — or, for
+   agent-side causes, just write what should change in the **guidance box**.
 3. **Act** — **Resume** re-runs the escalated-from stage with a fresh round budget, or **Revert
    `<state>`** (with a reason) sends the run back to an earlier stage. **Stop** ends it (terminal,
    inspectable). Both Resume and Revert reset the round counters.
+
+Anything typed in the guidance box (and every revert reason / back-edge reason) is **delivered to
+the re-run stage** as its `reentry` input — the escalation cause plus the operator's words — so the
+stage addresses what went wrong instead of repeating its prior output (README §2's reversion-reason
+rule, end to end). On the wire it is `POST /runs/:id/resume` with an optional `{ "notes": "…" }`
+body, recorded on the resume transition as `{ kind: "operator_resume", notes }` (audit trail and
+delivery are the same record).
 
 ### 9.6 Crash recovery
 Just restart the daemon (`serve`). On startup it reclaims events stranded `processing` by the crash

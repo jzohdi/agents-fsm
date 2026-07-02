@@ -203,6 +203,35 @@ describe('HTTP API', () => {
     expect(revertDone.status).toBe(409);
     const revertBad = await fetch(`${base}/runs/${run.id}/revert`, { method: 'POST', body: JSON.stringify({ reason: 'x' }) });
     expect(revertBad.status).toBe(400);
+
+    // Resume validates the optional guidance notes before dispatching the command.
+    const resumeBadNotes = await fetch(`${base}/runs/${run.id}/resume`, { method: 'POST', body: JSON.stringify({ notes: 42 }) });
+    expect(resumeBadNotes.status).toBe(400);
+  });
+
+  it('resumes a needs_human run with operator guidance notes (recorded on the resume transition)', async () => {
+    let failed = false;
+    const { base, orchestrator, repo } = await start({
+      handler: (req) => {
+        if (req.stage === 'plan' && req.phase === 'produce' && !failed) {
+          failed = true;
+          throw new Error('transient harness failure');
+        }
+        return goldenPathHandler(req);
+      },
+    });
+
+    const run = (await (await fetch(`${base}/runs`, { method: 'POST', body: JSON.stringify({ issueRef: 'o/r#1' }) })).json()) as { id: number };
+    await orchestrator.settle();
+    expect(repo.getRun(run.id)!.status).toBe('needs_human');
+
+    const res = await fetch(`${base}/runs/${run.id}/resume`, { method: 'POST', body: JSON.stringify({ notes: 'just retry' }) });
+    expect(res.status).toBe(200);
+    await orchestrator.settle();
+
+    const resumeT = repo.listTransitions(run.id).find((t) => t.trigger === 'resume')!;
+    expect(resumeT.reason).toEqual({ kind: 'operator_resume', notes: 'just retry' });
+    expect(repo.getRun(run.id)!.status).toBe('done');
   });
 
   it('archives a terminal run and unarchives it (and 409s a live run)', async () => {
