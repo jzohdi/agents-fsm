@@ -50,6 +50,22 @@ export interface SubIssue {
 }
 
 /**
+ * Optional §3.5 scheduling declarations from `triage` (Milestone 9): the PM's judgment on what this
+ * issue depends on and where it sits in the queue. Field names deliberately mirror the issue
+ * marker block (`depends_on`/`priority`/`order_key` — README §3.5), because that block is what the
+ * runner writes them into; the agent never formats the block itself. Advice, not control flow: a
+ * malformed field is dropped (schema `.catch`), never escalated.
+ */
+export interface TriageScheduling {
+  /** Same-repo issue numbers that must be merged/closed before this run's later stages dispatch. */
+  depends_on?: number[];
+  /** Higher runs first. */
+  priority?: number;
+  /** Lexicographic tiebreaker after priority. */
+  order_key?: string;
+}
+
+/**
  * The structured output of the `triage` stage. Triage is a router/editor, not a producer, so it
  * returns its own contract rather than the generic {@link AgentEnvelope}: it can rewrite the issue
  * into a well-scoped spec (`issueUpdate`) and then choose one of three routes (README §0 triage):
@@ -72,6 +88,8 @@ export interface TriageOutput {
   handoff?: number;
   /** Optional human-facing note posted as an issue comment (sign-off rationale / split summary). */
   message?: string;
+  /** Optional §3.5 scheduling declarations; the runner writes them into the issue's marker block. */
+  scheduling?: TriageScheduling;
 }
 
 const artifactRefSchema = z.object({ kind: z.string(), locator: z.unknown() }).strict();
@@ -96,6 +114,16 @@ const reviewVerdictSchema = z
 
 const subIssueSchema = z.object({ title: z.string().min(1), body: z.string().min(1) }).strict();
 
+// Scheduling is advice, not control flow (M9 plan §3.4): each malformed field degrades to "not
+// declared" via `.catch(undefined)` — and a non-object `scheduling` drops entirely — instead of
+// failing the whole triage output. Deliberately NOT `.strict()`: an unknown key inside `scheduling`
+// is stripped, mirroring how the issue-marker parser ignores unknown lines.
+const schedulingSchema = z.object({
+  depends_on: z.array(z.number().int().positive()).optional().catch(undefined),
+  priority: z.number().int().optional().catch(undefined),
+  order_key: z.string().optional().catch(undefined),
+});
+
 const triageOutputSchema = z
   .object({
     decision: z.enum(['proceed', 'clarify', 'split']),
@@ -104,6 +132,7 @@ const triageOutputSchema = z
     subIssues: z.array(subIssueSchema).optional(),
     handoff: z.number().int().nonnegative().optional(),
     message: z.string().min(1).optional(),
+    scheduling: schedulingSchema.optional().catch(undefined),
   })
   .strict()
   // Cross-field rules: each decision requires (only) its own payload, so a malformed decision is

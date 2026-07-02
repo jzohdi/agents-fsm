@@ -63,16 +63,16 @@ function ok(stdout: string): ExecResult {
 }
 
 describe('GitHubCli — gh-backed API (injected exec)', () => {
-  it('reads an issue, requesting the right fields and parsing the JSON', async () => {
+  it('reads an issue, requesting the right fields and parsing the JSON (state lowercased)', async () => {
     const { exec, calls } = stubExec({
-      'gh issue': ok(JSON.stringify({ number: 42, title: 'Add auth', body: 'please' })),
+      'gh issue': ok(JSON.stringify({ number: 42, title: 'Add auth', body: 'please', state: 'CLOSED' })),
     });
     const gh = new GitHubCli({ repo: 'o/r', workingRoot: '/w', exec });
 
     const issue = await gh.readIssue('o/r#42');
 
-    expect(issue).toEqual({ ref: 'o/r#42', number: 42, title: 'Add auth', body: 'please' });
-    expect(calls[0]!.args).toEqual(['issue', 'view', '42', '--repo', 'o/r', '--json', 'number,title,body']);
+    expect(issue).toEqual({ ref: 'o/r#42', number: 42, title: 'Add auth', body: 'please', state: 'closed' });
+    expect(calls[0]!.args).toEqual(['issue', 'view', '42', '--repo', 'o/r', '--json', 'number,title,body,state']);
   });
 
   it('normalizes a URL `repo` so the `gh api` path is owner/repo, not a broken URL path', async () => {
@@ -135,7 +135,7 @@ describe('GitHubCli — gh-backed API (injected exec)', () => {
   });
 
   it('edits an issue then reads it back, sending only the provided fields', async () => {
-    const view = JSON.stringify({ number: 7, title: 'Add OAuth', body: 'scoped' });
+    const view = JSON.stringify({ number: 7, title: 'Add OAuth', body: 'scoped', state: 'OPEN' });
     const { exec, calls } = stubExec({ 'gh issue': ok(view) });
     const gh = new GitHubCli({ repo: 'o/r', workingRoot: '/w', exec });
 
@@ -153,7 +153,7 @@ describe('GitHubCli — gh-backed API (injected exec)', () => {
 
     const issue = await gh.createIssue({ title: 'piece', body: 'b' });
 
-    expect(issue).toEqual({ ref: 'o/r#58', number: 58, title: 'piece', body: 'b' });
+    expect(issue).toEqual({ ref: 'o/r#58', number: 58, title: 'piece', body: 'b', state: 'open' });
     expect(calls[0]!.args.slice(0, 3)).toEqual(['issue', 'create', '--repo']);
     expect(calls[0]!.args).toEqual(expect.arrayContaining(['--title', 'piece', '--body', 'b']));
   });

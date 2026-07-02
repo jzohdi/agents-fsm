@@ -18,7 +18,8 @@
  *   POST /runs/:id/check-pr-feedback
  *   GET  /repos                 POST /repos
  *   GET  /config                PUT /config
- *   GET  /models                GET /suggestions[?q=]
+ *   GET  /cost                  GET /models
+ *   GET  /suggestions[?q=]      POST /scheduler/check
  *   GET  /settings              PUT /settings/default-harness
  *   GET  /stream[?runId=&repo=] GET /health
  */
@@ -81,6 +82,12 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
   // --- new-run autocomplete: your repos + their open issues matching ?q= (README §3.3 Layer 7) ---
   if (method === 'GET' && path === '/suggestions') {
     return sendJson(res, 200, await orch.suggestIssues(url.searchParams.get('q') ?? ''));
+  }
+
+  // --- on-demand Scheduler pass (Milestone 9): fleet-wide, not per-run — cycles and the closed-issue
+  // set span runs. The dashboard's "Check dependencies now"; returns what the pass did. ---
+  if (method === 'POST' && path === '/scheduler/check') {
+    return sendJson(res, 200, await orch.checkDependencies());
   }
 
   // --- repos (Milestone 8 Phase A: enroll a repo the fleet can run / list enrolled repos) ---

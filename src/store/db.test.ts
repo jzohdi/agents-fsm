@@ -182,6 +182,30 @@ describe('migrate', () => {
     db.close();
   });
 
+  it('retrofits a database created before the scheduling columns existed (Milestone 9)', () => {
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, flags TEXT NOT NULL DEFAULT '{}', archived_at TEXT)`);
+    db.prepare("INSERT INTO runs (status) VALUES ('running')").run(); // a pre-existing row, before the columns
+    expect(columnExists(db, 'runs', 'depends_on')).toBe(false);
+
+    runMigrations(db); // the scheduling migration adds all four columns on a pre-existing DB
+
+    for (const col of ['depends_on', 'priority', 'order_key', 'deps_satisfied_at']) {
+      expect(columnExists(db, 'runs', col)).toBe(true);
+    }
+    // Constant defaults backfill the pre-existing row to "no dependencies, default priority" — the
+    // exact meaning of an absent §3.5 marker block, so old runs stay dispatchable and unordered.
+    const row = db.prepare('SELECT depends_on, priority, order_key, deps_satisfied_at FROM runs').get() as {
+      depends_on: string;
+      priority: number;
+      order_key: string;
+      deps_satisfied_at: string | null;
+    };
+    expect(row).toEqual({ depends_on: '[]', priority: 0, order_key: '', deps_satisfied_at: null });
+    expect(appliedMigrations(db)).toEqual(ALL_MIGRATION_NAMES);
+    db.close();
+  });
+
   it('retrofits a database created before the settings store existed', () => {
     const db = new Database(':memory:');
     db.exec(`CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, flags TEXT NOT NULL DEFAULT '{}', archived_at TEXT)`);

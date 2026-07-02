@@ -23,9 +23,11 @@ import {
   humanizeState,
   pipelineModel,
   repoOverviewModel,
+  schedulingLabel,
   stepperModel,
   telemetryModel,
   traversedBackEdges,
+  waitingOnLabel,
 } from './render';
 import type { FsmConfig, Run, Transition } from './types';
 
@@ -332,3 +334,34 @@ describe('traversedBackEdges', () => {
   });
 });
 
+
+describe('scheduling surfaces (Milestone 9)', () => {
+  it('waitingOnLabel: only a dependency-blocked run shows a waiting line', () => {
+    expect(waitingOnLabel(run({ status: 'blocked', dependsOn: [42, 57] }))).toBe('waiting on #42, #57');
+    expect(waitingOnLabel(run({ status: 'running', dependsOn: [42] }))).toBe('');
+    expect(waitingOnLabel(run({ status: 'blocked', dependsOn: [] }))).toBe('');
+    expect(waitingOnLabel(run({ status: 'blocked' }))).toBe(''); // a mismatched daemon may omit the field
+  });
+
+  it('schedulingLabel: deps + verification state, priority, and key — empty when nothing is declared', () => {
+    expect(schedulingLabel(run({}))).toBe('');
+    expect(schedulingLabel(run({ dependsOn: [4], status: 'blocked' }))).toBe('depends on #4 (waiting)');
+    expect(schedulingLabel(run({ dependsOn: [4], depsSatisfiedAt: '2026-07-01T00:00:00Z' }))).toBe('depends on #4 (satisfied)');
+    expect(schedulingLabel(run({ dependsOn: [4] }))).toBe('depends on #4 (unverified)');
+    expect(schedulingLabel(run({ priority: 10, orderKey: 'q3' }))).toBe('priority 10 · key q3');
+  });
+
+  it('pipelineModel rows carry the blocked badge fields', () => {
+    const m = pipelineModel([run({ id: 1, currentState: 'plan', status: 'blocked', dependsOn: [7], priority: 3 })], FSM);
+    const row = m.columns.find((c) => c.key === 'plan')!.runs[0]!;
+    expect(row.waitingOn).toBe('waiting on #7');
+    expect(row.priority).toBe(3);
+  });
+
+  it('escalationModel knows the dependency_cycle trigger', () => {
+    const model = escalationModel([
+      { id: 1, runId: 1, fromState: 'plan', toState: 'needs_human', trigger: 'dependency_cycle', reason: { issues: [1, 2] }, backEdge: false, counterKey: null, isReset: false, eventId: null, createdAt: '' } as Transition,
+    ], 'needs_human');
+    expect(model?.guidance).toContain('break the cycle');
+  });
+});

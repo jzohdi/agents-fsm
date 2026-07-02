@@ -22,6 +22,7 @@ import { randomBytes } from 'node:crypto';
 import { recipeFor, type AgentsConfig, type StageIo } from '../fsm/config';
 import { ADDRESSING_PR_FEEDBACK_FLAG } from '../loop/event-loop';
 import type { GitHub, Issue, IssueComment, PullRequest } from '../integration/github';
+import { defaultScheduling, parseMarker, upsertMarker, type SchedulingDecl } from '../integration/issue-markers';
 import { isRepoResolver, singleRepoResolver, type RepoContext, type RepoResolver } from '../integration/github-resolver';
 import type { AgentPhase, Repository, Run } from '../store/repository';
 import type { AgentActivity, AgentRunResult, StageExecutor } from './executor';
@@ -34,6 +35,7 @@ import {
   type ArtifactRef,
   type Parsed,
   type TriageOutput,
+  type TriageScheduling,
 } from './envelope';
 import { AmbiguousSideEffectError, SideEffectLedger } from './side-effects';
 
@@ -254,15 +256,28 @@ export class AgentRunner {
     const ledger = this.ledgerFor(run);
 
     // Improve the issue first, if the agent rewrote it, so every downstream stage reads the scoped
-    // spec. Editing to the same text is harmless, which keeps a back-edge re-run idempotent.
+    // spec — folding any `scheduling` declaration into the §3.5 marker block in the same write (the
+    // agent supplies values; this runner owns the byte format — integration/issue-markers). A block
+    // already in the issue is *carried*: a body rewrite that dropped it gets it re-inserted, and a
+    // partial declaration overlays only the fields the agent set, so a human's edits are never
+    // silently stripped. Editing to the same text is harmless, keeping a back-edge re-run idempotent.
     let current = issue;
-    if (output.issueUpdate) {
+    const baseBody = output.issueUpdate?.body ?? issue.body;
+    const carried = parseMarker(baseBody) ?? parseMarker(issue.body);
+    const declared = output.scheduling ? overlayScheduling(carried ?? defaultScheduling(), output.scheduling) : carried;
+    const body = declared ? upsertMarker(baseBody, declared) : baseBody;
+    if (output.issueUpdate || output.scheduling) {
       current = await github.updateIssue({
         number: issue.number,
-        ...(output.issueUpdate.title !== undefined ? { title: output.issueUpdate.title } : {}),
-        body: output.issueUpdate.body,
+        ...(output.issueUpdate?.title !== undefined ? { title: output.issueUpdate.title } : {}),
+        body,
       });
     }
+    // Cache the final body's declarations on the run — unconditionally, so a pre-declared block (a
+    // human's, or one just written above) gates the run's very next stage without waiting for a
+    // Scheduler Poller tick (M9 plan §3.4). A split handoff below retargets the run to a child issue,
+    // and `setRunIssueRef` resets this cache with it.
+    this.repo.setRunScheduling(run.id, parseMarker(current.body) ?? defaultScheduling());
 
     switch (output.decision) {
       case 'proceed': {
@@ -555,6 +570,19 @@ function branchName(run: Run): string {
 
 function commitMessage(run: Run, issue: Issue): string {
   return `[agent] ${run.currentState}: ${issue.title || `issue #${issue.number}`} (#${issue.number})`;
+}
+
+/**
+ * Overlay a triage `scheduling` declaration onto the issue's existing (carried) block: only the
+ * fields the agent explicitly set replace the existing values, so a partial declaration — e.g. just
+ * `priority` — never wipes a human-declared `depends_on` (M9 plan §3.4 "the issue owns them").
+ */
+function overlayScheduling(existing: SchedulingDecl, declared: TriageScheduling): SchedulingDecl {
+  return {
+    dependsOn: declared.depends_on ?? existing.dependsOn,
+    priority: declared.priority ?? existing.priority,
+    orderKey: declared.order_key ?? existing.orderKey,
+  };
 }
 
 /** A descriptive PR body: closes the issue, explains provenance, and points at the run's artifacts. */

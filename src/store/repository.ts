@@ -38,8 +38,26 @@ export interface Run {
   /** Which agent harness runs this, pinned at start (a {@link HarnessId} from the agent layer; kept as a
    *  plain string here so the store never depends upward on the agent layer). Defaults to `claude-code`. */
   harness: string;
+  /** Cached §3.5 scheduling: same-repo issue numbers that must close before this run dispatches (M9).
+   *  The issue owns the declaration; this cache is refreshed post-triage and by the Scheduler Poller. */
+  dependsOn: number[];
+  /** Cached §3.5 scheduling: higher dispatches first (the claim's ORDER BY). Default 0. */
+  priority: number;
+  /** Cached §3.5 scheduling: lexicographic tiebreaker after priority. Default `''`. */
+  orderKey: string;
+  /** Dependency-satisfaction latch: stamped when every `dependsOn` issue was seen closed; cleared when
+   *  the declaration changes. The claim dispatches only when `dependsOn` is empty or this is set. */
+  depsSatisfiedAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Cached scheduling-declaration shape ({@link Repository.setRunScheduling}). Mirrors the §3.5 marker's
+ *  `SchedulingDecl` (integration/issue-markers) — redeclared here so the store stays layer-clean. */
+export interface RunScheduling {
+  dependsOn: number[];
+  priority: number;
+  orderKey: string;
 }
 
 /** How an operator lets a run cross the global cost ceiling: one more stage, or the whole run. */
@@ -197,6 +215,10 @@ interface RunRow {
   cost_override: CostOverride | null;
   model_override: string | null;
   harness: string;
+  depends_on: string;
+  priority: number;
+  order_key: string;
+  deps_satisfied_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -269,6 +291,10 @@ function mapRun(r: RunRow): Run {
     costOverride: r.cost_override,
     modelOverride: r.model_override,
     harness: r.harness,
+    dependsOn: JSON.parse(r.depends_on) as number[],
+    priority: r.priority,
+    orderKey: r.order_key,
+    depsSatisfiedAt: r.deps_satisfied_at,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -442,10 +468,62 @@ export class Repository {
    * Retarget the run to a different issue. Used when `triage` splits a too-large issue and hands
    * this run off to continue on one of the smaller children (README §0 triage): from here on the run
    * reads and closes that child issue. Only safe before any branch/PR exists (i.e. still in triage),
-   * which is the only place that calls it.
+   * which is the only place that calls it. The cached scheduling resets to defaults with it — the
+   * old issue's declarations don't apply to the child; the Scheduler Poller re-reads the child's
+   * own marker block on its next tick (M9 plan §3.4).
    */
   setRunIssueRef(id: number, issueRef: string): void {
-    this.db.prepare(`UPDATE runs SET issue_ref = ?, updated_at = ${NOW} WHERE id = ?`).run(issueRef, id);
+    this.db
+      .prepare(
+        `UPDATE runs SET issue_ref = ?, depends_on = '[]', priority = 0, order_key = '',
+                deps_satisfied_at = NULL, updated_at = ${NOW} WHERE id = ?`,
+      )
+      .run(issueRef, id);
+  }
+
+  /**
+   * Refresh the run's cached §3.5 scheduling declarations (M9). `depends_on` is stored canonically
+   * (sorted-unique JSON) so the claim's `= '[]'` no-deps test is reliable. The satisfaction latch
+   * (`deps_satisfied_at`) is **cleared when the dependency set changes** — a human adding a dep to a
+   * satisfied run re-blocks it until the Scheduler Poller re-verifies — and kept when it doesn't, all
+   * in one atomic statement so a concurrent claim never sees a changed set with a stale latch.
+   */
+  setRunScheduling(id: number, scheduling: RunScheduling): void {
+    const deps = JSON.stringify([...new Set(scheduling.dependsOn)].sort((a, b) => a - b));
+    this.db
+      .prepare(
+        `UPDATE runs SET
+           deps_satisfied_at = CASE WHEN depends_on = ? THEN deps_satisfied_at ELSE NULL END,
+           depends_on = ?, priority = ?, order_key = ?, updated_at = ${NOW}
+         WHERE id = ?`,
+      )
+      .run(deps, deps, Math.trunc(scheduling.priority), scheduling.orderKey, id);
+  }
+
+  /**
+   * Stamp the dependency-satisfaction latch (M9): the Scheduler Poller verified every `dependsOn`
+   * issue closed. From here the run is dispatchable until the declaration changes (which clears the
+   * stamp — see {@link setRunScheduling}); satisfaction is never re-checked otherwise, because a
+   * merged/closed dependency stays merged/closed.
+   */
+  stampDepsSatisfied(id: number): void {
+    this.db.prepare(`UPDATE runs SET deps_satisfied_at = ${NOW}, updated_at = ${NOW} WHERE id = ?`).run(id);
+  }
+
+  /**
+   * The newest **active** (non-terminal, non-archived) run for an issue, if any — the duplicate-run
+   * guard `Orchestrator.start` consults (M9): two concurrent runs on one issue would fight over the
+   * branch and the marker block. Case-insensitive on the ref's repo half, matching the repo lookups.
+   */
+  findActiveRunByIssue(issueRef: string): Run | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM runs
+         WHERE issue_ref = ? COLLATE NOCASE AND status NOT IN ('done', 'stopped') AND archived_at IS NULL
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(issueRef) as RunRow | undefined;
+    return row ? mapRun(row) : undefined;
   }
 
   /** Record the PR number, set when `tdd` opens the PR — separate from the branch, which exists earlier. */
@@ -642,6 +720,17 @@ export class Repository {
    * Cost-ceiling gate (M8 B3): when `onlyOverrides` is set (the loop is over the global cost ceiling),
    * only a run carrying a `cost_override` is dispatchable — every other run parks until the aggregate
    * clears or an operator overrides it. Off by default, so the ungated claim is unchanged.
+   *
+   * Dependency gate + dispatch order (Milestone 9 — the Scheduler slotting into this same point, as
+   * promised above): a run with cached unsatisfied dependencies (`depends_on` non-empty and the
+   * satisfaction latch unstamped) is never claimable — the correctness gate lives *here*, inside the
+   * one atomic statement, so it is airtight under the worker pool regardless of whether the Scheduler
+   * Poller has flipped the run's visible status to `blocked` yet. Among dispatchable runs, pickup
+   * follows the Scheduler's total order — `priority` desc, `order_key` asc (BINARY collation, matching
+   * `compareRuns`'s UTF-8 byte compare), issue number asc (computed from the canonical
+   * `owner/repo#N` ref, never cached — a split handoff retarget can't leave it stale) — then event id
+   * as the final FIFO tiebreaker. `compareRuns` (loop/scheduler.ts) is the single source of truth for
+   * that order; a cross-check test keeps this SQL from drifting.
    */
   claimNextEvent(opts: { onlyOverrides?: boolean } = {}): EventRow | undefined {
     const costGate = opts.onlyOverrides ? 'AND runs.cost_override IS NOT NULL' : '';
@@ -652,11 +741,16 @@ export class Repository {
            SELECT events.id FROM events
            JOIN runs ON runs.id = events.run_id
            WHERE events.status = 'pending' AND runs.status = 'running'
+             AND (runs.depends_on = '[]' OR runs.deps_satisfied_at IS NOT NULL)
              AND NOT EXISTS (
                SELECT 1 FROM events p WHERE p.run_id = events.run_id AND p.status = 'processing'
              )
              ${costGate}
-           ORDER BY events.id ASC LIMIT 1
+           ORDER BY runs.priority DESC,
+                    runs.order_key ASC,
+                    CAST(substr(runs.issue_ref, instr(runs.issue_ref, '#') + 1) AS INTEGER) ASC,
+                    events.id ASC
+           LIMIT 1
          )
          RETURNING *`,
       )

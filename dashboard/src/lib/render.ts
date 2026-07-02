@@ -7,7 +7,7 @@
  * is what lets the reactive view layer stay thin.
  */
 
-import type { AgentRunRecord, FsmConfig, Run, RunStatus, Transition } from './types';
+import type { AgentRunRecord, FsmConfig, Repo, Run, RunStatus, Transition } from './types';
 
 // --- formatting ---------------------------------------------------------------
 
@@ -77,6 +77,41 @@ export function fmtDuration(ms: number | null | undefined): string {
   return `${m}m${String(s).padStart(2, '0')}s`;
 }
 
+/**
+ * A relative "last activity" label from an ISO timestamp: `just now`, `4m ago`, `2h ago`, `3d ago`,
+ * then a short date for anything older than a week. `—` for a missing/unparseable stamp. Pure
+ * (the caller passes `now`) so it is unit-tested without faking clocks.
+ */
+export function fmtRelTime(iso: string | null | undefined, now: number = Date.now()): string {
+  const t = Date.parse(iso ?? '');
+  if (!Number.isFinite(t)) return '—';
+  const s = Math.max(0, Math.floor((now - t) / 1000));
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86_400) return `${Math.floor(s / 3600)}h ago`;
+  if (s < 7 * 86_400) return `${Math.floor(s / 86_400)}d ago`;
+  return new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+// --- routing (path-based SPA routes; the daemon serves index.html for all of them) ---
+
+export type Route = 'home' | 'pipelines' | 'editor';
+
+/** The pathname each route lives at (the home page owns `/`). */
+export function routePath(route: Route): string {
+  if (route === 'pipelines') return '/pipelines';
+  if (route === 'editor') return '/editor';
+  return '/';
+}
+
+/** Parse a location pathname into a route; anything unknown lands on home (never a blank screen). */
+export function routeFromPath(pathname: string): Route {
+  const p = pathname.replace(/\/+$/, '') || '/';
+  if (p === '/pipelines') return 'pipelines';
+  if (p === '/editor') return 'editor';
+  return 'home';
+}
+
 // --- view-models --------------------------------------------------------------
 
 export interface StageTelemetry {
@@ -129,6 +164,8 @@ export interface PipelineRow {
   harness: string; // which harness runs this (for the run-card badge when it isn't the default)
   resolved: boolean; // terminal (done/stopped) — eligible for archiving
   archived: boolean; // archived server-side (Run.archivedAt set)
+  waitingOn: string; // "waiting on #42, #57" while dependency-blocked (M9); '' otherwise
+  priority: number; // non-zero §3.5 priority renders a small badge; 0 (the default) renders nothing
 }
 export interface PipelineColumn {
   key: string;
@@ -159,7 +196,31 @@ function pipelineRow(r: Run): PipelineRow {
     harness: r.harness ?? '', // a mismatched daemon may omit it; keep the row type-honest (never undefined)
     resolved,
     archived: r.archivedAt != null,
+    waitingOn: waitingOnLabel(r),
+    priority: r.priority ?? 0,
   };
+}
+
+/** "waiting on #42, #57" for a dependency-blocked run (M9); '' for every other status. */
+export function waitingOnLabel(r: Run): string {
+  if (r.status !== 'blocked' || !r.dependsOn?.length) return '';
+  return `waiting on ${r.dependsOn.map((n) => `#${n}`).join(', ')}`;
+}
+
+/**
+ * RunDetail's one-line scheduling summary (M9): dependencies + their verification state, priority,
+ * order key. '' when the run declares nothing (the overwhelmingly common case renders nothing).
+ * Read-only by design — declarations are edited on the issue (§3.5), not here.
+ */
+export function schedulingLabel(r: Run): string {
+  const parts: string[] = [];
+  if (r.dependsOn?.length) {
+    const state = r.depsSatisfiedAt ? 'satisfied' : r.status === 'blocked' ? 'waiting' : 'unverified';
+    parts.push(`depends on ${r.dependsOn.map((n) => `#${n}`).join(', ')} (${state})`);
+  }
+  if (r.priority) parts.push(`priority ${r.priority}`);
+  if (r.orderKey) parts.push(`key ${r.orderKey}`);
+  return parts.join(' · ');
 }
 
 /**
@@ -371,6 +432,8 @@ const ESCALATION_GUIDANCE: Record<string, string> = {
   config_version_mismatch: 'The run was started under a different FSM config version. Resume to retry under the current rules.',
   should_split: 'Triage split this issue into smaller ones (see the reason). Start runs for the children; this run can be stopped.',
   partial_side_effect: 'A comment or sub-issue may have been partly created before a crash. Verify on GitHub and remove any partial artifact, then resume.',
+  dependency_cycle:
+    'The issues in the reason declare dependencies on each other, so none can ever start. Edit the depends_on blocks in the issues to break the cycle, then resume each member.',
 };
 
 /**

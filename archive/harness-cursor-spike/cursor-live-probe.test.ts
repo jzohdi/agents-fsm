@@ -3,9 +3,11 @@
  *
  * Unlike cursor-result-parsing.test.ts (which runs offline against Cursor's *documented* shapes), this
  * spawns the real `cursor-agent` and dumps the actual `--output-format stream-json` events, so we can
- * confirm the event families and the terminal `result` shape against a live binary. It AUTO-SKIPS when
- * `cursor-agent` is not on PATH (the default on this machine), so it never breaks `npm test`; run it on
- * a machine with the Cursor CLI installed and authenticated (`cursor-agent login`) to capture reality.
+ * confirm the event families and the terminal `result` shape against a live binary. It runs only under
+ * `RUN_REAL_CURSOR=1` (the `RUN_REAL_HARNESS`/`RUN_REAL_GITHUB` convention) *and* with `cursor-agent`
+ * on PATH — it originally auto-ran whenever the binary was present, which silently made the default
+ * `npm test` spend a live, authenticated model call once the multi-harness work installed Cursor here.
+ * The default suite must stay hermetic (README §3.3 "Built for fakes"): zero network, zero cost.
  *
  * It intentionally makes a real, minimal call ("reply with {\"ok\":true}") — cheap, read-only, no repo
  * mutation — and prints every event's `type` plus the parsed terminal result. Keep the output in the
@@ -23,10 +25,11 @@ function cursorOnPath(): boolean {
   return which.status === 0 && which.stdout.trim() !== '';
 }
 
-const HAS_CURSOR = cursorOnPath();
+// Flag first so the default suite never even spawns `which`; binary presence is the secondary check.
+const ENABLED = process.env.RUN_REAL_CURSOR === '1' && cursorOnPath();
 
 describe('Cursor harness — live CLI probe', () => {
-  it.skipIf(!HAS_CURSOR)(
+  it.skipIf(!ENABLED)(
     'emits stream-json events with a terminal result our parser can read',
     () => {
       const args = [
@@ -50,14 +53,11 @@ describe('Cursor harness — live CLI probe', () => {
             return '(non-json)';
           }
         });
-      // eslint-disable-next-line no-console
       console.log('[cursor-live-probe] event types:', types.join(', '));
-      // eslint-disable-next-line no-console
       console.log('[cursor-live-probe] raw stdout:\n' + proc.stdout);
 
       // The existing (Claude Code) parser should read Cursor's terminal result event unchanged.
       const parsed = parseHarnessOutput(proc.stdout);
-      // eslint-disable-next-line no-console
       console.log('[cursor-live-probe] parsed:', JSON.stringify(parsed));
 
       expect(types).toContain('result');
@@ -66,10 +66,9 @@ describe('Cursor harness — live CLI probe', () => {
     130_000,
   );
 
-  it('documents how to run this probe when cursor-agent is absent', () => {
-    if (!HAS_CURSOR) {
-      // eslint-disable-next-line no-console
-      console.log('[cursor-live-probe] SKIPPED — install + auth the Cursor CLI, then re-run: `cursor-agent login`');
+  it('documents how to run this probe when it is disabled', () => {
+    if (!ENABLED) {
+      console.log('[cursor-live-probe] SKIPPED — install + auth the Cursor CLI (`cursor-agent login`), then run with RUN_REAL_CURSOR=1');
     }
     expect(true).toBe(true);
   });

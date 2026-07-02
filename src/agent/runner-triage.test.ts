@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest';
 import { loadDefaultConfig } from '../fsm/config';
 import { FakeGitHub } from '../integration/github-fake';
 import type { RepoResolver } from '../integration/github-resolver';
+import { parseMarker } from '../integration/issue-markers';
 import { openDb } from '../store/db';
 import { Repository, type Run } from '../store/repository';
 import { StubExecutor, type StubHandler } from './executor';
@@ -164,5 +165,85 @@ describe('AgentRunner — multi-repo (Milestone 8 Phase A)', () => {
     // Each repo's adapter saw exactly its own run's sign-off — never the other's.
     expect(await webGh.listIssueComments(1)).toHaveLength(1);
     expect(await apiGh.listIssueComments(1)).toHaveLength(1);
+  });
+});
+
+describe('AgentRunner triage — scheduling declarations (Milestone 9, README §3.5)', () => {
+  const HUMAN_BLOCK = '<!-- agent-orchestrator:v1\ndepends_on: [42]\npriority: 2\norder_key: "human"\n-->';
+
+  it('writes the declaration into the issue marker block and caches it on the run, in one commit', async () => {
+    const { repo, github, runner, run } = setup({
+      decision: 'proceed',
+      scheduling: { depends_on: [57, 42], priority: 10, order_key: 'q3' },
+    });
+
+    await runner.runStage(run);
+
+    // The issue body carries the §3.5 block, canonically formatted by the runner (never the agent).
+    const issue = await github.readIssue(ISSUE_REF);
+    expect(parseMarker(issue.body)).toEqual({ dependsOn: [42, 57], priority: 10, orderKey: 'q3' });
+    // And the run's cache gates its very next stage — no poller tick needed.
+    expect(repo.getRun(run.id)).toMatchObject({ dependsOn: [42, 57], priority: 10, orderKey: 'q3' });
+  });
+
+  it('caches a human pre-declared block even when the agent declares nothing', async () => {
+    const { repo, github, runner, run } = setup(
+      { decision: 'proceed' },
+      { body: `Needs the auth work first.\n\n${HUMAN_BLOCK}` },
+    );
+
+    await runner.runStage(run);
+
+    // No issue edit happened (nothing to write), but the human's declaration now gates the run.
+    const issue = await github.readIssue(ISSUE_REF);
+    expect(issue.body).toContain('Needs the auth work first.');
+    expect(repo.getRun(run.id)).toMatchObject({ dependsOn: [42], priority: 2, orderKey: 'human' });
+  });
+
+  it('a partial declaration overlays the existing block — a human depends_on survives a priority-only update', async () => {
+    const { repo, github, runner, run } = setup(
+      { decision: 'proceed', scheduling: { priority: 9 } },
+      { body: `Context.\n\n${HUMAN_BLOCK}` },
+    );
+
+    await runner.runStage(run);
+
+    const issue = await github.readIssue(ISSUE_REF);
+    expect(parseMarker(issue.body)).toEqual({ dependsOn: [42], priority: 9, orderKey: 'human' });
+    expect(repo.getRun(run.id)).toMatchObject({ dependsOn: [42], priority: 9, orderKey: 'human' });
+  });
+
+  it('an issue rewrite that dropped the block gets it carried back in (never strip a human declaration)', async () => {
+    const { repo, github, runner, run } = setup(
+      { decision: 'proceed', issueUpdate: { body: '## Goal\nRewritten spec, no block.' } },
+      { body: `Old text.\n\n${HUMAN_BLOCK}` },
+    );
+
+    await runner.runStage(run);
+
+    const issue = await github.readIssue(ISSUE_REF);
+    expect(issue.body).toContain('Rewritten spec');
+    expect(parseMarker(issue.body)).toEqual({ dependsOn: [42], priority: 2, orderKey: 'human' });
+    expect(repo.getRun(run.id)).toMatchObject({ dependsOn: [42], priority: 2, orderKey: 'human' });
+  });
+
+  it('a split handoff resets the cache — the child issue declares for itself', async () => {
+    const { repo, runner, run } = setup(
+      {
+        decision: 'split',
+        subIssues: [
+          { title: 'A', body: 'part one' },
+          { title: 'B', body: 'part two' },
+        ],
+        handoff: 0,
+        scheduling: { depends_on: [42] },
+      },
+      { body: 'huge issue' },
+    );
+
+    await runner.runStage(run);
+
+    // The parent's declaration was cached mid-stage, then the retarget to the child reset it.
+    expect(repo.getRun(run.id)).toMatchObject({ dependsOn: [], priority: 0, orderKey: '', depsSatisfiedAt: null });
   });
 });

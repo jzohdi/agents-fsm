@@ -9,7 +9,7 @@
 
 import { readFile } from 'node:fs/promises';
 import type { ServerResponse } from 'node:http';
-import { extname, resolve, sep } from 'node:path';
+import { basename, extname, resolve, sep } from 'node:path';
 
 const CONTENT_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -48,9 +48,20 @@ export function resolveStaticPath(publicDir: string, pathname: string): string |
 }
 
 /**
+ * Whether a missed path should fall back to `index.html` (the SPA fallback): an extension-less path
+ * is a client-side route (`/pipelines`, `/editor`) the browser reloads or deep-links into, so the
+ * app shell must load and let the client router take over. A path *with* an extension is an asset
+ * request — a miss there is a real 404 (serving HTML for a missing `.js` only masks build problems).
+ */
+export function isSpaRoute(pathname: string): boolean {
+  return extname(basename(pathname)) === '';
+}
+
+/**
  * Serve a static file from `publicDir` for `pathname`. Returns `true` if it wrote a response (200 or
  * 404), `false` only if the caller should treat it as unhandled — but in practice it always responds,
- * so a `GET` that matches no API route ends here. A missing file is a clean `404`.
+ * so a `GET` that matches no API route ends here. A missing *asset* is a clean `404`; a missing
+ * extension-less path serves `index.html` instead (the SPA fallback — see {@link isSpaRoute}).
  */
 export async function serveStatic(res: ServerResponse, publicDir: string, pathname: string): Promise<void> {
   const filePath = resolveStaticPath(publicDir, pathname);
@@ -64,6 +75,10 @@ export async function serveStatic(res: ServerResponse, publicDir: string, pathna
     res.end(body);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT' || (err as NodeJS.ErrnoException).code === 'EISDIR') {
+      if (isSpaRoute(pathname) && basename(filePath) !== 'index.html') {
+        await serveStatic(res, publicDir, '/index.html');
+        return;
+      }
       notFound(res);
       return;
     }

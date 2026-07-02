@@ -108,6 +108,20 @@ export const MIGRATIONS: Migration[] = [
          );`,
       ),
   },
+  {
+    version: 8,
+    name: 'add runs scheduling columns',
+    // Cached §3.5 scheduling declarations + the dependency-satisfaction latch (Milestone 9). All
+    // additive with constant defaults, so pre-existing rows backfill to "no dependencies, default
+    // priority" — exactly what an absent marker block means — and behavior is unchanged until a
+    // declaration is written. Mirrors schema.sql.
+    apply: (db) => {
+      addColumnIfMissing(db, 'runs', 'depends_on', "TEXT NOT NULL DEFAULT '[]'");
+      addColumnIfMissing(db, 'runs', 'priority', 'INTEGER NOT NULL DEFAULT 0');
+      addColumnIfMissing(db, 'runs', 'order_key', "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, 'runs', 'deps_satisfied_at', 'TEXT');
+    },
+  },
 ];
 
 // Guard the invariants the runner relies on: versions a gap-free, strictly increasing 1..N sequence

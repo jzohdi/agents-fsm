@@ -457,7 +457,7 @@ The build order puts the novel, high-risk core first (FSM engine, then event-dri
 
 ## 8. Implementation status
 
-**Done: Milestone 0 (Foundations), Milestone 1 (FSM engine), Milestone 2 (event loop + agent runner on stubs), Milestone 3 (integrations — Git/GitHub adapter + Claude Code subprocess executor), Milestone 4 (real agents), Milestone 5 (API + telemetry surface), Milestone 6 (local web dashboard), Milestone 7 (polish — transactional outbox, `needs_human` UX, operating guide), Milestone 8 (multi-repo + parallel execution — worker pool, concurrent crash-recovery, rate-limit retry, global cost ceiling).**
+**Done: Milestone 0 (Foundations), Milestone 1 (FSM engine), Milestone 2 (event loop + agent runner on stubs), Milestone 3 (integrations — Git/GitHub adapter + Claude Code subprocess executor), Milestone 4 (real agents), Milestone 5 (API + telemetry surface), Milestone 6 (local web dashboard), Milestone 7 (polish — transactional outbox, `needs_human` UX, operating guide), Milestone 8 (multi-repo + parallel execution — worker pool, concurrent crash-recovery, rate-limit retry, global cost ceiling), Milestone 9 (multi-issue async + dependency ordering — the Scheduler, issue markers, the dependency dispatch gate).**
 
 - **Layer 1 — State Store** (`src/store/`): SQLite schema, `db.ts` connection/migration, and a typed `Repository`. Round counters are derived from the `transitions` log (`computeCounters`), never stored as mutable fields. `commitTransition` is transactional; the event queue supports atomic, status-gated claim.
 - **Layer 2 — FSM Engine** (`src/fsm/`): pure `decideNext` (forward resolution with skip flags, `toOneOf` targets, guard escalation), `budgetExceeded`, and config loading with zod + semantic validation and content-hash versioning. The default pipeline (§2) ships as `src/fsm/default-config.json`.
@@ -536,7 +536,7 @@ The build order puts the novel, high-risk core first (FSM engine, then event-dri
 - **Event Loop control methods** (`src/loop/event-loop.ts`): `pauseRun`, `resumePausedRun`, `stopRun`, `revertRun` join `startRun` / `resumeRun` / `resumeAwaitingInput`. A `pause`/`stop` that lands **while a stage is running** is honored at commit time (the in-flight stage finishes — pause halts *dispatch*, never the agent — then the run parks instead of being forced back to `running`). `revertRun` records a reset transition to an earlier state and **discards any stale follow-up event** (`repo.discardPendingEvents`) so the revert is driven by exactly one fresh advance event; it **refuses (`409`) while a stage is mid-flight** (`repo.hasProcessingEvent`) so it can never race the committing stage (still correct under the Milestone 8 worker pool — a run with a stage in flight has a `processing` event).
 - **New terminal `stopped` run status** (README §3.3 Layer 6 — `stop` ends a run, not resumable; state and artifacts stay for inspection). The dispatch gate already excludes it (only `running` runs are claimed).
 - **Live stream** — a typed `StreamEvent = transition | activity | status` over an in-process **`Broadcaster`** (`src/api/stream.ts`). The loop's `onTransition` and the runner's `onActivity` (the seams M2/M4 exposed) plus the Orchestrator's status changes publish to it; `transition`/`status` carry the full updated `Run` so token/cost totals ride along (the "token usage" stream item). Best-effort: a throwing subscriber never wedges the publisher.
-- **HTTP + SSE server** (`src/api/server.ts`): Node's built-in `http` — no web framework (KISS). Routes: `POST /runs`, `GET /runs[?status]`, `GET /runs/:id` (run + transitions + agent runs + artifacts + logs), `POST /runs/:id/{pause,resume,stop,revert}`, `GET|PUT /config`, `GET /stream[?runId]`, `GET /health`. The stream is **SSE** (server→client only, so simpler than WebSocket — no dependency, browser `EventSource` auto-reconnects; README §3.3 Layer 6 allows either). Errors map to `400`/`404`/`409`/`500` JSON.
+- **HTTP + SSE server** (`src/api/server.ts`): Node's built-in `http` — no web framework (KISS). Routes as of M5: `POST /runs`, `GET /runs[?status]`, `GET /runs/:id` (run + transitions + agent runs + artifacts + logs), `POST /runs/:id/{pause,resume,stop,revert}`, `GET|PUT /config`, `GET /stream[?runId]`, `GET /health` — later milestones added more; the authoritative current list is the header comment of `src/api/server.ts`. The stream is **SSE** (server→client only, so simpler than WebSocket — no dependency, browser `EventSource` auto-reconnects; README §3.3 Layer 6 allows either). Errors map to `400`/`404`/`409`/`500` JSON.
 - **`get`/`update` FSM config through the API.** `updateConfig` validates via the existing `parseConfigFile` (invalid → `400`, file never overwritten), writes the file (`saveConfig`), recomputes the version, and hot-swaps the loop + runner for **new** runs. It refuses (`409`) while any run is non-terminal, so an in-flight run is never re-pointed at changed rules (README §3.1) without the deferred per-run versioned config store (M6). Without a `--config` path the config is read-only (the bundled default is never overwritten).
 - **`serve` daemon** (`src/serve.ts`, `npm start -- serve [--port 4319] [--config <path>] [--db <path>] [--mock …]`): builds the orchestrator (real by default; `--mock` opts into the no-cost stub/fake) + server, recovers crash-stranded events on startup, runs the Reply Poller **and the PR Feedback Poller** in the background, and shuts down cleanly on SIGINT/SIGTERM — force-closing long-lived SSE connections (`closeAllConnections`) so Ctrl-C doesn't hang. It **binds to loopback (`127.0.0.1`)** since the MVP API is unauthenticated and meant for a localhost dashboard (README §1 / Layer 7); remote access stays a deliberate post-MVP add-on. `buildRunner` is now shared (`src/build-runner.ts`) so the one-shot CLI and the daemon wire the runner identically.
 - **Tests** (+27): `Broadcaster` fan-out/isolation; the `Orchestrator` command + pump + config flows (incl. a pause/stop that lands mid-stage, a revert that discards the stale event, the active-run config-edit guard, and invalid-config rejection); the HTTP server over a real ephemeral port via `fetch` (routing, status codes, and a live SSE read); the new loop control methods directly; and `repo.discardPendingEvents`.
@@ -554,7 +554,7 @@ The build order puts the novel, high-risk core first (FSM engine, then event-dri
 - **Transactional outbox** (`src/agent/side-effects.ts` + the `side_effects` ledger, schema migration 2): the non-idempotent GitHub calls (issue/PR comments, sub-issue creation) are wrapped in a `SideEffectLedger` keyed `${state}#${visit}:${slot}`. A crash in the post-call / pre-commit window is replayed from the ledger — a completed call is reused (no duplicate comment or sub-issues), and a call left in-flight by a crash escalates `partial_side_effect` rather than retrying a non-idempotent operation. The visit index (transitions into the state) makes automatic recovery dedup within a visit while an operator resume — a fresh visit — deliberately retries clean. Proven by an extended crash-recovery test (a triage split replayed through the loop creates each sub-issue exactly once).
 - **`needs_human` UX** (`escalationModel` in `dashboard/src/lib/render.ts` → the escalation inspector in `RunDetail.svelte`): a `needs_human` run shows *why* it escalated — the trigger, the stage it escalated from, the structured reason, and a one-line operator guidance per trigger (including the `partial_side_effect` GitHub-cleanup step) — alongside the existing Resume / Revert / Stop controls. Resume (from `needs_human`) and Revert both reset the round counters (a fresh budget), now asserted directly in the loop tests.
 
-**On top of Milestone 7 — resolved-lane archive + UI/CLI polish** (current `HEAD`: **495 tests passing, 2 skipped** — the flag-gated real integration tests; the figure now includes Milestone 8 Phase A + B1/B2/B3 and PR feedback re-entry). Hardening and ergonomics that landed after the M7 core, not a new milestone:
+**On top of Milestone 7 — resolved-lane archive + UI/CLI polish** (**495 tests passing, 2 skipped** as this batch shipped — the figure includes Milestone 8 Phase A + B1/B2/B3 and PR feedback re-entry; see the note at the end of this section for the live count). Hardening and ergonomics that landed after the M7 core, not a new milestone:
 
 - **Archive / unarchive** — a terminal run (`done` / `stopped`) can be archived out of the dashboard's **Resolved** lane to keep it uncluttered, and restored. Backed by `runs.archived_at` (schema migration 1), `Orchestrator.archive` (refuses `409` for a non-terminal run) / `unarchive` (an always-allowed no-op undo), `POST /runs/:id/archive` + `/unarchive`, and the render-layer rule that drops archived runs from the Resolved lane (`pipelineModel`).
 - **New-run autocomplete** — `GET /suggestions[?q=]` backs the dashboard's *File a new run* bar with GitHub-issue search (the same adapter surface a future continuous mode reuses, Milestone 11).
@@ -609,9 +609,49 @@ and force an immediate check instead of waiting for the next poll.
   (reopen / watching / stopped / not_watching + a 404), the `POST /runs/:id/check-pr-feedback` route,
   and the pure `isWatchingPrFeedback` badge helper.
 
-> The per-milestone test counts above record each milestone as it shipped; the authoritative current
-> figure is **503 passing / 2 skipped** backend (+ 32 dashboard render-model tests), the two skips being
-> the flag-gated real integration tests. Run `npm test` for the live number rather than a hand tally.
+**Added on top of Milestone 8 — multi-harness support (Claude Code + Cursor)** (design + per-PR log in
+[plans/harness-abstraction.md](plans/harness-abstraction.md); operating guide §9.8). Each run is pinned
+to an **agent harness** at start (`runs.harness`, default `claude-code`), resolved per stage through a
+`HarnessRegistry` at the Layer 5 seam: the subprocess executor is parameterized by a **`HarnessProfile`**
+(argv construction, prompt delivery, stream parsing, model tags, failure classification), so **Cursor**
+(`cursor-agent` CLI) is a profile + registration, not a second executor — and a third harness would be
+the same. The daemon default lives in a settings KV (`GET /settings`, `PUT /settings/default-harness`),
+overridable per run on `POST /runs` (an unknown harness id is a 400, never coerced; an unregistered
+harness escalates *that run* as `executor_error`, never the fleet). Whether an **auth failure** is
+fleet-fatal is the profile's call (`HarnessProfile.authFatal`): Claude Code stays fatal — the default
+harness being logged out means nothing can flow — while an unauthenticated Cursor escalates only its own
+runs, each carrying the login remedy. The dashboard's new-run box gains a harness selector with a per-run
+badge, alongside the per-run **model override** dropdown (`runs.model_override`, catalog via
+`GET /models`) that lets a running run switch models between stages. Cursor cost estimation and
+per-stage harness overrides are explicitly deferred (plan §9).
+
+**Added in Milestone 9 — multi-issue async + dependency ordering** (design in
+[plans/milestone-9.md](plans/milestone-9.md); operating guide §9.9). Several issues run at once with
+ordering **enforced at pickup time**, exactly as §3.3 promised. The pure **Scheduler**
+(`src/loop/scheduler.ts`: satisfaction, Tarjan cycle detection, the total-order comparator) and the
+**§3.5 marker codec** (`src/integration/issue-markers.ts`: strict field-by-field parse, byte-stable
+idempotent upsert) are the new table-tested cores. The **claim is the gate**: `claimNextEvent` gained a
+dependency predicate over cached columns (migration 8: `runs.depends_on/priority/order_key/`
+`deps_satisfied_at`) plus the Scheduler's `ORDER BY` (`priority` desc → `order_key` asc → issue number
+asc — a cross-check test pins the SQL to `compareRuns`), so correctness is airtight under the M8 pool
+whether or not the poller has ticked. **Declarations flow**: triage's optional `scheduling` output is
+spliced into the issue's marker block by the runner (partial declarations overlay; a human's block is
+carried through body rewrites, never stripped) and cached on the run *at triage-commit*, so `plan` can
+never outrun an unmerged dependency. The **Scheduler Poller** (per-repo — issue numbers collide across
+repos) refreshes declarations each tick (the issue wins), verifies satisfaction (**issue-closed** is
+the signal — `Closes #N` auto-close makes merged ⇒ closed), stamps a **latch** (cleared automatically
+when a human edits the dep set), flips the visible `running ↔ blocked` status, **drops the working
+tree at wake** (the §3.1 fresh-base discipline, riding the proven lost-tree re-clone path), and
+escalates **dependency cycles** to `needs_human` with the cycle in the reason. Plus: one active run
+per issue (409), `POST /scheduler/check`, the best-effort **`af:<state>` PR label mirror**
+(`Issue.state`/`dropWorkingTree`/`setPrLabels` adapter additions), and dashboard blocked/priority
+badges + a RunDetail scheduling line. The FSM engine and its tests are untouched — ordering lives
+entirely beside it.
+
+> The per-milestone test counts above record each milestone as it shipped and are not updated after
+> the fact. For the current figure run `npm test` (plus `npm run check:dashboard` for the dashboard
+> render-model suite) — any skipped entries are the flag-gated real-integration tests. No live count
+> is hand-maintained here; it drifted every time.
 
 ---
 
@@ -753,4 +793,44 @@ overwrite your remembered choice) → the **persisted default** (set from the da
 - The per-run **model dropdown** appears only for a run whose harness matches the loaded catalog (i.e. the
   current default's), so it never offers wrong-harness models; per-harness catalogs for off-default runs
   are deferred.
+
+### 9.9 Order work with dependencies (multi-issue)
+
+Run several issues at once and let the fleet enforce the order (Milestone 9, §3.5). Declarations live
+in the **issue body** as one machine-readable block — written by `triage` (it may declare
+`scheduling` in its output) or by hand:
+
+```
+<!-- agent-orchestrator:v1
+depends_on: [42, 57]           # same-repo issue numbers that must be merged first
+priority: 10                   # higher runs first
+order_key: "2026Q3-auth-03"    # lexicographic tiebreaker
+-->
+```
+
+Every field is optional; no block means "no dependencies, default priority." **The issue owns the
+block**: edit it there any time — the daemon's Scheduler Poller (on `--poll-interval`) picks the edit
+up within a tick, and a human edit always wins over what triage wrote.
+
+**How a dependent run behaves.** `triage` runs immediately (it's the PM pass that writes the
+declarations, and it touches no code); everything after it waits until every `depends_on` issue is
+**closed**. The run parks as **`blocked`** — the dashboard card shows *"waiting on #42, #57"* — and
+holds no executor, so the rest of the fleet flows around it. A dependency clears when its issue
+closes: for fleet-managed work that happens automatically when a human **merges** its PR (the PR body
+says `Closes #N`), so `done` alone (merge-ready, unmerged) deliberately does *not* release dependents
+— no stacked PRs, ever. On wake the run's working tree is re-cloned so its branch starts from
+**post-merge base**. *Caveat:* GitHub auto-closes only when the PR merges into the repo's **default**
+branch; on a non-default `base_branch`, close the dependency issue by hand at merge.
+
+**Ordering among runnable work:** `priority` (desc) → `order_key` (asc) → issue number (asc),
+enforced at event pickup — deterministic, never preemptive (a higher-priority arrival waits for the
+next free slot, it never interrupts a stage).
+
+**Cycles** (A depends on B depends on A) escalate every member to `needs_human` with the cycle named
+in the reason: fix the `depends_on` blocks on the issues, then **Resume** each member.
+
+**Ops notes:** one issue = one active run (a second `start` on the same issue is a `409` until the
+first finishes); `POST /scheduler/check` (or waiting a tick) re-evaluates immediately; each run's FSM
+state is mirrored on its PR as an **`af:<state>` label** (best-effort, informational). Dependency
+workflows need the **daemon** (§9.3) — the one-shot CLI exits with a dependent run still parked.
 

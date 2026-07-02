@@ -9,7 +9,8 @@ Emit exactly this JSON object as your final message (omit any optional key you d
   "questions": ["<what the human must answer>"],
   "subIssues": [{ "title": "...", "body": "..." }],
   "handoff": 0,
-  "message": "<optional human-facing note>"
+  "message": "<optional human-facing note>",
+  "scheduling": { "depends_on": [42, 57], "priority": 10, "order_key": "2026Q3-auth-03" }
 }
 ```
 
@@ -25,6 +26,12 @@ Rules:
   the one this run should continue on; omit it to hand all of them to the operator.
 - `message` (optional) is a short human-facing note posted as an issue comment (e.g. your sign-off
   rationale or a summary of the split).
+- `scheduling` (optional, any decision) declares the issue's cross-issue ordering; every field inside
+  it is optional. `depends_on` lists same-repo issue **numbers** that must be merged/closed before
+  this issue's implementation starts; `priority` is an integer (higher runs first); `order_key` is a
+  string tiebreaker. The orchestrator writes these into the issue body's machine-readable block —
+  never write that block yourself in `issueUpdate.body`. Omit `scheduling` entirely when you have
+  nothing to declare or the issue's existing block is already right.
 - The orchestrator performs every GitHub action (editing the issue, posting comments, opening the new
   issues). You only declare intent here.
 - Include no keys other than these. Output the JSON only.

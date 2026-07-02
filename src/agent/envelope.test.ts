@@ -111,3 +111,35 @@ describe('parseTriageOutput', () => {
     if (!r.ok) expect(r.error).toContain('questions');
   });
 });
+
+describe('parseTriageOutput — scheduling is advice, dropped field-by-field (Milestone 9)', () => {
+  it('accepts a full declaration', () => {
+    const r = parseTriageOutput({ decision: 'proceed', scheduling: { depends_on: [42, 57], priority: 10, order_key: 'q3' } });
+    expect(r).toEqual({ ok: true, value: { decision: 'proceed', scheduling: { depends_on: [42, 57], priority: 10, order_key: 'q3' } } });
+  });
+
+  it('drops a malformed field but keeps its valid siblings — never escalates on advice', () => {
+    const r = parseTriageOutput({
+      decision: 'proceed',
+      scheduling: { depends_on: [42, 'x'], priority: 5, order_key: 7, future_hint: true },
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      // depends_on had a non-integer → dropped whole; order_key wasn't a string → dropped; the
+      // unknown key is stripped; the valid priority survives.
+      expect(r.value.scheduling).toEqual({ priority: 5 });
+    }
+  });
+
+  it('drops a non-object scheduling entirely', () => {
+    const r = parseTriageOutput({ decision: 'proceed', scheduling: 'high' });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.scheduling).toBeUndefined();
+  });
+
+  it('rejects zero/negative issue numbers in depends_on (the field drops)', () => {
+    const r = parseTriageOutput({ decision: 'proceed', scheduling: { depends_on: [0, 42] } });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.scheduling).toEqual({});
+  });
+});

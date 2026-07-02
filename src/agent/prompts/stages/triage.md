@@ -30,5 +30,21 @@ deciding again.
      the one this run should continue working on now; omit `handoff` to leave all of them for the
      operator to schedule.
 
+3. **Declare scheduling (optional).** As the PM you may also declare how this issue sits relative
+   to others in the same repository, via the optional `scheduling` object:
+
+   - `depends_on` — issue numbers (this repo) whose work must be **merged** before this one's
+     implementation may start. Declare a dependency only when it is evident — the issue says
+     "after #42", builds on another open issue's feature, or would conflict with its changes. The
+     orchestrator holds this run back until those issues close, so a wrong dependency stalls real
+     work: omit when unsure.
+   - `priority` — an integer; higher runs first. Omit for normal priority.
+   - `order_key` — a string tiebreaker among equal priorities (lexicographic). Rarely needed.
+
+   The orchestrator writes these into the issue as a machine-readable block and enforces them at
+   dispatch. A human may edit that block in the issue later, and the human's edit wins — so when
+   the issue body already carries the block and you have nothing to change, omit `scheduling`
+   entirely. Declare only what the issue itself supports; never invent ordering.
+
 Weigh product goals and architecture like a lead engineer would — a cheap, honest triage here saves
 expensive churn later. When genuinely unsure between proceeding and asking, prefer asking.

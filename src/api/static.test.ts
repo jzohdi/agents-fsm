@@ -3,7 +3,7 @@
 import { resolve, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { contentTypeFor, resolveStaticPath } from './static';
+import { contentTypeFor, isSpaRoute, resolveStaticPath } from './static';
 
 const PUBLIC = resolve('/srv/public');
 
@@ -28,6 +28,19 @@ describe('resolveStaticPath', () => {
 
   it('decodes percent-encoded paths before resolving', () => {
     expect(resolveStaticPath(PUBLIC, '/a%2Fb.js')).toBe(`${PUBLIC}${sep}a${sep}b.js`);
+  });
+});
+
+describe('isSpaRoute', () => {
+  it('treats extension-less paths as client routes and extensioned paths as assets', () => {
+    expect(isSpaRoute('/')).toBe(true);
+    expect(isSpaRoute('/pipelines')).toBe(true);
+    expect(isSpaRoute('/editor')).toBe(true);
+    expect(isSpaRoute('/runs/12')).toBe(true);
+    expect(isSpaRoute('/app.js')).toBe(false);
+    expect(isSpaRoute('/assets/index-abc123.css')).toBe(false);
+    // A dotted directory segment doesn't make the leaf an asset.
+    expect(isSpaRoute('/v1.2/overview')).toBe(true);
   });
 });
 

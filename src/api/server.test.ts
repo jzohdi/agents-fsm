@@ -137,8 +137,8 @@ describe('HTTP API', () => {
     // Malformed JSON → 400.
     const badJson = await fetch(`${base}/runs`, { method: 'POST', body: '{not json' });
     expect(badJson.status).toBe(400);
-    // Unknown route → 404.
-    expect((await fetch(`${base}/nope`)).status).toBe(404);
+    // Unknown non-GET route → 404 (an extension-less GET falls back to the SPA shell instead).
+    expect((await fetch(`${base}/nope`, { method: 'POST' })).status).toBe(404);
 
     // Pausing a finished run → 409.
     const run = (await (await fetch(`${base}/runs`, { method: 'POST', body: JSON.stringify({ issueRef: 'o/r#1' }) })).json()) as { id: number };
@@ -280,6 +280,21 @@ describe('HTTP API', () => {
     expect((await fetch(`${base}/runs/99999/check-pr-feedback`, { method: 'POST' })).status).toBe(404);
   });
 
+  it('routes POST /scheduler/check to an on-demand Scheduler pass (Milestone 9)', async () => {
+    const { base, orchestrator, github } = await start();
+    github.seedIssue('o/r#1', { number: 1 }); // the open dependency
+    github.seedIssue('o/r#2', { number: 2, body: '<!-- agent-orchestrator:v1\ndepends_on: [1]\n-->' });
+    const run = orchestrator.start({ issueRef: 'o/r#2' });
+    await orchestrator.settle(); // triage caches the declaration; the claim parks the run
+
+    const res = await fetch(`${base}/scheduler/check`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as object).toMatchObject({ parked: 1, woken: 0, escalated: 0 });
+    // The scheduling cache is on the run JSON (read-only — the issue is the editor).
+    const shown = (await (await fetch(`${base}/runs/${run.id}`)).json()) as { run: { status: string; dependsOn: number[] } };
+    expect(shown.run).toMatchObject({ status: 'blocked', dependsOn: [1] });
+  });
+
   it('streams live events over SSE', async () => {
     const { base, orchestrator } = await start();
     const controller = new AbortController();
@@ -384,6 +399,14 @@ describe('HTTP API', () => {
 
     // A missing asset is a clean 404 (and the API routes still win over static).
     expect((await fetch(`${base}/does-not-exist.js`)).status).toBe(404);
+
+    // Extension-less client routes fall back to the SPA shell (deep links / reloads on /pipelines).
+    for (const route of ['/pipelines', '/editor', '/nope']) {
+      const page = await fetch(`${base}${route}`);
+      expect(page.status).toBe(200);
+      expect(page.headers.get('content-type')).toContain('text/html');
+      expect(await page.text()).toContain('<title>agent-fleet');
+    }
   });
 });
 

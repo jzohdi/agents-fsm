@@ -18,7 +18,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
@@ -124,7 +124,7 @@ export class GitHubCli implements GitHub {
     // `gh issue create` prints the new issue's URL on stdout; the number is its trailing path segment.
     const stdout = await this.gh(['issue', 'create', '--repo', this.repo, '--title', input.title, '--body', input.body]);
     const number = issueNumberFromUrl(stdout.trim());
-    return { ref: `${this.repo}#${number}`, number, title: input.title, body: input.body };
+    return { ref: `${this.repo}#${number}`, number, title: input.title, body: input.body, state: 'open' };
   }
 
   async postIssueComment(input: { issueNumber: number; body: string }): Promise<IssueComment> {
@@ -170,6 +170,22 @@ export class GitHubCli implements GitHub {
     if (input.body !== undefined) args.push('--body', input.body);
     await this.gh(args);
     return this.viewPr(input.prNumber);
+  }
+
+  async setPrLabels(prNumber: number, labels: string[]): Promise<void> {
+    // Ensure the labels exist (idempotent), then swap: remove stale af:* labels, add the new set.
+    // Human-applied labels never match the af: prefix, so they are untouched.
+    const json = await this.gh(['pr', 'view', String(prNumber), '--repo', this.repo, '--json', 'labels']);
+    const parsed = JSON.parse(json) as { labels?: Array<{ name: string }> };
+    const stale = (parsed.labels ?? []).map((l) => l.name).filter((n) => n.startsWith('af:') && !labels.includes(n));
+
+    for (const label of labels) {
+      await this.gh(['label', 'create', label, '--repo', this.repo, '--force', '--color', 'BFD4F2', '--description', 'agent-fleet run state']);
+    }
+    const args = ['pr', 'edit', String(prNumber), '--repo', this.repo];
+    for (const label of stale) args.push('--remove-label', label);
+    for (const label of labels) args.push('--add-label', label);
+    if (args.length > 4) await this.gh(args);
   }
 
   async postComment(input: { prNumber: number; body: string }): Promise<Comment> {
@@ -222,6 +238,13 @@ export class GitHubCli implements GitHub {
     return { path, branch: input.branch, base: input.base };
   }
 
+  async dropWorkingTree(runId: number): Promise<void> {
+    // The next prepareWorkingTree re-clones and either restores the pushed branch or creates it off
+    // fresh base — the same lost-tree path crash recovery proves (see the interface doc). `force`
+    // makes a missing tree a no-op, keeping the wake path idempotent.
+    rmSync(join(this.workingRoot, `run-${runId}`), { recursive: true, force: true });
+  }
+
   async commitAndPush(input: CommitAndPushInput): Promise<CommitRef> {
     await this.git(['add', '-A'], input.workingDir);
     // Only commit when there is something staged, so re-running is a no-op, not an error.
@@ -246,9 +269,18 @@ export class GitHubCli implements GitHub {
 
   /** View an issue by number, building its `ref` from the configured repo unless one is supplied. */
   private async viewIssue(number: number, ref?: string): Promise<Issue> {
-    const json = await this.gh(['issue', 'view', String(number), '--repo', this.repo, '--json', 'number,title,body']);
-    const parsed = JSON.parse(json) as { number: number; title: string; body: string };
-    return { ref: ref ?? `${this.repo}#${parsed.number}`, number: parsed.number, title: parsed.title, body: parsed.body ?? '' };
+    const json = await this.gh(['issue', 'view', String(number), '--repo', this.repo, '--json', 'number,title,body,state']);
+    const parsed = JSON.parse(json) as { number: number; title: string; body: string; state?: string };
+    return {
+      ref: ref ?? `${this.repo}#${parsed.number}`,
+      number: parsed.number,
+      title: parsed.title,
+      body: parsed.body ?? '',
+      // gh reports OPEN / CLOSED (closed covers both "completed" and "not planned" — either way the
+      // dependency no longer blocks, README §3.5). Anything unexpected reads as open — the safe
+      // direction: an open dependency keeps its dependents parked, never wrongly releases them.
+      state: typeof parsed.state === 'string' && parsed.state.toLowerCase() === 'closed' ? 'closed' : 'open',
+    };
   }
 
   private async viewPr(prNumber: number): Promise<PullRequest> {

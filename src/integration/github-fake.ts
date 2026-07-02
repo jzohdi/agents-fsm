@@ -35,6 +35,8 @@ interface SeedIssue {
   number: number;
   title?: string;
   body?: string;
+  /** Defaults to `open`; seed `closed` to simulate an already-landed dependency (README §3.5). */
+  state?: Issue['state'];
 }
 
 interface CommitEntry {
@@ -77,6 +79,8 @@ export class FakeGitHub implements GitHub {
   private readonly diffs = new Map<string, string>();
   /** Working trees by run id, so repeated preparation is idempotent. */
   private readonly workingTrees = new Map<number, WorkingTree>();
+  /** Labels per PR number (the `af:<state>` mirror + any human labels a test seeds). */
+  private readonly prLabelsByNumber = new Map<number, Set<string>>();
   private readonly workingRoot: string;
   private readonly autoSeedIssues: boolean;
   private readonly repoRef: string;
@@ -104,9 +108,19 @@ export class FakeGitHub implements GitHub {
       number: issue.number,
       title: issue.title ?? `Issue ${issue.number}`,
       body: issue.body ?? '',
+      state: issue.state ?? 'open',
     });
     this.issueCounter = Math.max(this.issueCounter, issue.number);
     return this;
+  }
+
+  /**
+   * Close an issue — the test-side stand-in for the real-world dependency-clearing signal (a human
+   * merging the `Closes #N` PR, or closing the issue by hand — README §3.5). Not on the {@link GitHub}
+   * interface: the orchestrator never closes issues itself.
+   */
+  closeIssue(number: number): void {
+    this.requireIssueByNumber(number).state = 'closed';
   }
 
   /**
@@ -208,7 +222,7 @@ export class FakeGitHub implements GitHub {
     if (this.autoSeedIssues) {
       const m = /#(\d+)/.exec(issueRef);
       const number = m ? Number(m[1]) : 1;
-      return { ref: issueRef, number, title: `Issue ${number}`, body: '' };
+      return { ref: issueRef, number, title: `Issue ${number}`, body: '', state: 'open' };
     }
     throw new GitHubNotFoundError(`issue not found: ${issueRef}`);
   }
@@ -238,7 +252,7 @@ export class FakeGitHub implements GitHub {
   async createIssue(input: CreateIssueInput): Promise<Issue> {
     const number = ++this.issueCounter;
     const ref = `${this.repoRef}#${number}`;
-    const issue: Issue = { ref, number, title: input.title, body: input.body };
+    const issue: Issue = { ref, number, title: input.title, body: input.body, state: 'open' };
     this.issues.set(ref, issue);
     return { ...issue };
   }
@@ -284,6 +298,18 @@ export class FakeGitHub implements GitHub {
     return { ...pr };
   }
 
+  async setPrLabels(prNumber: number, labels: string[]): Promise<void> {
+    this.requirePr(prNumber);
+    const current = this.prLabelsByNumber.get(prNumber) ?? new Set<string>();
+    const kept = [...current].filter((l) => !l.startsWith('af:')); // human labels survive the swap
+    this.prLabelsByNumber.set(prNumber, new Set([...kept, ...labels]));
+  }
+
+  /** The PR's current labels (test introspection for the `af:<state>` mirror). */
+  prLabels(prNumber: number): string[] {
+    return [...(this.prLabelsByNumber.get(prNumber) ?? new Set<string>())].sort();
+  }
+
   async postComment(input: { prNumber: number; body: string }): Promise<Comment> {
     this.requirePr(input.prNumber); // reject comments on a non-existent PR, like the real API
     // Recorded like the real API: authored by the orchestrator's bot login, which is what the PR
@@ -310,6 +336,12 @@ export class FakeGitHub implements GitHub {
     };
     this.workingTrees.set(input.runId, tree);
     return { ...tree };
+  }
+
+  async dropWorkingTree(runId: number): Promise<void> {
+    // Forget the tree so the next prepareWorkingTree "re-clones" — mirrors the real adapter's
+    // rm -rf. Idempotent on a missing tree, like the real `force` remove.
+    this.workingTrees.delete(runId);
   }
 
   async commitAndPush(input: CommitAndPushInput): Promise<CommitRef> {

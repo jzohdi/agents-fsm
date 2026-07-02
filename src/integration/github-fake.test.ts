@@ -14,7 +14,7 @@ import { FakeGitHub } from './github-fake';
 describe('FakeGitHub — issues', () => {
   it('reads a seeded issue', async () => {
     const gh = new FakeGitHub().seedIssue('o/r#42', { number: 42, title: 'Add auth', body: 'do it' });
-    expect(await gh.readIssue('o/r#42')).toEqual({ ref: 'o/r#42', number: 42, title: 'Add auth', body: 'do it' });
+    expect(await gh.readIssue('o/r#42')).toEqual({ ref: 'o/r#42', number: 42, title: 'Add auth', body: 'do it', state: 'open' });
   });
 
   it('rejects an unknown issue with GitHubNotFoundError', async () => {
@@ -61,7 +61,7 @@ describe('FakeGitHub — issue editing, creation, and comments', () => {
     const gh = new FakeGitHub({ repoRef: 'o/r' }).seedIssue('o/r#7', { number: 7 });
     const a = await gh.createIssue({ title: 'piece A', body: 'a' });
     const b = await gh.createIssue({ title: 'piece B', body: 'b' });
-    expect(a).toEqual({ ref: 'o/r#8', number: 8, title: 'piece A', body: 'a' });
+    expect(a).toEqual({ ref: 'o/r#8', number: 8, title: 'piece A', body: 'a', state: 'open' });
     expect(b.ref).toBe('o/r#9');
     // A created issue is then readable like any other.
     expect(await gh.readIssue('o/r#8')).toMatchObject({ title: 'piece A' });

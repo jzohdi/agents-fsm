@@ -4,6 +4,7 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { compareRuns } from '../loop/scheduler';
 import { openDb, type Db } from './db';
 import { Repository } from './repository';
 
@@ -573,5 +574,148 @@ describe('repos registry (Milestone 8 Phase A)', () => {
     expect(repo.listRuns({ repo: 'A/ONE' }).map((r) => r.id)).toEqual([a1.id]);
     expect(repo.listRuns({ repo: 'b/two', status: 'needs_human' }).map((r) => r.id)).toEqual([b1.id]);
     expect(repo.listRuns({ repo: 'b/two', status: 'running' })).toHaveLength(0);
+  });
+});
+
+describe('scheduling cache + dependency gate (Milestone 9)', () => {
+  function runOn(issue: number) {
+    return repo.createRun({ issueRef: `owner/repo#${issue}`, repoRef: 'owner/repo', initialState: 'triage', fsmConfigVersion: 'v1' });
+  }
+
+  it('defaults to no dependencies, default priority, no latch', () => {
+    const run = newRun();
+    expect(run).toMatchObject({ dependsOn: [], priority: 0, orderKey: '', depsSatisfiedAt: null });
+  });
+
+  it('caches a declaration, canonicalizing depends_on (sorted, de-duplicated)', () => {
+    const run = newRun();
+    repo.setRunScheduling(run.id, { dependsOn: [57, 42, 57], priority: 10.9, orderKey: 'k' });
+    expect(repo.getRun(run.id)).toMatchObject({ dependsOn: [42, 57], priority: 10, orderKey: 'k' });
+  });
+
+  it('stamps the satisfaction latch, and keeps it across a declaration whose deps are unchanged', () => {
+    const run = newRun();
+    repo.setRunScheduling(run.id, { dependsOn: [42], priority: 0, orderKey: '' });
+    repo.stampDepsSatisfied(run.id);
+    expect(repo.getRun(run.id)!.depsSatisfiedAt).not.toBeNull();
+
+    // Same deps (even unsorted), different priority: the latch survives — satisfaction didn't change.
+    repo.setRunScheduling(run.id, { dependsOn: [42], priority: 5, orderKey: 'z' });
+    expect(repo.getRun(run.id)!.depsSatisfiedAt).not.toBeNull();
+  });
+
+  it('clears the latch when the dependency set changes (a human added a dep — re-verify)', () => {
+    const run = newRun();
+    repo.setRunScheduling(run.id, { dependsOn: [42], priority: 0, orderKey: '' });
+    repo.stampDepsSatisfied(run.id);
+
+    repo.setRunScheduling(run.id, { dependsOn: [42, 57], priority: 0, orderKey: '' });
+    expect(repo.getRun(run.id)!.depsSatisfiedAt).toBeNull();
+  });
+
+  it('never claims a run with unsatisfied cached deps; the stamped latch (or an emptied set) admits it', () => {
+    const gated = newRun();
+    repo.setRunScheduling(gated.id, { dependsOn: [42], priority: 0, orderKey: '' });
+    repo.enqueueEvent({ runId: gated.id, type: 'stage_done' });
+
+    // Status is `running`, but the dependency gate holds the claim back (correctness lives in SQL,
+    // not in the visible `blocked` flip — M9 plan §2).
+    expect(repo.claimNextEvent()).toBeUndefined();
+
+    repo.stampDepsSatisfied(gated.id);
+    const claimed = repo.claimNextEvent()!;
+    expect(claimed.runId).toBe(gated.id);
+    repo.markEventDone(claimed.id);
+
+    // Declaration emptied: dispatchable with no latch at all.
+    repo.setRunScheduling(gated.id, { dependsOn: [], priority: 0, orderKey: '' });
+    repo.enqueueEvent({ runId: gated.id, type: 'stage_done' });
+    expect(repo.claimNextEvent()!.runId).toBe(gated.id);
+  });
+
+  it('claims in the Scheduler total order: priority desc, order_key asc, issue number asc, event id', () => {
+    // Enqueued in deliberately scrambled order; every run dispatchable (no deps).
+    const low = runOn(1); // priority 0
+    const highLateKey = runOn(2); // priority 5, order_key "b"
+    const highEarlyKey = runOn(3); // priority 5, order_key "a"
+    const highTieYoungIssue = runOn(4); // priority 5, order_key "a" — loses to issue 3 on issue number
+    repo.setRunScheduling(highLateKey.id, { dependsOn: [], priority: 5, orderKey: 'b' });
+    repo.setRunScheduling(highEarlyKey.id, { dependsOn: [], priority: 5, orderKey: 'a' });
+    repo.setRunScheduling(highTieYoungIssue.id, { dependsOn: [], priority: 5, orderKey: 'a' });
+    for (const r of [low, highTieYoungIssue, highLateKey, highEarlyKey]) {
+      repo.enqueueEvent({ runId: r.id, type: 'stage_done' });
+    }
+
+    const order: number[] = [];
+    for (;;) {
+      const event = repo.claimNextEvent();
+      if (!event) break;
+      order.push(event.runId);
+      repo.markEventDone(event.id);
+    }
+    expect(order).toEqual([highEarlyKey.id, highTieYoungIssue.id, highLateKey.id, low.id]);
+  });
+
+  it('agrees with compareRuns on every pick — the SQL-vs-comparator drift guard', () => {
+    // A key set exercising every tier of the order: distinct priorities, tied priorities with
+    // distinct keys, and full ties broken by issue number. The claim's ORDER BY and the pure
+    // comparator are two encodings of one order; this test fails if either changes alone.
+    const keys = [
+      { issueNumber: 11, priority: 0, orderKey: '' },
+      { issueNumber: 12, priority: 3, orderKey: 'beta' },
+      { issueNumber: 13, priority: 3, orderKey: 'alpha' },
+      { issueNumber: 14, priority: 3, orderKey: 'alpha' },
+      { issueNumber: 15, priority: -1, orderKey: 'zzz' },
+      { issueNumber: 16, priority: 0, orderKey: 'a' },
+    ];
+    const byIssue = new Map<number, number>(); // issue → run id
+    for (const k of [...keys].reverse()) {
+      const run = runOn(k.issueNumber);
+      repo.setRunScheduling(run.id, { dependsOn: [], priority: k.priority, orderKey: k.orderKey });
+      repo.enqueueEvent({ runId: run.id, type: 'stage_done' });
+      byIssue.set(k.issueNumber, run.id);
+    }
+
+    const claimedOrder: number[] = [];
+    for (;;) {
+      const event = repo.claimNextEvent();
+      if (!event) break;
+      claimedOrder.push(event.runId);
+      repo.markEventDone(event.id);
+    }
+    const comparatorOrder = [...keys].sort(compareRuns).map((k) => byIssue.get(k.issueNumber)!);
+    expect(claimedOrder).toEqual(comparatorOrder);
+  });
+
+  it('setRunIssueRef (split handoff) resets the cached scheduling and latch', () => {
+    const run = newRun();
+    repo.setRunScheduling(run.id, { dependsOn: [42], priority: 9, orderKey: 'k' });
+    repo.stampDepsSatisfied(run.id);
+
+    repo.setRunIssueRef(run.id, 'owner/repo#77');
+
+    expect(repo.getRun(run.id)).toMatchObject({
+      issueRef: 'owner/repo#77',
+      dependsOn: [],
+      priority: 0,
+      orderKey: '',
+      depsSatisfiedAt: null,
+    });
+  });
+
+  it('findActiveRunByIssue: newest active run, case-insensitive; terminal/archived excluded', () => {
+    const first = newRun();
+    repo.setRunStatus(first.id, 'done'); // terminal → not active
+    const second = newRun();
+    repo.setRunStatus(second.id, 'needs_human'); // non-terminal → still active
+
+    expect(repo.findActiveRunByIssue('OWNER/REPO#1')?.id).toBe(second.id);
+
+    repo.setRunStatus(second.id, 'stopped');
+    expect(repo.findActiveRunByIssue('owner/repo#1')).toBeUndefined();
+
+    const third = newRun();
+    repo.setRunArchived(third.id, true); // archived → filed away, not active
+    expect(repo.findActiveRunByIssue('owner/repo#1')).toBeUndefined();
   });
 });

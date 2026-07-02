@@ -18,6 +18,7 @@
 import { saveConfig, type LoadedConfig } from '../fsm/config';
 import { EventLoop } from '../loop/event-loop';
 import { PrFeedbackPoller, type PrFeedbackCheck } from '../loop/pr-feedback-poller';
+import { SchedulerPoller, type SchedulerPass } from '../loop/scheduler-poller';
 import type { AgentRunner } from '../agent/runner';
 import type {
   AgentRunRecord,
@@ -141,6 +142,7 @@ export class Orchestrator {
   private readonly catalogFor?: (harness: string) => HarnessCatalog | undefined;
   private readonly defaultModel?: string;
   private readonly prFeedbackPoller: PrFeedbackPoller;
+  private readonly schedulerPoller: SchedulerPoller;
   private config: LoadedConfig;
 
   // Single-flight drain pump (plans/milestone-5.md §2.2).
@@ -176,6 +178,9 @@ export class Orchestrator {
     this.prFeedbackPoller = new PrFeedbackPoller(this.repo, this.resolver, this, {
       ...(options.feedbackMarker !== undefined ? { marker: options.feedbackMarker } : {}),
     });
+    // Likewise the Scheduler Poller (Milestone 9): the loop is its `BlockedController`, and both the
+    // daemon's background tick and `POST /scheduler/check` drive this one instance.
+    this.schedulerPoller = new SchedulerPoller(this.repo, this.resolver, this.loop);
   }
 
   /** Reclaim crash-stranded events, then drain anything already queued (e.g. after a daemon restart). */
@@ -199,6 +204,13 @@ export class Orchestrator {
       throw new ApiError(400, err instanceof Error ? err.message : String(err));
     }
     const repoRef = input.repoRef ?? parsed.repo;
+    // One active run per issue (Milestone 9): with several issues in flight, a second run racing the
+    // same issue would fight over the branch and the §3.5 marker block. Terminal/archived runs don't
+    // count — re-running a finished issue is legitimate.
+    const existing = this.repo.findActiveRunByIssue(parsed.ref);
+    if (existing) {
+      throw new ApiError(409, `issue ${parsed.ref} already has an active run (#${existing.id}, ${existing.status})`);
+    }
     // Harness selection (plan §6.5): absent or empty → the daemon default; a present-but-unknown id is a
     // 400 (never silently coerced to the default). Validated before any side effect (cost/enrollment).
     let harness: HarnessId;
@@ -334,6 +346,18 @@ export class Orchestrator {
    */
   pollPrFeedbackOnce(): Promise<number> {
     return this.prFeedbackPoller.checkOnce();
+  }
+
+  /**
+   * One pass of the Scheduler Poller (Milestone 9): refresh §3.5 declarations from the issues,
+   * escalate dependency cycles, latch verified satisfaction, and flip `running ↔ blocked`. Serves
+   * both the daemon's background tick and the dashboard's on-demand `POST /scheduler/check`. A pass
+   * that woke runs kicks the pump so the freed work dispatches immediately.
+   */
+  async checkDependencies(): Promise<SchedulerPass> {
+    const pass = await this.schedulerPoller.checkOnce();
+    if (pass.woken > 0) this.kick();
+    return pass;
   }
 
   /** Revert a run to an earlier state with a reason, then re-dispatch it (README §3.3 Layer 6). */

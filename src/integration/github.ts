@@ -28,6 +28,9 @@ export interface Issue {
   number: number;
   title: string;
   body: string;
+  /** `closed` is the dependency-satisfaction signal (Milestone 9 / README §3.5): a fleet PR's
+   *  `Closes #N` closes the issue at merge, and a human closes human-managed ones. */
+  state: 'open' | 'closed';
 }
 
 /**
@@ -198,6 +201,17 @@ export interface GitHub {
    */
   prepareWorkingTree(input: PrepareWorkingTreeInput): Promise<WorkingTree>;
 
+  /**
+   * Discard the run's local working tree so the next {@link prepareWorkingTree} re-clones fresh.
+   * The Scheduler Poller calls this when waking a dependency-`blocked` run (Milestone 9 / README
+   * §3.1 base-branch discipline): the tree was created off *pre-merge* base at triage, and a fresh
+   * clone branches off up-to-date base. Safe because everything durable is already on the remote —
+   * a pushed branch is restored by the next prepare, never reset (README §2 idempotency), exactly
+   * the lost-tree path crash recovery already exercises. Idempotent: dropping a missing tree is a
+   * no-op.
+   */
+  dropWorkingTree(runId: number): Promise<void>;
+
   /** Stage all changes in the working tree, commit them, and push the branch. */
   commitAndPush(input: CommitAndPushInput): Promise<CommitRef>;
 
@@ -225,6 +239,13 @@ export interface GitHub {
 
   /** Update an existing PR (the idempotent path when the run already has a PR). */
   updatePr(input: UpdatePrInput): Promise<PullRequest>;
+
+  /**
+   * Replace the PR's `af:`-prefixed labels with the given set, leaving human labels alone — the
+   * §3.5 state mirror (`af:<state>`, Milestone 9). A **derived view**, best-effort by contract:
+   * callers fire-and-forget and log failures; it must never gate a transition.
+   */
+  setPrLabels(prNumber: number, labels: string[]): Promise<void>;
 
   /** Post a comment on a PR (review feedback). */
   postComment(input: { prNumber: number; body: string }): Promise<Comment>;

@@ -26,6 +26,16 @@ CREATE TABLE IF NOT EXISTS runs (
   cost_override      TEXT,                              -- operator override of the global cost ceiling (M8 B3): 'next_step' (one stage) | 'full' (whole run) | NULL (none)
   model_override     TEXT,                              -- per-run harness model override (the dashboard's model dropdown); NULL = use the daemon default. Read by the runner at each stage.
   harness            TEXT    NOT NULL DEFAULT 'claude-code', -- which agent harness runs this, pinned at start (like fsm_config_version). No CHECK: the valid set is app-validated (isHarnessId) and ALTER can't add a CHECK later — keeps a fresh DB identical to a migrated one.
+  -- Scheduling declarations (Milestone 9), CACHED from the issue's §3.5 marker block — the issue owns
+  -- them (the runner caches at triage-commit; the Scheduler Poller refreshes every tick; on conflict
+  -- the issue wins). `depends_on` is canonical JSON (sorted-unique ints) so `= '[]'` is a reliable
+  -- "no deps" test in the claim's dispatch gate. `deps_satisfied_at` is the satisfaction latch: NULL
+  -- until every dependency's issue is closed, then stamped (and cleared again if the declaration
+  -- changes). The claim dispatches a run only when depends_on = '[]' OR the latch is stamped.
+  depends_on         TEXT    NOT NULL DEFAULT '[]',
+  priority           INTEGER NOT NULL DEFAULT 0,       -- higher dispatches first (claim ORDER BY)
+  order_key          TEXT    NOT NULL DEFAULT '',      -- lexicographic tiebreaker after priority
+  deps_satisfied_at  TEXT,                             -- the latch; NULL = unverified/unsatisfied
   created_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );

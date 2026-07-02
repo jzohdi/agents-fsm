@@ -39,6 +39,13 @@ export const AWAIT_INPUT_TRIGGER = 'await_input';
  */
 export const PR_FEEDBACK_TRIGGER = 'pr_feedback';
 
+/**
+ * Trigger recorded when the Scheduler finds the run's issue in a dependency cycle (Milestone 9):
+ * every member escalates to `needs_human` rather than deadlocking forever (README §3.3). A control
+ * transition like `revert`/`resume` — the FSM engine never sees it.
+ */
+export const DEPENDENCY_CYCLE_TRIGGER = 'dependency_cycle';
+
 /** Default stage a run re-enters when the PR Feedback Poller re-opens it (README §2 planning). */
 export const DEFAULT_FEEDBACK_REENTRY_STATE = 'plan';
 
@@ -168,6 +175,68 @@ export class EventLoop {
     if (!run) throw new Error(`resumePausedRun: run ${runId} not found`);
     if (run.status !== 'paused') throw new Error(`resumePausedRun: run ${runId} is "${run.status}", not paused`);
     this.repo.setRunStatus(runId, 'running');
+    return this.requireRun(runId);
+  }
+
+  /**
+   * Park a `running` run on unsatisfied dependencies (Milestone 9): the Scheduler Poller's visible
+   * mirror of the claim's dependency gate. Status-only, like {@link pauseRun} — the pending event
+   * stays, held back by the gate, and correctness never depends on this flip having happened (the
+   * claim's `depends_on`/`deps_satisfied_at` predicate is the enforcement; this is what the operator
+   * sees). Throws if the run isn't `running`.
+   */
+  parkBlocked(runId: number): Run {
+    const run = this.repo.getRun(runId);
+    if (!run) throw new Error(`parkBlocked: run ${runId} not found`);
+    if (run.status !== 'running') throw new Error(`parkBlocked: run ${runId} is "${run.status}", not running`);
+    this.repo.setRunStatus(runId, 'blocked');
+    return this.requireRun(runId);
+  }
+
+  /**
+   * Wake a dependency-`blocked` run whose dependencies have cleared (Milestone 9): flip it back to
+   * `running` so the dispatch gate admits its parked event. Status-only — no new transition, no new
+   * event (the parked one is still pending; enqueueing another would double-dispatch). The caller
+   * (the Scheduler Poller) stamps the satisfaction latch and drops the stale working tree *before*
+   * this flip, so nothing can dispatch against pre-merge base. Only `blocked` is ever woken —
+   * `paused`/`needs_human`/`awaiting_input` park for different reasons and their owners resume them.
+   */
+  wakeBlocked(runId: number): Run {
+    const run = this.repo.getRun(runId);
+    if (!run) throw new Error(`wakeBlocked: run ${runId} not found`);
+    if (run.status !== 'blocked') throw new Error(`wakeBlocked: run ${runId} is "${run.status}", not blocked`);
+    this.repo.setRunStatus(runId, 'running');
+    return this.requireRun(runId);
+  }
+
+  /**
+   * Escalate a run whose issue sits in a dependency cycle (Milestone 9): left alone the members
+   * would block each other forever, so every one goes to `needs_human` with the cycle named in the
+   * reason (README §3.3 — escalate, never deadlock). A loop-owned control transition (eventId null),
+   * with pending events discarded first so a later `resume` is driven by exactly one fresh advance
+   * event (the {@link revertRun} discipline). `resumeRun` works unchanged afterwards — and if the
+   * operator fixed nothing, the next Scheduler pass simply re-escalates. Accepts `running` or
+   * `blocked` runs; anything else is parked for a different reason and is left to its owner.
+   */
+  escalateDependencyCycle(runId: number, reason: unknown): Run {
+    const run = this.repo.getRun(runId);
+    if (!run) throw new Error(`escalateDependencyCycle: run ${runId} not found`);
+    if (run.status !== 'running' && run.status !== 'blocked') {
+      throw new Error(`escalateDependencyCycle: run ${runId} is "${run.status}", not running/blocked`);
+    }
+    const transition = this.repo.transaction(() => {
+      this.repo.discardPendingEvents(runId);
+      return this.repo.commitTransition({
+        runId,
+        fromState: run.currentState,
+        toState: this.fsm.escalationState,
+        trigger: DEPENDENCY_CYCLE_TRIGGER,
+        reason,
+        status: 'needs_human',
+        eventId: null, // a control transition, not driven by an event
+      });
+    });
+    this.emit(transition, runId);
     return this.requireRun(runId);
   }
 

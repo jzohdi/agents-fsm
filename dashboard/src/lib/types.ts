@@ -23,6 +23,14 @@ export interface Run {
   modelOverride: string | null;
   /** Which agent harness runs this, pinned at start (e.g. `claude-code` | `cursor`). */
   harness: string;
+  /** Cached §3.5 scheduling (M9): same-repo issue numbers that must close before later stages run. */
+  dependsOn?: number[];
+  /** Cached §3.5 scheduling (M9): higher dispatches first. */
+  priority?: number;
+  /** Cached §3.5 scheduling (M9): lexicographic tiebreaker after priority. */
+  orderKey?: string;
+  /** When every dependency was verified closed (the latch), or `null` while blocked/unverified. */
+  depsSatisfiedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }

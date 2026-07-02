@@ -1,7 +1,7 @@
 <script lang="ts">
   import { ui, control, revertRun, overrideCost, setModel, checkPrFeedback } from './store.svelte';
   import type { HarnessModel } from './types';
-  import { telemetryModel, escalationModel, activityLane, costStatusModel, issueUrl, prUrl, branchUrl, isWatchingPrFeedback, fmtRunCost, fmtDuration, fmtTokens, escapeHtml, humanizeState, humanizeHarness } from './render';
+  import { telemetryModel, escalationModel, activityLane, costStatusModel, issueUrl, prUrl, branchUrl, isWatchingPrFeedback, fmtRunCost, fmtDuration, fmtTokens, escapeHtml, humanizeState, humanizeHarness, schedulingLabel } from './render';
   import StateMachine from './StateMachine.svelte';
   import ScrollArea from './ScrollArea.svelte';
 
@@ -11,6 +11,8 @@
   const issueHref = $derived(issueUrl(run?.issueRef));
   const branchHref = $derived(branchUrl(run?.repoRef, run?.branch));
   const prHref = $derived(prUrl(run?.repoRef, run?.prNumber));
+  // The M9 scheduling summary (deps + verification state, priority, order key); '' renders nothing.
+  const schedulingLine = $derived(run ? schedulingLabel(run) : '');
   // The escalation inspector (needs_human UX, README M7): why the run escalated + operator guidance.
   const escalation = $derived(
     run && run.status === 'needs_human'
@@ -107,6 +109,9 @@
           <span>branch {#if branchHref}<a href={branchHref} target="_blank" rel="noopener">{run.branch}</a>{:else}{run.branch}{/if}</span><span class="sep">·</span>
         {/if}
         <span>{run.agentRunsCount} agent runs</span><span class="sep">·</span>
+        {#if schedulingLine}
+          <span title="Scheduling declarations from the issue's marker block (edit them on the issue)">{schedulingLine}</span><span class="sep">·</span>
+        {/if}
         <span class="af-statline af-stat-{run.status}"><span class="pip"></span>{run.status.replace('_', ' ')}</span>
       </div>
       <div class="af-open">

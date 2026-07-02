@@ -70,8 +70,10 @@
                 <div class="ttl">{r.issue}</div>
                 <div class="ln">
                   <span class={r.statusClass}>{r.status.replace('_', ' ')}</span>
+                  {#if r.priority !== 0}<span class="af-hbadge" title="Scheduling priority (higher runs first)">p{r.priority}</span>{/if}
                   <span class="sp">{fmtTokens(r.tokens)} · {r.costLabel}</span>
                 </div>
+                {#if r.waitingOn}<div class="ln"><span class="sp" title="Blocked until these issues are merged/closed">{r.waitingOn}</span></div>{/if}
               </div>
             {/each}
           </div>

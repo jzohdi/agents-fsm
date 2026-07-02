@@ -740,3 +740,36 @@ function expectApiError(fn: () => unknown, status: number): void {
   }
   throw new Error(`expected an ApiError(${status}) but none was thrown`);
 }
+
+describe('Orchestrator — dependency scheduling (Milestone 9)', () => {
+  it('refuses a second active run for the same issue (409), but allows a re-run once finished', async () => {
+    const { orchestrator, repo } = setup();
+    const first = orchestrator.start({ issueRef: 'o/r#1' });
+
+    // Active (running) → a duplicate is a conflict, whatever the ref's casing/URL form.
+    expect(() => orchestrator.start({ issueRef: 'o/r#1' })).toThrow(/already has an active run/);
+    expect(() => orchestrator.start({ issueRef: 'O/R#1' })).toThrow(ApiError);
+
+    await orchestrator.settle();
+    expect(repo.getRun(first.id)!.status).toBe('done');
+    // Finished → re-running the issue is legitimate (e.g. a follow-up fix).
+    expect(() => orchestrator.start({ issueRef: 'o/r#1' })).not.toThrow();
+  });
+
+  it('checkDependencies runs one Scheduler pass and kicks the pump after a wake', async () => {
+    const { orchestrator, repo, github } = setup();
+    github.seedIssue('o/r#1', { number: 1 }); // the open dependency
+    github.seedIssue('o/r#2', { number: 2, body: '<!-- agent-orchestrator:v1\ndepends_on: [1]\n-->' });
+    const run = orchestrator.start({ issueRef: 'o/r#2' });
+    await orchestrator.settle(); // triage caches the declaration; the claim then parks the run
+
+    expect((await orchestrator.checkDependencies()).parked).toBe(1);
+    expect(repo.getRun(run.id)!.status).toBe('blocked');
+
+    github.closeIssue(1);
+    expect((await orchestrator.checkDependencies()).woken).toBe(1);
+    await orchestrator.settle(); // the kick dispatched the freed work
+
+    expect(repo.getRun(run.id)!.status).toBe('done');
+  });
+});

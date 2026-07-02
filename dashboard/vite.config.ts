@@ -9,7 +9,7 @@ import { defineConfig } from 'vite';
  * (`npm start -- serve`) so the UI hot-reloads while real data comes from the orchestrator.
  */
 const DAEMON = process.env.AF_DAEMON ?? 'http://127.0.0.1:4319';
-const API_ROUTES = ['/runs', '/config', '/health', '/stream', '/suggestions'];
+const API_ROUTES = ['/runs', '/config', '/health', '/stream', '/suggestions', '/repos', '/cost', '/models', '/settings', '/scheduler'];
 
 export default defineConfig({
   plugins: [svelte()],

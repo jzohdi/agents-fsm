@@ -949,3 +949,50 @@ describe('reopenForPrFeedback (PR feedback re-entry)', () => {
     expect(() => badLoop.reopenForPrFeedback(badRun.id, { note: 'x' })).toThrowError(/terminal/);
   });
 });
+
+describe('dependency-scheduling control methods (Milestone 9)', () => {
+  it('parkBlocked/wakeBlocked flip running ↔ blocked (status-only: the pending event survives)', async () => {
+    const { repo, loop } = setup(goldenPathHandler);
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+
+    expect(loop.parkBlocked(run.id).status).toBe('blocked');
+    // Status-only park: the start event is still pending, just not dispatchable while blocked.
+    expect(repo.claimNextEvent()).toBeUndefined();
+
+    expect(loop.wakeBlocked(run.id).status).toBe('running');
+    await loop.runUntilIdle(); // the surviving event dispatches — no re-enqueue was needed
+    expect(repo.getRun(run.id)!.status).toBe('done');
+  });
+
+  it('refuses illegal flips: only running parks, only blocked wakes', () => {
+    const { repo, loop } = setup(goldenPathHandler);
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+
+    expect(() => loop.wakeBlocked(run.id)).toThrow(/not blocked/);
+    repo.setRunStatus(run.id, 'paused');
+    expect(() => loop.parkBlocked(run.id)).toThrow(/not running/);
+  });
+
+  it('escalateDependencyCycle: discards pending events, records the control transition, and resume returns to the stage', async () => {
+    const { repo, loop } = setup(goldenPathHandler);
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+
+    const escalated = loop.escalateDependencyCycle(run.id, { kind: 'dependency_cycle', runs: [run.id], issues: [1] });
+
+    expect(escalated.status).toBe('needs_human');
+    expect(repo.claimNextEvent()).toBeUndefined(); // the start event was discarded, not left to go stale
+    expect(sequence(repo, run.id)).toEqual([['triage', 'dependency_cycle', 'needs_human']]);
+
+    // The standard operator path works unchanged: resume returns to the escalated-from stage and re-runs.
+    loop.resumeRun(run.id);
+    await loop.runUntilIdle();
+    expect(repo.getRun(run.id)!.status).toBe('done');
+  });
+
+  it('escalateDependencyCycle refuses runs parked for other reasons (their owners resume them)', () => {
+    const { repo, loop } = setup(goldenPathHandler);
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    repo.setRunStatus(run.id, 'awaiting_input');
+    expect(() => loop.escalateDependencyCycle(run.id, { kind: 'dependency_cycle' })).toThrow(/not running\/blocked/);
+  });
+});
