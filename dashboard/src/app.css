@@ -30,6 +30,7 @@
   --hl: #fff3b0;
   --ui: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --mono: "Spline Sans Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --display: "Fraunces", "Iowan Old Style", Georgia, serif; /* the home masthead's editorial serif */
 }
 
 * { box-sizing: border-box; }
@@ -61,7 +62,8 @@ input, textarea, button, select { font: inherit; }
 /* Vertical padding only — the `padding` shorthand would clobber `.af-wrap`'s horizontal padding
    (higher specificity), making the topbar touch the screen edges. */
 .af-topbar .af-row { display: flex; align-items: center; gap: 30px; padding-top: 16px; padding-bottom: 16px; flex-wrap: wrap; }
-.af-brand { font-size: 19px; font-weight: 800; letter-spacing: -0.03em; display: flex; align-items: baseline; gap: 9px; }
+/* The brand is a button (it navigates home); strip the button chrome so it still reads as a wordmark. */
+.af-brand { font-size: 19px; font-weight: 800; letter-spacing: -0.03em; display: flex; align-items: baseline; gap: 9px; background: none; border: 0; padding: 0; color: var(--ink); font-family: var(--ui); cursor: pointer; }
 .af-brand .o { color: var(--accent); }
 .af-brand span { font-family: var(--mono); font-size: 10px; font-weight: 500; letter-spacing: 0.2em; text-transform: uppercase; color: var(--ink3); }
 .af-nav { display: flex; gap: 26px; }
@@ -392,16 +394,169 @@ input, textarea, button, select { font: inherit; }
 .af-config-msg.af-err { color: var(--rose); }
 .af-config-msg.af-ok { color: var(--accent); }
 
+/* --- home / fleet overview (the front page's editorial ledger) --- */
+@keyframes af-hreveal { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+/* masthead */
+.af-hmast { padding: 46px 0 34px; animation: af-hreveal 0.5s 0.02s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.af-hdate { display: flex; align-items: baseline; gap: 10px; }
+.af-hdate .dot { color: var(--ink4); }
+.af-hdate .dim { color: var(--ink4); letter-spacing: 0.14em; }
+.af-hheadline {
+  font-family: var(--display); font-weight: 430; font-variation-settings: "opsz" 60;
+  font-size: clamp(30px, 4.6vw, 54px); line-height: 1.06; letter-spacing: -0.015em;
+  margin: 18px 0 0; max-width: 20ch; text-wrap: balance;
+}
+.af-hsub { margin-top: 16px; color: var(--ink3); font-size: 13.5px; display: flex; gap: 10px; flex-wrap: wrap; }
+.af-hsub b { color: var(--ink); font-weight: 600; }
+.af-hsub .sep { color: var(--ink4); }
+
+/* stat band: hairline-separated cells, big mono numerals */
+.af-hstats { padding: 0; animation: af-hreveal 0.5s 0.1s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.af-hstats-row { display: grid; grid-template-columns: repeat(5, 1fr); }
+.af-hstats .cell { display: flex; flex-direction: column; gap: 6px; padding: 24px 26px 22px; border-left: 1px solid var(--rule); position: relative; }
+.af-hstats .cell:first-child { border-left: 0; padding-left: 0; }
+.af-hstats .n { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 38px; font-weight: 500; letter-spacing: -0.04em; line-height: 1; color: var(--ink); }
+.af-hstats .n.live { color: var(--accent); }
+.af-hstats .n.warn { color: var(--rose); }
+.af-hstats .n.money { font-size: 32px; padding-top: 5px; }
+.af-hstats .sub { font-size: 12px; color: var(--ink3); }
+.af-hstats .sub.over { color: var(--rose); font-weight: 600; }
+.af-hstats .meter { display: block; height: 2px; background: var(--rule); margin-top: 4px; overflow: hidden; }
+.af-hstats .meter .fill { display: block; height: 100%; background: var(--accent); transition: width 0.6s cubic-bezier(0.2, 0.7, 0.2, 1); }
+.af-hstats .meter .fill.over { background: var(--rose); }
+
+/* shared full-width ledger row (attention / repositories / activity): borderless, hairline-ruled */
+.af-hrow {
+  display: flex; align-items: baseline; gap: 18px; width: 100%; text-align: left; cursor: pointer;
+  background: none; border: 0; border-top: 1px solid var(--rule); padding: 14px 2px;
+  font-family: var(--ui); font-size: 13.5px; color: var(--ink); transition: background 0.14s;
+  position: relative;
+}
+.af-hrow:hover { background: var(--paper2); }
+.af-hrow:hover .arr { color: var(--accent); transform: translateX(4px); }
+.af-hrow .arr { margin-left: 4px; color: var(--ink4); transition: 0.16s; flex: 0 0 auto; }
+.af-hrow .when { font-family: var(--mono); font-size: 11.5px; color: var(--ink3); white-space: nowrap; }
+.af-hrow .ref { font-family: var(--mono); font-size: 13px; font-weight: 600; white-space: nowrap; }
+.af-hrow .ref small { font-weight: 400; font-size: 10.5px; color: var(--ink3); margin-left: 8px; letter-spacing: 0.04em; text-transform: uppercase; }
+
+/* attention queue */
+.af-hattn { animation: af-hreveal 0.5s 0.18s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.af-hattn .af-sec-h h2 { color: var(--rose); }
+.af-hattn-row .pip { width: 8px; height: 8px; border-radius: 50%; background: currentColor; align-self: center; flex: 0 0 auto; }
+.af-hattn-row .why { color: var(--ink2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.af-hattn-row .when { margin-left: auto; }
+.af-hattn-row:last-child { border-bottom: 1px solid var(--rule); }
+
+/* repositories ledger */
+.af-hledger { animation: af-hreveal 0.5s 0.26s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.af-henroll { margin-bottom: 18px; }
+.af-henroll .lead { color: var(--ink3); font-size: 13px; margin-bottom: 12px; }
+.af-henroll .af-enroll { padding-bottom: 0; }
+.af-enroll-go:disabled { opacity: 0.5; cursor: not-allowed; }
+.af-hempty { color: var(--ink3); font-size: 13.5px; padding: 26px 0 10px; }
+.af-hrepo { padding-top: 18px; padding-bottom: 18px; }
+.af-hrepo:last-child { border-bottom: 1px solid var(--rule); }
+.af-hrepo .ix { font-family: var(--mono); font-size: 11px; color: var(--ink4); flex: 0 0 26px; }
+.af-hrepo .name { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.af-hrepo .nm { font-family: var(--display); font-weight: 560; font-variation-settings: "opsz" 28; font-size: 21px; letter-spacing: -0.01em; line-height: 1.1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.af-hrepo .livedot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-left: 10px; vertical-align: 3px; animation: af-watchpulse 1.9s ease-in-out infinite; }
+.af-hrepo .meta2 { font-size: 12px; color: var(--ink3); }
+.af-hrepo .meta2 .warn { color: var(--rose); font-weight: 600; }
+.af-hrepo .fig { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; flex: 0 0 62px; }
+.af-hrepo .fig.wide { flex-basis: 84px; }
+.af-hrepo .fig b { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 16px; font-weight: 600; letter-spacing: -0.02em; }
+.af-hrepo .fig b.warn { color: var(--rose); }
+.af-hrepo .fig i { font-style: normal; font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink4); }
+.af-hrepo .when { flex: 0 0 76px; text-align: right; }
+
+/* recent activity */
+.af-hrecent { animation: af-hreveal 0.5s 0.34s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.af-hact .when { flex: 0 0 76px; }
+.af-hact .ref { flex: 1 1 220px; overflow: hidden; text-overflow: ellipsis; }
+.af-hact .st { color: var(--ink2); font-size: 12.5px; flex: 0 0 130px; }
+.af-hact .sp { font-family: var(--mono); font-size: 11.5px; color: var(--ink3); margin-left: auto; white-space: nowrap; }
+.af-hact:last-child { border-bottom: 1px solid var(--rule); }
+
 /* --- responsive / condensed mobile --- */
 @media (max-width: 1040px) {
   .af-triptych, .af-actgrid { grid-template-columns: 1fr; gap: 24px; }
   .af-col, .af-actgrid .wirecol, .af-actgrid .livecol { border: 0; padding: 0; }
+  .af-hstats-row { grid-template-columns: repeat(3, 1fr); }
+  .af-hstats .cell { border-left: 0; padding-left: 0; padding-top: 18px; padding-bottom: 16px; }
+  /* Repo ledger rows reflow to two lines (name, then the figures) so nothing gets crushed to 0 width:
+     the name keeps the whole first line (the arrow leaves the flow), figures wrap beneath it. */
+  .af-hrepo { flex-wrap: wrap; row-gap: 13px; padding-right: 26px; }
+  .af-hrepo .arr { position: absolute; right: 2px; top: 18px; margin-left: 0; }
+  .af-hrepo .name { flex: 1 1 calc(100% - 70px); }
+  .af-hrepo .fig, .af-hrepo .fig.wide { flex: 0 0 auto; flex-direction: row; align-items: baseline; gap: 6px; }
+  .af-hrepo .fig b { font-size: 14px; }
+  .af-hrepo .when { flex: 0 0 auto; margin-left: auto; }
 }
+@media (max-width: 720px) {
+  /* --- topbar: brand + status on line 1, nav on line 2; drop low-value chrome --- */
+  .af-topbar .af-row { gap: 8px 12px; padding-top: 12px; padding-bottom: 10px; }
+  .af-brand { font-size: 17px; }
+  .af-brand span:last-child { display: none; } /* the ORCHESTRATOR suffix */
+  .af-nav { order: 3; flex-basis: 100%; gap: 22px; }
+  .af-topbar .right { gap: 12px; font-size: 11.5px; }
+  .af-topbar .right .cfg { display: none; } /* the config hash is desktop detail */
+  .af-cost { font-size: 11px; white-space: nowrap; }
+  .af-live { font-size: 0; gap: 0; } /* dot-only; its colour still carries the connection state */
+  .af-live .d { width: 9px; height: 9px; }
+
+  /* --- file-a-run bar: the input owns its line; harness + Start run sit beneath --- */
+  .af-filebar .inner { flex-wrap: wrap; }
+  .af-filebar .lab { display: none; }
+  .af-filebar input { flex: 1 1 100%; padding: 14px 0 10px; }
+  .af-harness { border-left: 0; padding: 0 12px 12px 0; margin-right: auto; }
+  .af-filebar .file-btn { padding: 9px 24px; margin-bottom: 10px; align-self: center; white-space: nowrap; }
+  .af-ac .grp, .af-ac .opt, .af-ac .none { padding-left: 16px; padding-right: 16px; }
+  .af-runerr { padding-left: 16px; padding-right: 16px; }
+
+  /* --- run controls: one stacked column of full-width cells (hairline rows, not a jumble) --- */
+  .af-dhead { gap: 18px; }
+  .af-controls { flex: 1 1 100%; margin-left: 0; flex-direction: column; align-items: stretch; }
+  .af-controls > * { border-left: 0; border-top: 1px solid var(--rule); }
+  /* Re-add the row separator on buttons: the desktop rule's `border: 0` shorthand cleared it. */
+  .af-controls button { border-left: 0; border-top: 1px solid var(--rule); padding: 12px 14px; }
+  .af-controls > :first-child { border-top: 0; }
+  .af-model { border-left: 0; justify-content: space-between; }
+  .af-revert { display: grid; grid-template-columns: 1fr auto; }
+  .af-revert select { grid-area: 1 / 1; border-left: 0; }
+  .af-revert button { grid-area: 1 / 2; border-top: 0; border-left: 1px solid var(--rule); }
+  .af-revert input { grid-area: 2 / 1 / 3 / 3; width: auto; border-left: 0; border-top: 1px solid var(--rule); }
+  /* Override rows: the tag reads as a heading line, the action buttons share the row beneath. */
+  .af-cost-override, .af-prwatch { border-left: 0; flex-wrap: wrap; padding: 12px 14px; }
+  .af-cost-override .af-tag, .af-prwatch .af-tag { flex-basis: 100%; }
+  .af-cost-override button, .af-prwatch button { flex: 1 1 auto; border: 1px solid var(--accent-line); padding: 8px 14px; }
+
+  /* --- home attention queue: what + when, the why on its own wrapping line, then the status --- */
+  .af-hattn-row { display: grid; grid-template-columns: 16px 1fr auto; row-gap: 6px; align-items: baseline; }
+  .af-hattn-row .ref { grid-area: 1 / 2; }
+  .af-hattn-row .when { grid-area: 1 / 3; margin-left: 0; }
+  .af-hattn-row .why { grid-area: 2 / 2 / 3 / 4; white-space: normal; line-height: 1.45; }
+  .af-hattn-row .af-stat { grid-area: 3 / 2 / 4 / 4; }
+  .af-hattn-row .pip { grid-area: 1 / 1; align-self: center; } /* after .af-stat — the pip carries both classes */
+  .af-hattn-row .arr { display: none; } /* the whole row is the tap target */
+
+  /* --- home activity feed: ref + status, then spend + time --- */
+  .af-hact { display: grid; grid-template-columns: 1fr auto; row-gap: 5px; }
+  .af-hact .ref { grid-area: 1 / 1; }
+  .af-hact .af-stat { grid-area: 1 / 2; justify-self: end; }
+  .af-hact .st { display: none; }
+  .af-hact .sp { grid-area: 2 / 1; margin-left: 0; }
+  .af-hact .when { grid-area: 2 / 2; justify-self: end; }
+
+  /* --- home enroll form: full-width inputs --- */
+  .af-enroll input { flex: 1 1 100%; min-width: 0; }
+  .af-enroll .af-enroll-go { flex: 1 1 auto; padding: 10px 18px; }
+}
+
 @media (max-width: 640px) {
   .af-wrap { padding: 0 16px; }
-  .af-topbar .af-row { gap: 16px 18px; padding-top: 12px; padding-bottom: 12px; } /* vertical only — keep .af-wrap's horizontal padding */
   .af-dhead h1 { font-size: 23px; }
-  .af-filebar input { font-size: 14px; padding: 13px 16px; }
+  .af-filebar input { font-size: 14px; }
   .af-filebar .lab { display: none; }
   /* condensed pipeline lanes (req 2 — mobile variant) */
   .af-bucket { flex: 0 0 200px; }
@@ -409,4 +564,14 @@ input, textarea, button, select { font: inherit; }
   .af-unit { padding-top: 11px; padding-bottom: 11px; }
   .af-unit .ttl { display: none; }
   .af-b-body { max-height: 340px; }
+  /* home: tighter masthead + stat band on phones */
+  .af-hmast { padding: 30px 0 24px; }
+  .af-hsub { gap: 4px 16px; }
+  .af-hsub .sep { display: none; } /* no dangling em-dashes when the line wraps */
+  .af-hstats .n { font-size: 30px; }
+  .af-hstats .n.money { font-size: 26px; padding-top: 3px; }
+  .af-hstats .cell { padding-top: 14px; padding-bottom: 12px; }
+  .af-hstats .cell .af-eyebrow { min-height: 32px; } /* room for "Awaiting you" to wrap — numerals stay aligned */
+  .af-hstats .sub { font-size: 11px; }
+  .af-hrepo .nm { font-size: 19px; }
 }

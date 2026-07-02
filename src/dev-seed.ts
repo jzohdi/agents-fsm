@@ -171,6 +171,11 @@ function resolved(issue: number, repo: string, title: string, tokens: number, co
 
 /** Seed the repository with the preview run set. Returns the run ids created. */
 export function seedRuns(repo: Repository, version: string): number[] {
+  // Enroll every seeded repo first (as `POST /repos` would have), so `GET /repos` matches the runs
+  // and the home page's ledger shows enrolled repos rather than "history only" leftovers.
+  for (const repoRef of new Set(SPECS.map((s) => s.repo))) {
+    repo.upsertRepo({ repoRef, workingRoot: `/tmp/agent-fleet-preview/${repoRef}`, baseBranch: 'main' });
+  }
   const ids: number[] = [];
   for (const s of SPECS) {
     const run = repo.createRun({

@@ -697,6 +697,14 @@ banner prints which one is in use. Start runs from the dashboard's **File a new 
 autocomplete) or by `POST /runs`. For dashboard development with hot reload, `npm run dev` (one-command
 build-watch + in-process daemon) or `npm run dev:dashboard` (Vite HMR against a running daemon).
 
+**Dashboard pages.** The dashboard is path-routed (the daemon serves the SPA shell for any
+extension-less path, so deep links and reloads work): **`/` — the fleet overview (home)**: a masthead
+headline + stat band (agents working, runs awaiting you, resolved, tokens, spend vs. the ceiling), a
+**needs-attention queue** (escalations, questions, dependency-blocked runs — click through to the run),
+the **repositories ledger** (per-repo run counts / tokens / spend / last activity; click a repo to open
+its board; **+ Add repository** enrolls one), and a recent-activity feed. **`/pipelines`** — the run
+board (repo tabs, file-a-run bar, pipeline lanes, run detail). **`/editor`** — the FSM config editor.
+
 **Concurrency (Milestone 8 Phase B).** The daemon advances runs in parallel — **parallel across runs,
 serial within a run** (two stages of one run never overlap; they share a working tree). The global cap
 is `--concurrency <N>` or the `FLEET_CONCURRENCY` env var (default **4**); set it to `1` for fully

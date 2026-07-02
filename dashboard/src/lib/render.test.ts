@@ -18,7 +18,14 @@ import {
   fmtRunCost,
   tracksCost,
   fmtDuration,
+  fmtRelTime,
   fmtTokens,
+  fleetStatsModel,
+  repoLedgerModel,
+  attentionModel,
+  recentRunsModel,
+  routeFromPath,
+  routePath,
   humanizeHarness,
   humanizeState,
   pipelineModel,
@@ -29,7 +36,7 @@ import {
   traversedBackEdges,
   waitingOnLabel,
 } from './render';
-import type { FsmConfig, Run, Transition } from './types';
+import type { FsmConfig, Repo, Run, Transition } from './types';
 
 const FSM: FsmConfig = {
   initial: 'triage',
@@ -181,6 +188,134 @@ describe('repoOverviewModel', () => {
       { repoRef: 'old/done', active: 0, needsHuman: 0 },
     ]);
     expect(repoOverviewModel(undefined)).toEqual([]);
+  });
+});
+
+describe('routing (home page paths)', () => {
+  it('maps routes to paths and back, round-tripping each route', () => {
+    expect(routePath('home')).toBe('/');
+    expect(routePath('pipelines')).toBe('/pipelines');
+    expect(routePath('editor')).toBe('/editor');
+    for (const r of ['home', 'pipelines', 'editor'] as const) expect(routeFromPath(routePath(r))).toBe(r);
+  });
+  it('tolerates trailing slashes and lands unknown paths on home', () => {
+    expect(routeFromPath('/pipelines/')).toBe('pipelines');
+    expect(routeFromPath('')).toBe('home');
+    expect(routeFromPath('/what-is-this')).toBe('home');
+  });
+});
+
+describe('fmtRelTime', () => {
+  const now = Date.parse('2026-07-01T12:00:00Z');
+  it('buckets ages into just now / minutes / hours / days', () => {
+    expect(fmtRelTime('2026-07-01T11:59:30Z', now)).toBe('just now');
+    expect(fmtRelTime('2026-07-01T11:47:00Z', now)).toBe('13m ago');
+    expect(fmtRelTime('2026-07-01T07:00:00Z', now)).toBe('5h ago');
+    expect(fmtRelTime('2026-06-28T12:00:00Z', now)).toBe('3d ago');
+  });
+  it('falls back to a short date beyond a week, and — for a missing stamp', () => {
+    expect(fmtRelTime('2026-05-15T12:00:00Z', now)).toMatch(/May/);
+    expect(fmtRelTime(null, now)).toBe('—');
+    expect(fmtRelTime('not a date', now)).toBe('—');
+  });
+});
+
+describe('fleetStatsModel (home masthead + stat band)', () => {
+  it('aggregates active / awaiting / resolved, tokens, and cost across all runs', () => {
+    const m = fleetStatsModel([
+      run({ id: 1, status: 'running', tokensUsed: 1000, costUsed: 1 }),
+      run({ id: 2, status: 'paused', tokensUsed: 500, costUsed: 0.5 }),
+      run({ id: 3, status: 'needs_human', tokensUsed: 200, costUsed: 0.2 }),
+      run({ id: 4, status: 'awaiting_input', tokensUsed: 100, costUsed: 0.1 }),
+      run({ id: 5, status: 'blocked', tokensUsed: 0, costUsed: 0 }),
+      run({ id: 6, status: 'done', repoRef: 'acme/api', tokensUsed: 3000, costUsed: 3 }),
+      run({ id: 7, status: 'stopped', tokensUsed: 50, costUsed: 0.05 }),
+    ]);
+    expect(m).toMatchObject({ totalRuns: 7, active: 2, awaiting: 3, resolved: 2, repos: 2, tokens: 4850, untrackedRuns: 0 });
+    expect(m.cost).toBeCloseTo(4.85);
+    expect(m.headline).toBe('2 agents at work — 3 runs need you.');
+  });
+
+  it('excludes cost-blind harness spend from the total but counts those runs as untracked', () => {
+    const m = fleetStatsModel([
+      run({ id: 1, harness: 'claude-code', costUsed: 2 }),
+      run({ id: 2, harness: 'cursor', costUsed: 99 }), // cursor reports no usage — never counted
+    ]);
+    expect(m.cost).toBe(2);
+    expect(m.untrackedRuns).toBe(1);
+  });
+
+  it('writes a fitting headline for each fleet state', () => {
+    expect(fleetStatsModel([run({ status: 'running' })]).headline).toBe('1 agent at work across 1 repository.');
+    expect(fleetStatsModel([run({ status: 'needs_human' })]).headline).toBe('1 run awaits your attention.');
+    expect(fleetStatsModel([run({ status: 'done' }), run({ id: 2, status: 'done' })]).headline).toBe('All quiet — 2 runs resolved to date.');
+    expect(fleetStatsModel([]).headline).toBe('Ready when you are. Enroll a repository to begin.');
+    expect(fleetStatsModel(undefined).totalRuns).toBe(0);
+  });
+});
+
+describe('repoLedgerModel (home repositories ledger)', () => {
+  const repo = (over: Partial<Repo> = {}): Repo => ({
+    repoRef: 'acme/web', cloneUrl: null, localRepo: null, workingRoot: '/tmp', baseBranch: 'main', ...over,
+  });
+
+  it('merges enrolled repos with run aggregates and sorts by most recent activity', () => {
+    const rows = repoLedgerModel(
+      [repo({ repoRef: 'acme/web' }), repo({ repoRef: 'acme/idle', baseBranch: 'develop' })],
+      [
+        run({ id: 1, repoRef: 'acme/web', status: 'running', tokensUsed: 100, costUsed: 1, updatedAt: '2026-07-01T10:00:00Z' }),
+        run({ id: 2, repoRef: 'acme/web', status: 'needs_human', tokensUsed: 50, costUsed: 0.5, updatedAt: '2026-07-01T11:00:00Z' }),
+        run({ id: 3, repoRef: 'acme/web', status: 'done', tokensUsed: 10, costUsed: 0.1, updatedAt: '2026-07-01T09:00:00Z' }),
+      ],
+    );
+    expect(rows.map((r) => r.repoRef)).toEqual(['acme/web', 'acme/idle']); // active repo first, idle last
+    expect(rows[0]).toMatchObject({
+      enrolled: true, baseBranch: 'main', runs: 3, active: 1, awaiting: 1, needsHuman: 1, resolved: 1,
+      tokens: 160, costLabel: '$1.60', lastActivity: '2026-07-01T11:00:00Z',
+    });
+    expect(rows[1]).toMatchObject({ enrolled: true, baseBranch: 'develop', runs: 0, lastActivity: null });
+  });
+
+  it('lists a repo seen only via runs (not enrolled) so history is never hidden', () => {
+    const rows = repoLedgerModel([], [run({ repoRef: 'ghost/repo', status: 'done' })]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ repoRef: 'ghost/repo', enrolled: false, runs: 1 });
+  });
+
+  it('is empty-safe', () => {
+    expect(repoLedgerModel(undefined, undefined)).toEqual([]);
+  });
+});
+
+describe('attentionModel (home attention queue)', () => {
+  it('lists only operator-blocked runs, newest first, with a why-it-waits label', () => {
+    const rows = attentionModel([
+      run({ id: 1, status: 'running', updatedAt: '2026-07-01T12:00:00Z' }), // not waiting → excluded
+      run({ id: 2, status: 'needs_human', currentState: 'code_review', updatedAt: '2026-07-01T10:00:00Z' }),
+      run({ id: 3, status: 'awaiting_input', updatedAt: '2026-07-01T11:00:00Z' }),
+      run({ id: 4, status: 'blocked', dependsOn: [7], updatedAt: '2026-07-01T09:00:00Z' }),
+    ]);
+    expect(rows.map((r) => r.id)).toEqual([3, 2, 4]);
+    expect(rows.find((r) => r.id === 2)!.label).toContain('Escalated');
+    expect(rows.find((r) => r.id === 3)!.label).toContain('reply');
+    expect(rows.find((r) => r.id === 4)!.label).toBe('waiting on #7');
+    expect(attentionModel(undefined)).toEqual([]);
+  });
+});
+
+describe('recentRunsModel (home activity feed)', () => {
+  it('returns the most recently touched runs first, capped at the limit', () => {
+    const rows = recentRunsModel(
+      [
+        run({ id: 1, updatedAt: '2026-07-01T09:00:00Z' }),
+        run({ id: 2, updatedAt: '2026-07-01T11:00:00Z', harness: 'cursor' }),
+        run({ id: 3, updatedAt: '2026-07-01T10:00:00Z' }),
+      ],
+      2,
+    );
+    expect(rows.map((r) => r.id)).toEqual([2, 3]);
+    expect(rows[0]!.costLabel).toBe('n/a'); // cost-blind harness stays honest here too
+    expect(recentRunsModel(undefined)).toEqual([]);
   });
 });
 

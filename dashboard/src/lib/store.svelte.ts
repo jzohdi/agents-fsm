@@ -7,6 +7,7 @@
  */
 
 import { request } from './api';
+import { routeFromPath, routePath, type Route } from './render';
 import type { LoadedConfig, LogLine, ModelCatalog, Repo, Run, RunDetail, Settings, Suggestion } from './types';
 
 export const ui = $state({
@@ -16,7 +17,12 @@ export const ui = $state({
   config: null as LoadedConfig | null,
   conn: 'connecting' as 'on' | 'off' | 'connecting',
   logs: [] as LogLine[], // the selected run's activity feed (persisted logs + live stream)
-  view: 'run' as 'run' | 'editor',
+  // Path-based route (home `/`, pipelines `/pipelines`, editor `/editor`) — kept in sync with the
+  // address bar by `navigate` (pushState) and `initRouter`'s popstate listener, so deep links,
+  // reloads, and back/forward all work (the daemon serves index.html for extension-less paths).
+  route: 'home' as Route,
+  // Enrolled repositories (`GET /repos`) — the home page's ledger merges these with run aggregates.
+  repos: [] as Repo[],
   banner: null as { msg: string; kind: 'ok' | 'err' } | null,
   // `showArchived` is a client-side view preference; whether a run *is* archived lives on the server
   // (Run.archivedAt), set via the archive/unarchive endpoints below.
@@ -38,6 +44,35 @@ export const ui = $state({
   harnesses: [] as string[],
 });
 
+/** Adopt the current pathname and follow browser back/forward. Call once at mount. */
+export function initRouter(): void {
+  ui.route = routeFromPath(location.pathname);
+  window.addEventListener('popstate', () => {
+    ui.route = routeFromPath(location.pathname);
+  });
+}
+
+/** Switch routes, pushing a history entry so back/forward and deep links work. */
+export function navigate(route: Route): void {
+  if (ui.route === route) return;
+  ui.route = route;
+  history.pushState(null, '', routePath(route));
+}
+
+/** Jump from the home ledger into a repo's board: scope the pipeline filter, then go there. */
+export function openRepoBoard(repoRef: string | null): void {
+  ui.repoFilter = repoRef;
+  navigate('pipelines');
+}
+
+/** Open one run on the board (from the home page's attention queue / activity feed). */
+export async function openRun(id: number): Promise<void> {
+  const run = ui.runs.find((r) => r.id === id);
+  ui.repoFilter = run ? run.repoRef : null;
+  navigate('pipelines');
+  await selectRun(id);
+}
+
 /** Runs scoped to the active repo tab (all repos when no filter). */
 export function filteredRuns(): Run[] {
   return ui.repoFilter === null ? ui.runs : ui.runs.filter((r) => r.repoRef === ui.repoFilter);
@@ -47,12 +82,22 @@ export function setRepoFilter(repoRef: string | null): void {
   ui.repoFilter = repoRef;
 }
 
+/** Fetch the enrolled repos (`GET /repos`); tolerant of an older daemon without the route. */
+export async function loadRepos(): Promise<void> {
+  try {
+    ui.repos = await request<Repo[]>('GET', '/repos');
+  } catch {
+    ui.repos = []; // the home ledger then derives repos from runs alone
+  }
+}
+
 /** Enroll a repo (`POST /repos`) so runs can be started for it. Returns whether it succeeded. */
 export async function enrollRepo(repoRef: string, baseBranch?: string): Promise<boolean> {
   try {
     const body = baseBranch?.trim() ? { repoRef, baseBranch: baseBranch.trim() } : { repoRef };
     const repo = await request<Repo>('POST', '/repos', body);
     banner(`Enrolled ${repo.repoRef}.`, 'ok');
+    await loadRepos(); // keep the home ledger current
     return true;
   } catch (err) {
     banner(`Enroll failed: ${(err as Error).message}`, 'err');

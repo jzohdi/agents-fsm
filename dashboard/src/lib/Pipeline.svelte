@@ -20,7 +20,6 @@
   const firstTermIdx = $derived(model.columns.findIndex((c) => c.terminal));
 
   function open(id: number) {
-    ui.view = 'run';
     void selectRun(id);
   }
 </script>

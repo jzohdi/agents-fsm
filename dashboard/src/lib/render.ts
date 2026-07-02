@@ -294,6 +294,199 @@ export function repoOverviewModel(runs: Run[] | undefined): RepoSummary[] {
   return [...byRepo.values()].sort((a, b) => a.repoRef.localeCompare(b.repoRef));
 }
 
+// --- fleet overview (the home page's ledger) -----------------------------------
+
+/** In-flight statuses (an agent is, or will shortly be, working). */
+const ACTIVE_STATUSES = new Set<RunStatus>(['running', 'paused']);
+/** Statuses waiting on the operator: escalated, asked a question, or dependency-blocked. */
+const WAITING_STATUSES = new Set<RunStatus>(['needs_human', 'awaiting_input', 'blocked']);
+
+export interface FleetStatsModel {
+  totalRuns: number;
+  /** Runs an agent is working (running/paused). */
+  active: number;
+  /** Runs waiting on the operator (needs_human / awaiting_input / blocked). */
+  awaiting: number;
+  /** Terminal runs (done + stopped), all-time. */
+  resolved: number;
+  /** Distinct repositories that have at least one run. */
+  repos: number;
+  /** Total tokens burned across every run, all-time. */
+  tokens: number;
+  /** Total dollars across cost-tracking runs, all-time (cost-blind harnesses report nothing). */
+  cost: number;
+  /** Runs on cost-blind harnesses, whose spend the total can't include (plan §8.2). */
+  untrackedRuns: number;
+  /** The masthead sentence summarizing the fleet's state. */
+  headline: string;
+}
+
+function plural(n: number, one: string, many = `${one}s`): string {
+  return n === 1 ? one : many;
+}
+
+function fleetHeadline(active: number, awaiting: number, resolved: number, repos: number): string {
+  if (active > 0 && awaiting > 0) {
+    return `${active} ${plural(active, 'agent')} at work — ${awaiting} ${plural(awaiting, 'run')} ${plural(awaiting, 'needs', 'need')} you.`;
+  }
+  if (active > 0) {
+    return `${active} ${plural(active, 'agent')} at work across ${repos} ${plural(repos, 'repository', 'repositories')}.`;
+  }
+  if (awaiting > 0) {
+    return `${awaiting} ${plural(awaiting, 'run awaits', 'runs await')} your attention.`;
+  }
+  if (resolved > 0) {
+    return `All quiet — ${resolved} ${plural(resolved, 'run')} resolved to date.`;
+  }
+  return 'Ready when you are. Enroll a repository to begin.';
+}
+
+/**
+ * Fleet-wide, all-time aggregates for the home page's masthead + stat band. Everything derives from
+ * the runs already on screen (kept live by the SSE stream), so the page needs no extra endpoint.
+ */
+export function fleetStatsModel(runs: Run[] | undefined): FleetStatsModel {
+  const all = runs ?? [];
+  const repoSet = new Set(all.map((r) => r.repoRef));
+  let active = 0, awaiting = 0, resolved = 0, tokens = 0, cost = 0, untrackedRuns = 0;
+  for (const r of all) {
+    if (ACTIVE_STATUSES.has(r.status)) active += 1;
+    else if (WAITING_STATUSES.has(r.status)) awaiting += 1;
+    else resolved += 1;
+    tokens += r.tokensUsed ?? 0;
+    if (tracksCost(r.harness)) cost += r.costUsed ?? 0;
+    else untrackedRuns += 1;
+  }
+  return {
+    totalRuns: all.length,
+    active,
+    awaiting,
+    resolved,
+    repos: repoSet.size,
+    tokens,
+    cost,
+    untrackedRuns,
+    headline: fleetHeadline(active, awaiting, resolved, repoSet.size),
+  };
+}
+
+/** One repository row in the home page's ledger: enrollment info merged with run-derived aggregates. */
+export interface RepoLedgerRow {
+  repoRef: string;
+  /** Whether the daemon has this repo enrolled (`GET /repos`); a repo seen only via runs shows a hint. */
+  enrolled: boolean;
+  baseBranch: string;
+  runs: number;
+  active: number;
+  awaiting: number;
+  needsHuman: number;
+  resolved: number;
+  tokens: number;
+  cost: number;
+  costLabel: string;
+  /** Most recent `updatedAt` across the repo's runs (ISO), or `null` for an idle repo. */
+  lastActivity: string | null;
+}
+
+/**
+ * The home page's repositories ledger: every enrolled repo (even idle ones — they were deliberately
+ * added) plus any repo discovered from runs alone (an older enrollment the daemon no longer lists).
+ * Sorted by most recent activity, idle repos last. Pure, so it is unit-tested with the other models.
+ */
+export function repoLedgerModel(repos: Repo[] | undefined, runs: Run[] | undefined): RepoLedgerRow[] {
+  const rows = new Map<string, RepoLedgerRow>();
+  const blank = (repoRef: string): RepoLedgerRow => ({
+    repoRef, enrolled: false, baseBranch: '', runs: 0, active: 0, awaiting: 0, needsHuman: 0,
+    resolved: 0, tokens: 0, cost: 0, costLabel: '$0.00', lastActivity: null,
+  });
+  for (const repo of repos ?? []) {
+    rows.set(repo.repoRef, { ...blank(repo.repoRef), enrolled: true, baseBranch: repo.baseBranch });
+  }
+  for (const r of runs ?? []) {
+    const row = rows.get(r.repoRef) ?? rows.set(r.repoRef, blank(r.repoRef)).get(r.repoRef)!;
+    row.runs += 1;
+    if (ACTIVE_STATUSES.has(r.status)) row.active += 1;
+    else if (WAITING_STATUSES.has(r.status)) row.awaiting += 1;
+    else row.resolved += 1;
+    if (r.status === 'needs_human') row.needsHuman += 1;
+    row.tokens += r.tokensUsed ?? 0;
+    if (tracksCost(r.harness)) row.cost += r.costUsed ?? 0;
+    if (row.lastActivity === null || r.updatedAt > row.lastActivity) row.lastActivity = r.updatedAt;
+    row.costLabel = `$${row.cost.toFixed(2)}`;
+  }
+  return [...rows.values()].sort((a, b) => {
+    if (a.lastActivity !== b.lastActivity) return (b.lastActivity ?? '') < (a.lastActivity ?? '') ? -1 : 1;
+    return a.repoRef.localeCompare(b.repoRef);
+  });
+}
+
+/** A run waiting on the operator, for the home page's "needs attention" list. */
+export interface AttentionRow {
+  id: number;
+  issueRef: string;
+  repoRef: string;
+  status: RunStatus;
+  statusClass: string;
+  /** One-line, human phrasing of *why* it waits (escalated / asked a question / blocked on deps). */
+  label: string;
+  updatedAt: string;
+}
+
+function attentionLabel(r: Run): string {
+  // A needs_human run's currentState is already the escalation state, so there's no "from" to name
+  // here (that detail lives in the run's transitions, which the board's inspector shows).
+  if (r.status === 'needs_human') return 'Escalated — inspect, fix, resume';
+  if (r.status === 'awaiting_input') return 'Asked a question on the issue — reply to continue';
+  return waitingOnLabel(r) || 'Blocked on dependencies';
+}
+
+/** Runs waiting on the operator, most recently touched first — the home page's attention queue. */
+export function attentionModel(runs: Run[] | undefined): AttentionRow[] {
+  return (runs ?? [])
+    .filter((r) => WAITING_STATUSES.has(r.status))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .map((r) => ({
+      id: r.id,
+      issueRef: r.issueRef,
+      repoRef: r.repoRef,
+      status: r.status,
+      statusClass: `af-stat af-stat-${r.status}`,
+      label: attentionLabel(r),
+      updatedAt: r.updatedAt,
+    }));
+}
+
+/** A compact row for the home page's recent-activity feed. */
+export interface RecentRow {
+  id: number;
+  issueRef: string;
+  repoRef: string;
+  state: string;
+  status: RunStatus;
+  statusClass: string;
+  tokens: number;
+  costLabel: string;
+  updatedAt: string;
+}
+
+/** The `limit` most recently touched runs across the fleet (archived ones included — it's a feed). */
+export function recentRunsModel(runs: Run[] | undefined, limit = 8): RecentRow[] {
+  return [...(runs ?? [])]
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .slice(0, limit)
+    .map((r) => ({
+      id: r.id,
+      issueRef: r.issueRef,
+      repoRef: r.repoRef,
+      state: r.currentState,
+      status: r.status,
+      statusClass: `af-stat af-stat-${r.status}`,
+      tokens: r.tokensUsed ?? 0,
+      costLabel: fmtRunCost(r.harness, r.costUsed, 2),
+      updatedAt: r.updatedAt,
+    }));
+}
+
 // --- fleet cost ceiling (Milestone 8 B3) --------------------------------------
 
 export interface CostStatusModel {

@@ -1,17 +1,20 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import FileRunBar from './lib/FileRunBar.svelte';
+  import Home from './lib/Home.svelte';
   import RepoTabs from './lib/RepoTabs.svelte';
   import Pipeline from './lib/Pipeline.svelte';
   import RunDetail from './lib/RunDetail.svelte';
   import Editor from './lib/Editor.svelte';
-  import { ui, loadConfig, loadRuns, loadCost, loadModels, loadSettings, selectRun, connectStream, banner } from './lib/store.svelte';
+  import { ui, initRouter, navigate, loadConfig, loadRuns, loadRepos, loadCost, loadModels, loadSettings, selectRun, connectStream, banner } from './lib/store.svelte';
   import { costStatusModel } from './lib/render';
 
   onMount(async () => {
+    initRouter();
     try {
       await loadConfig();
       await loadRuns();
+      await loadRepos();
       await loadCost();
       await loadModels();
       await loadSettings();
@@ -33,10 +36,11 @@
 
 <header class="af-topbar">
   <div class="af-wrap af-row">
-    <div class="af-brand">agent<span class="o">fleet</span><span>orchestrator</span></div>
+    <button type="button" class="af-brand" onclick={() => navigate('home')}>agent<span class="o">fleet</span><span>orchestrator</span></button>
     <nav class="af-nav">
-      <button type="button" class:on={ui.view === 'run'} onclick={() => (ui.view = 'run')}>Runs</button>
-      <button type="button" class:on={ui.view === 'editor'} onclick={() => (ui.view = 'editor')}>FSM editor</button>
+      <button type="button" class:on={ui.route === 'home'} onclick={() => navigate('home')}>Home</button>
+      <button type="button" class:on={ui.route === 'pipelines'} onclick={() => navigate('pipelines')}>Pipelines</button>
+      <button type="button" class:on={ui.route === 'editor'} onclick={() => navigate('editor')}>FSM editor</button>
     </nav>
     <div class="right">
       {#if cost.ceiling !== null}
@@ -44,23 +48,24 @@
           <span class="d"></span>{cost.label}{#if cost.overCeiling} · parked{/if}
         </span>
       {/if}
-      <span>config <b>{ui.config?.version ?? '…'}</b></span>
-      <span class="af-live {ui.conn}"><span class="d"></span>{connLabel}</span>
+      <span class="cfg">config <b>{ui.config?.version ?? '…'}</b></span>
+      <span class="af-live {ui.conn}" title={connLabel}><span class="d"></span>{connLabel}</span>
     </div>
   </div>
 </header>
 
-{#if ui.view === 'run'}
+{#if ui.route === 'pipelines'}
   <RepoTabs />
+  <FileRunBar />
 {/if}
-
-<FileRunBar />
 
 {#if ui.banner}
   <div class="af-banner af-banner-{ui.banner.kind}">{ui.banner.msg}</div>
 {/if}
 
-{#if ui.view === 'run'}
+{#if ui.route === 'home'}
+  <Home />
+{:else if ui.route === 'pipelines'}
   <Pipeline />
   <RunDetail />
 {:else}
