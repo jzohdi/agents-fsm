@@ -350,6 +350,100 @@ describe('Orchestrator — harness selection', () => {
 
     await orchestrator.settle();
   });
+
+  it('reports a per-harness model catalog via getModels(harness?), defaulting to the daemon harness', () => {
+    const { orchestrator } = setup();
+
+    // No argument → today's behavior, the *default* (claude-code) harness catalog (unchanged contract).
+    const dflt = orchestrator.getModels();
+    expect(dflt.harness).toBe('claude-code');
+    expect(dflt.models.map((m) => m.id)).toEqual(expect.arrayContaining(['opus', 'sonnet', 'haiku']));
+
+    // An explicit harness → that harness's catalog, so the dashboard can follow a non-default run's harness.
+    const cursor = orchestrator.getModels('cursor');
+    expect(cursor.harness).toBe('cursor');
+    expect(cursor.models.map((m) => m.id)).not.toContain('opus'); // a Claude model is not in Cursor's catalog
+    expect(cursor.models.length).toBeGreaterThan(0);
+    // The daemon's Claude `opus` default isn't a Cursor model, so it's reported as null rather than mislabeled.
+    expect(cursor.defaultModel).toBeNull();
+
+    // An unknown harness → an empty catalog (the 400 is enforced at the route, not here).
+    expect(orchestrator.getModels('gemini')).toEqual({ harness: null, models: [], defaultModel: null });
+  });
+});
+
+describe('Orchestrator — harness change (setHarness)', () => {
+  it('persists a new harness on a non-terminal run, returns it, and broadcasts the change', () => {
+    const { orchestrator, repo, events } = setup();
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    expect(run.harness).toBe('claude-code');
+
+    const updated = orchestrator.setHarness(run.id, 'cursor');
+    expect(updated.harness).toBe('cursor');
+    expect(repo.getRun(run.id)!.harness).toBe('cursor'); // persisted → survives an app restart
+    // Broadcast so connected dashboards update live (exactly one status event for this run's change).
+    expect(events.filter((e) => e.type === 'status' && e.runId === run.id).length).toBe(1);
+  });
+
+  it('clears both the model and effort overrides so no wrong-catalog model reaches the next stage', () => {
+    const { orchestrator, repo } = setup();
+    const run = orchestrator.start({ issueRef: 'o/r#1', model: 'opus', effort: 'high' });
+    expect(repo.getRun(run.id)!.modelOverride).toBe('opus');
+    expect(repo.getRun(run.id)!.effortOverride).toBe('high');
+
+    const updated = orchestrator.setHarness(run.id, 'cursor');
+    // The stored model/effort belong to the *old* harness's catalog, so both are cleared to the new
+    // harness's default — the core hazard the issue calls out.
+    expect(updated.modelOverride).toBeNull();
+    expect(updated.effortOverride).toBeNull();
+    expect(repo.getRun(run.id)!.modelOverride).toBeNull();
+    expect(repo.getRun(run.id)!.effortOverride).toBeNull();
+  });
+
+  it('leaves a paused run paused (no status change, no premature advance)', async () => {
+    const holder: { orchestrator?: Orchestrator } = {};
+    const handler = golden_with_interrupt('plan', (runId) => holder.orchestrator!.pause(runId));
+    const { orchestrator, repo } = setup({ handler });
+    holder.orchestrator = orchestrator;
+
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle(); // parks paused mid-pipeline
+    expect(repo.getRun(run.id)!.status).toBe('paused');
+    const parkedState = repo.getRun(run.id)!.currentState;
+
+    orchestrator.setHarness(run.id, 'cursor');
+    await orchestrator.settle(); // a harness change must NOT kick the run forward
+
+    const after = repo.getRun(run.id)!;
+    expect(after.status).toBe('paused'); // still parked — only Resume advances it
+    expect(after.currentState).toBe(parkedState); // its parked stage is untouched
+    expect(after.harness).toBe('cursor'); // …but the change is applied, ready for the next stage on resume
+  });
+
+  it('404s an unknown run and 409s a terminal run, writing nothing', async () => {
+    const { orchestrator, repo } = setup();
+    expectApiError(() => orchestrator.setHarness(99999, 'cursor'), 404);
+
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle(); // drives it to done (terminal)
+    expect(repo.getRun(run.id)!.status).toBe('done');
+
+    expectApiError(() => orchestrator.setHarness(run.id, 'cursor'), 409);
+    expect(repo.getRun(run.id)!.harness).toBe('claude-code'); // the 409 guard precedes any write
+  });
+
+  it('400s an unknown harness id and leaves the run (and its overrides) untouched', () => {
+    const { orchestrator, repo } = setup();
+    const run = orchestrator.start({ issueRef: 'o/r#1', model: 'opus', effort: 'high' });
+
+    expectApiError(() => orchestrator.setHarness(run.id, 'gemini'), 400);
+
+    // The validation precedes every write: harness unchanged AND the overrides are NOT cleared.
+    const after = repo.getRun(run.id)!;
+    expect(after.harness).toBe('claude-code');
+    expect(after.modelOverride).toBe('opus');
+    expect(after.effortOverride).toBe('high');
+  });
 });
 
 describe('Orchestrator — model selection', () => {
