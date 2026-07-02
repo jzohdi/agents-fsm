@@ -15,10 +15,11 @@
  *   POST /runs/:id/stop         POST /runs/:id/revert
  *   POST /runs/:id/archive      POST /runs/:id/unarchive
  *   POST /runs/:id/cost-override POST /runs/:id/model
+ *   POST /runs/:id/effort       POST /runs/:id/harness
  *   POST /runs/:id/check-pr-feedback
  *   GET  /repos                 POST /repos                 POST /repos/watch
  *   GET  /config                PUT /config
- *   GET  /cost                  GET /models
+ *   GET  /cost                  GET /models[?harness=]
  *   GET  /suggestions[?q=]      POST /scheduler/check
  *   GET  /settings              PUT /settings/default-harness
  *   GET  /stream[?runId=&repo=] GET /health
@@ -29,6 +30,7 @@ import { fileURLToPath } from 'node:url';
 
 import { ApiError, type Orchestrator } from './orchestrator';
 import { serveStatic } from './static';
+import { isHarnessId } from '../agent/harness';
 import type { RunStatus } from '../store/repository';
 import type { StreamEvent } from './stream';
 
@@ -70,8 +72,16 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
   // --- fleet cost status: the global ceiling (or null) + current active spend (Milestone 8 B3) ---
   if (method === 'GET' && path === '/cost') return sendJson(res, 200, orch.costStatus());
 
-  // --- harness model catalog: selectable models + the daemon default (the model dropdown) ---
-  if (method === 'GET' && path === '/models') return sendJson(res, 200, orch.getModels());
+  // --- harness model catalog: selectable models + the daemon default (the model dropdown). An
+  // optional `?harness=<id>` returns that harness's catalog (so RunDetail can follow a non-default
+  // run's harness); no param → the default harness. An unknown id → 400. ---
+  if (method === 'GET' && path === '/models') {
+    const harness = url.searchParams.get('harness') ?? undefined;
+    if (harness !== undefined && !isHarnessId(harness)) {
+      return sendError(res, new ApiError(400, `unknown harness "${harness}"`));
+    }
+    return sendJson(res, 200, orch.getModels(harness));
+  }
 
   // --- settings: the default harness + the operator's sticky pre-run model/effort selection ---
   if (method === 'GET' && path === '/settings') return sendJson(res, 200, orch.getSettings());
@@ -157,7 +167,7 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
   const runMatch = /^\/runs\/(\d+)$/.exec(path);
   if (runMatch && method === 'GET') return sendJson(res, 200, orch.getRunDetail(Number(runMatch[1])));
 
-  const actionMatch = /^\/runs\/(\d+)\/(pause|resume|stop|revert|archive|unarchive|cost-override|model|effort)$/.exec(path);
+  const actionMatch = /^\/runs\/(\d+)\/(pause|resume|stop|revert|archive|unarchive|cost-override|model|effort|harness)$/.exec(path);
   if (actionMatch && method === 'POST') {
     const id = Number(actionMatch[1]);
     switch (actionMatch[2]) {
@@ -204,6 +214,16 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
           return sendError(res, new ApiError(400, '"effort" (string, or null to clear) is required'));
         }
         return sendJson(res, 200, orch.setEffort(id, raw));
+      }
+      case 'harness': {
+        // `harness`: a harness id to run this run under on its next stage. Must be a non-empty string
+        // (unlike model/effort, there is no "clear to default" — a run always has a harness). The
+        // orchestrator validates the id (400 unknown) and clears the run's model/effort overrides.
+        const raw = (await readJson(req)).harness;
+        if (typeof raw !== 'string') {
+          return sendError(res, new ApiError(400, '"harness" (string) is required'));
+        }
+        return sendJson(res, 200, orch.setHarness(id, raw));
       }
     }
   }

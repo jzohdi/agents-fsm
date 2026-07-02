@@ -599,6 +599,15 @@ export class Repository {
   }
 
   /**
+   * Change a run's pinned harness. The runner resolves the executor per-stage via
+   * `harnesses.for(run.harness)`, reading this fresh each stage, so a change takes effect on the run's
+   * **next** stage (the current in-flight stage keeps its harness). Persisted → survives an app restart.
+   */
+  setRunHarness(id: number, harness: string): void {
+    this.db.prepare(`UPDATE runs SET harness = ?, updated_at = ${NOW} WHERE id = ?`).run(harness, id);
+  }
+
+  /**
    * Total `cost_used` across **active** (non-terminal) runs — the input to the global cost ceiling
    * (M8 B3). Terminal runs (`done`/`stopped`) are excluded, so finishing/stopping a run frees ceiling
    * headroom. Returns 0 when there are no active runs.

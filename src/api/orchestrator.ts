@@ -474,6 +474,31 @@ export class Orchestrator {
     return run;
   }
 
+  /**
+   * Change a **non-terminal** run's harness (the dashboard's harness selector). Takes effect on the
+   * run's **next** stage — the runner resolves `harnesses.for(run.harness)` per stage — while the
+   * current in-flight stage keeps its harness (no `kick`; the run advances on its own event flow, and a
+   * paused run only advances on Resume). Refuses (`409`) a terminal run and (`400`) an unknown harness id.
+   * Because the model catalog is per-harness, a `model_override`/`effort_override` from the old harness
+   * may be invalid under the new one, so **both overrides are cleared** — the run falls back to the new
+   * harness's default, guaranteeing no wrong-catalog model reaches the next stage.
+   */
+  setHarness(runId: number, harness: string): Run {
+    const existing = this.requireRun(runId); // 404
+    if (TERMINAL_STATUSES.has(existing.status)) {
+      throw new ApiError(409, `cannot set the harness for a "${existing.status}" run — it has no further stages`);
+    }
+    if (!isHarnessId(harness)) throw new ApiError(400, `unknown harness "${harness}"`);
+    this.repo.setRunHarness(runId, harness);
+    // The stored model/effort belong to the *old* harness's catalog and may be invalid under the new one,
+    // so clear both — the run falls back to the new harness's default (mirrors `setDefaultHarness`).
+    this.repo.setRunModelOverride(runId, null);
+    this.repo.setRunEffortOverride(runId, null);
+    const run = this.requireRun(runId);
+    this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
+    return run;
+  }
+
   /** The reason `effort` is not valid for `harness`+`modelId` (a 400 message), or `null` when it's fine.
    *  Shared by `start`, `setEffort`, and the persisted-default fallback so all three validate identically. */
   private effortError(harness: string, modelId: string | null, effort: string): string | null {
@@ -646,12 +671,15 @@ export class Orchestrator {
   }
 
   /**
-   * The default harness's selectable models + the daemon's default model (what a run without an override
-   * uses) — powers the dashboard's per-run model dropdown (`GET /models`). Resolves the catalog for the
-   * default harness; with no catalog configured (or resolver) the model list is empty.
+   * A harness's selectable models + the daemon's default model (what a run without an override uses) —
+   * powers the dashboard's per-run model dropdown (`GET /models`, optionally `?harness=<id>`). Resolves
+   * the catalog for the requested harness, defaulting to the daemon's default harness (so a no-arg call
+   * preserves today's behavior); with no catalog configured (or resolver) the model list is empty. An
+   * unknown harness id yields an empty catalog here — the `400` is enforced at the route layer.
    */
-  getModels(): { harness: string | null; models: HarnessCatalog['models']; defaultModel: string | null } {
-    const catalog = this.catalogFor?.(this.defaultHarness);
+  getModels(harness?: string): { harness: string | null; models: HarnessCatalog['models']; defaultModel: string | null } {
+    const target = harness ?? this.defaultHarness;
+    const catalog = this.catalogFor?.(target);
     // Only report a default model that's actually a selectable model in the shown catalog — so it stays
     // consistent with the catalog even after a runtime harness change (the daemon's configured
     // `defaultModel` is the Claude `--model`, meaningless once the default harness is another harness).
