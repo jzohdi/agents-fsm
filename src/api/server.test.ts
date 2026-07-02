@@ -126,6 +126,58 @@ describe('HTTP API', () => {
     expect(bad.status).toBe(400);
   });
 
+  it('threads an optional pre-selected model on POST /runs, seeding the override or 400ing a bad one', async () => {
+    const { base } = await start();
+
+    // A valid model for the chosen harness seeds the run's override.
+    const withModel = await fetch(`${base}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ issueRef: 'o/r#1', model: 'sonnet' }),
+    });
+    expect(withModel.status).toBe(201);
+    expect((await withModel.json() as { modelOverride: string | null }).modelOverride).toBe('sonnet');
+
+    // A model the chosen harness doesn't list (a Cursor id on the default claude-code harness) → 400.
+    const bad = await fetch(`${base}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ issueRef: 'o/r#2', model: 'gpt-5.4-high' }),
+    });
+    expect(bad.status).toBe(400);
+  });
+
+  it('threads pre-start effort on POST /runs and persists the sticky default via PUT /settings/default-model', async () => {
+    const { base } = await start();
+    const json = (r: Response) => r.json() as Promise<Record<string, unknown>>;
+
+    // Pre-start effort is stamped on the run alongside the model (read from the immediate create response).
+    const run = await fetch(`${base}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ issueRef: 'o/r#1', model: 'opus', effort: 'high' }),
+    }).then(json);
+    expect(run.effortOverride).toBe('high');
+
+    // An unknown effort level at start → 400 (validated against the chosen model).
+    const badEffort = await fetch(`${base}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ issueRef: 'o/r#2', model: 'opus', effort: 'ultra' }),
+    });
+    expect(badEffort.status).toBe(400);
+
+    // The sticky default: persist a model+effort, then read it back through GET /settings.
+    const saved = await fetch(`${base}/settings/default-model`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'sonnet', effort: 'xhigh' }),
+    }).then(json);
+    expect(saved).toMatchObject({ defaultModel: 'sonnet', defaultEffort: 'xhigh' });
+    const settings = await fetch(`${base}/settings`).then(json);
+    expect(settings).toMatchObject({ defaultModel: 'sonnet', defaultEffort: 'xhigh' });
+  });
+
   it('maps command errors to status codes', async () => {
     const { base, orchestrator } = await start();
 
@@ -360,6 +412,22 @@ describe('HTTP API', () => {
 
     const webRuns = (await (await fetch(`${base}/runs?repo=ACME/WEB`)).json()) as Array<{ repoRef: string }>;
     expect(webRuns.map((r) => r.repoRef)).toEqual(['acme/web']); // case-insensitive filter
+  });
+
+  it('toggles continuous mode via POST /repos/watch (Milestone 11)', async () => {
+    const { base } = await start();
+    await fetch(`${base}/repos`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web' }) });
+
+    const on = await fetch(`${base}/repos/watch`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web', watch: true, label: 'fleet: go' }) });
+    expect(on.status).toBe(200);
+    expect(await on.json()).toMatchObject({ repoRef: 'acme/web', watch: true, watchLabel: 'fleet: go' });
+
+    // Watching an unenrolled repo is a 404; a non-boolean `watch` is a 400.
+    expect((await fetch(`${base}/repos/watch`, { method: 'POST', body: JSON.stringify({ repoRef: 'no/such', watch: true }) })).status).toBe(404);
+    expect((await fetch(`${base}/repos/watch`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web', watch: 'yes' }) })).status).toBe(400);
+
+    const off = await fetch(`${base}/repos/watch`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web', watch: false }) });
+    expect(await off.json()).toMatchObject({ watch: false });
   });
 
   it('filters the SSE stream by ?repo', async () => {

@@ -174,6 +174,23 @@ describe('AgentRunner — harness request', () => {
     }
   });
 
+  it('forwards the run reasoning effort to the frontier phases only, not the cheap simplify pass', async () => {
+    const seen: AgentRunRequest[] = [];
+    const handler: StubHandler = (req) => {
+      seen.push(req);
+      if (req.phase === 'self_review') return { output: { acceptable: false, notes: 'again' } }; // force simplify to run
+      return { output: { requestedTransition: 'proceed' } };
+    };
+    const { repo, runner, run } = setup(handler, { plan: { phases: ['produce', 'self_review', 'simplify'], reviewCap: 1 } });
+    repo.setRunEffortOverride(run.id, 'high');
+
+    await runner.runStage(repo.getRun(run.id)!);
+
+    // produce uses the frontier role, so it carries the effort; simplify is the cheap role, left untouched.
+    expect(seen.find((r) => r.phase === 'produce')!.effort).toBe('high');
+    expect(seen.find((r) => r.phase === 'simplify')!.effort).toBeUndefined();
+  });
+
   it('omits allowedTools and the working dir for a tree-less triage stage', async () => {
     const seen: AgentRunRequest[] = [];
     const { runner, run } = setup(

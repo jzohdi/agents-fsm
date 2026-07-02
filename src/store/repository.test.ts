@@ -532,8 +532,37 @@ describe('repos registry (Milestone 8 Phase A)', () => {
       baseBranch: 'main', // defaulted
       cloneUrl: null,
       localRepo: null,
+      watch: false, // continuous mode is opt-in (Milestone 11)
+      watchLabel: null,
     });
     expect(repo.getRepo('owner/repo')).toEqual(enrolled);
+  });
+
+  it('toggles watch independently of the adapter config (Milestone 11)', () => {
+    repo.upsertRepo({ repoRef: 'o/r', workingRoot: './a' });
+
+    repo.setRepoWatch('o/r', true);
+    expect(repo.getRepo('o/r')).toMatchObject({ watch: true, watchLabel: null });
+
+    // A custom override label…
+    repo.setRepoWatch('o/r', true, 'fleet: go');
+    expect(repo.getRepo('o/r')).toMatchObject({ watch: true, watchLabel: 'fleet: go' });
+
+    // …survives a re-enroll (upsert never touches the watch columns)…
+    repo.upsertRepo({ repoRef: 'o/r', workingRoot: './b', baseBranch: 'develop' });
+    expect(repo.getRepo('o/r')).toMatchObject({ workingRoot: './b', watch: true, watchLabel: 'fleet: go' });
+
+    // …and `null` resets the label to the default; omitting the label leaves it as-is.
+    repo.setRepoWatch('o/r', true, null);
+    expect(repo.getRepo('o/r')?.watchLabel).toBeNull();
+    repo.setRepoWatch('o/r', false);
+    expect(repo.getRepo('o/r')).toMatchObject({ watch: false, watchLabel: null });
+  });
+
+  it('setRepoWatch matches the ref case-insensitively', () => {
+    repo.upsertRepo({ repoRef: 'Acme/Web', workingRoot: './a' });
+    repo.setRepoWatch('acme/web', true);
+    expect(repo.getRepo('Acme/Web')?.watch).toBe(true);
   });
 
   it('upsert is idempotent on repo_ref and re-points the adapter config', () => {

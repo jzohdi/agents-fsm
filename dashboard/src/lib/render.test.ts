@@ -54,7 +54,7 @@ const FSM: FsmConfig = {
 const run = (over: Partial<Run> = {}): Run => ({
   id: 1, issueRef: 'o/r#1', repoRef: 'o/r', currentState: 'plan', status: 'running', fsmConfigVersion: 'v',
   prNumber: null, branch: null, tokensUsed: 10, costUsed: 0.5, agentRunsCount: 0, flags: {}, archivedAt: null, modelOverride: null,
-  harness: 'claude-code', createdAt: '', updatedAt: '', ...over,
+  effortOverride: null, harness: 'claude-code', createdAt: '', updatedAt: '', ...over,
 });
 
 describe('formatting', () => {
@@ -256,7 +256,12 @@ describe('fleetStatsModel (home masthead + stat band)', () => {
 
 describe('repoLedgerModel (home repositories ledger)', () => {
   const repo = (over: Partial<Repo> = {}): Repo => ({
-    repoRef: 'acme/web', cloneUrl: null, localRepo: null, workingRoot: '/tmp', baseBranch: 'main', ...over,
+    repoRef: 'acme/web', cloneUrl: null, localRepo: null, workingRoot: '/tmp', baseBranch: 'main', watch: false, watchLabel: null, ...over,
+  });
+
+  it('carries the enrolled repo\'s watch flag onto the ledger row (Milestone 11)', () => {
+    const rows = repoLedgerModel([repo({ repoRef: 'acme/web', watch: true })], []);
+    expect(rows[0]).toMatchObject({ enrolled: true, watch: true });
   });
 
   it('merges enrolled repos with run aggregates and sorts by most recent activity', () => {

@@ -1,7 +1,16 @@
 <script lang="ts">
-  import { ui, startRun, fetchSuggestions, setDefaultHarness } from './store.svelte';
+  import { ui, startRun, fetchSuggestions, setDefaultHarness, selectDefaultModel, selectDefaultEffort } from './store.svelte';
   import { humanizeHarness } from './render';
+  import ModelPicker from './ModelPicker.svelte';
+  import EffortSelect from './EffortSelect.svelte';
   import type { Suggestion } from './types';
+
+  // The model picker's catalog is the default harness's (GET /models follows the harness selector), so it
+  // only applies when that catalog is loaded and non-empty. `ui.selectedModel`/`ui.selectedEffort` are the
+  // sticky pre-run pick, stamped onto the run on submit and persisted as the default.
+  const models = $derived(ui.models && ui.models.models.length ? ui.models : null);
+  // The effort control appears only when the currently-picked model advertises effort levels.
+  const efforts = $derived(models?.models.find((m) => m.id === ui.selectedModel)?.efforts ?? []);
 
   let value = $state('');
   let open = $state(false);
@@ -122,6 +131,23 @@
           {#each ui.harnesses as h (h)}<option value={h}>{humanizeHarness(h)}</option>{/each}
         </select>
       </label>
+    {/if}
+    {#if models}
+      <!-- A plain wrapper (not a <label>): a <label> around the picker's button would forward a second
+           synthetic click to it, immediately re-closing the popover. -->
+      <div class="af-harness af-modelpick" title="Model for the new run (defaults to the harness default)">
+        <span class="hlab">model</span>
+        <ModelPicker
+          models={models.models}
+          value={ui.selectedModel}
+          defaultLabel={models.defaultModel}
+          onselect={selectDefaultModel}
+          ariaLabel="model for the new run"
+        />
+      </div>
+      {#if efforts.length}
+        <EffortSelect {efforts} value={ui.selectedEffort} onselect={selectDefaultEffort} ariaLabel="reasoning effort for the new run" />
+      {/if}
     {/if}
     <button type="submit" class="file-btn" disabled={!value.trim() || busy}>{busy ? 'Starting…' : 'Start run'}</button>
   </form>

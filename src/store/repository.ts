@@ -33,8 +33,10 @@ export interface Run {
   archivedAt: string | null;
   /** Operator override of the global cost ceiling (M8 B3): `next_step` = one more stage, `full` = the whole run, `null` = none. */
   costOverride: CostOverride | null;
-  /** Per-run harness model override (the dashboard's model dropdown); `null` = the daemon default. Read by the runner at each stage, so a change takes effect on the next stage. */
+  /** Per-run harness model override (the dashboard's model picker); `null` = the daemon default. Read by the runner at each stage, so a change takes effect on the next stage. */
   modelOverride: string | null;
+  /** Per-run reasoning-effort override (Claude Code's `--effort`); `null` = the model default. Read by the runner at each stage. */
+  effortOverride: string | null;
   /** Which agent harness runs this, pinned at start (a {@link HarnessId} from the agent layer; kept as a
    *  plain string here so the store never depends upward on the agent layer). Defaults to `claude-code`. */
   harness: string;
@@ -103,6 +105,10 @@ export interface CreateRunInput {
   fsmConfigVersion: string;
   /** Which harness runs this ({@link HarnessId}). Omit → the column default (`claude-code`). */
   harness?: string;
+  /** Optional harness model to start the run on (the pre-start model picker); omit/`null` → daemon default. */
+  model?: string | null;
+  /** Optional reasoning effort to start the run on (Claude Code's `--effort`); omit/`null` → model default. */
+  effort?: string | null;
 }
 
 /** Optional filters for {@link Repository.listRuns}; omit a field to not filter on it. */
@@ -120,6 +126,12 @@ export interface Repo {
   localRepo: string | null;
   workingRoot: string;
   baseBranch: string;
+  /** Continuous mode (Milestone 11): when true the Issue Intake Poller auto-picks this repo's eligible
+   *  open issues. Off unless explicitly enabled — enrolling a repo doesn't imply watching it. */
+  watch: boolean;
+  /** The label that bypasses the intake eligibility guards (issue #3); `null` → the default `agent help
+   *  wanted`. Only meaningful while {@link watch} is on. */
+  watchLabel: string | null;
   createdAt: string;
 }
 
@@ -214,6 +226,7 @@ interface RunRow {
   archived_at: string | null;
   cost_override: CostOverride | null;
   model_override: string | null;
+  effort_override: string | null;
   harness: string;
   depends_on: string;
   priority: number;
@@ -262,6 +275,8 @@ interface RepoRow {
   local_repo: string | null;
   working_root: string;
   base_branch: string;
+  watch: number;
+  watch_label: string | null;
   created_at: string;
 }
 
@@ -290,6 +305,7 @@ function mapRun(r: RunRow): Run {
     archivedAt: r.archived_at,
     costOverride: r.cost_override,
     modelOverride: r.model_override,
+    effortOverride: r.effort_override,
     harness: r.harness,
     dependsOn: JSON.parse(r.depends_on) as number[],
     priority: r.priority,
@@ -340,6 +356,8 @@ function mapRepo(r: RepoRow): Repo {
     localRepo: r.local_repo,
     workingRoot: r.working_root,
     baseBranch: r.base_branch,
+    watch: r.watch !== 0,
+    watchLabel: r.watch_label,
     createdAt: r.created_at,
   };
 }
@@ -394,6 +412,22 @@ export class Repository {
     return rows.map(mapRepo);
   }
 
+  /**
+   * Turn continuous mode on/off for a repo (Milestone 11), independent of its adapter config — so a
+   * re-enroll (`upsertRepo`, which never touches these columns) can't accidentally reset the watch. When
+   * `label` is omitted the override label is left as-is; pass `null` to reset it to the default, or a
+   * string to set a custom one. No-op on an unenrolled repo (0 rows updated).
+   */
+  setRepoWatch(repoRef: string, watch: boolean, label?: string | null): void {
+    if (label === undefined) {
+      this.db.prepare('UPDATE repos SET watch = ? WHERE repo_ref = ? COLLATE NOCASE').run(watch ? 1 : 0, repoRef);
+    } else {
+      this.db
+        .prepare('UPDATE repos SET watch = ?, watch_label = ? WHERE repo_ref = ? COLLATE NOCASE')
+        .run(watch ? 1 : 0, label, repoRef);
+    }
+  }
+
   // --- settings (a tiny key/value store) ---------------------------------------
 
   /** Read a daemon setting by key (e.g. `default_harness`), or `undefined` if it was never set. */
@@ -402,8 +436,13 @@ export class Repository {
     return row?.value;
   }
 
-  /** Set (upsert) a daemon setting — the persisted default harness the dashboard's selector writes. */
-  setSetting(key: string, value: string): void {
+  /** Set (upsert) a daemon setting, or clear it with `null` (deletes the row, so {@link getSetting}
+   *  reads back `undefined`) — e.g. the persisted default harness/model/effort the dashboard writes. */
+  setSetting(key: string, value: string | null): void {
+    if (value === null) {
+      this.db.prepare('DELETE FROM settings WHERE key = ?').run(key);
+      return;
+    }
     this.db
       .prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
       .run(key, value);
@@ -416,10 +455,10 @@ export class Repository {
     // of truth for the default, and forward-ready for per-run harness selection.
     const info = this.db
       .prepare(
-        `INSERT INTO runs (issue_ref, repo_ref, current_state, status, fsm_config_version, harness)
-         VALUES (?, ?, ?, 'running', ?, COALESCE(?, 'claude-code'))`,
+        `INSERT INTO runs (issue_ref, repo_ref, current_state, status, fsm_config_version, harness, model_override, effort_override)
+         VALUES (?, ?, ?, 'running', ?, COALESCE(?, 'claude-code'), ?, ?)`,
       )
-      .run(input.issueRef, input.repoRef, input.initialState, input.fsmConfigVersion, input.harness ?? null);
+      .run(input.issueRef, input.repoRef, input.initialState, input.fsmConfigVersion, input.harness ?? null, input.model ?? null, input.effort ?? null);
     const run = this.getRun(Number(info.lastInsertRowid));
     if (!run) throw new Error('createRun: row vanished immediately after insert');
     return run;
@@ -549,6 +588,14 @@ export class Repository {
    */
   setRunModelOverride(id: number, model: string | null): void {
     this.db.prepare(`UPDATE runs SET model_override = ?, updated_at = ${NOW} WHERE id = ?`).run(model, id);
+  }
+
+  /**
+   * Set (or clear, with `null`) a run's reasoning-effort override (Claude Code's `--effort`). Like the
+   * model override, the runner reads it fresh at each stage, so a change takes effect on the next stage.
+   */
+  setRunEffortOverride(id: number, effort: string | null): void {
+    this.db.prepare(`UPDATE runs SET effort_override = ?, updated_at = ${NOW} WHERE id = ?`).run(effort, id);
   }
 
   /**

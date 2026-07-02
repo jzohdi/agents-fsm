@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { ui, control, revertRun, overrideCost, setModel, checkPrFeedback } from './store.svelte';
-  import type { HarnessModel } from './types';
+  import { ui, control, revertRun, overrideCost, setModel, setEffort, checkPrFeedback } from './store.svelte';
+  import ModelPicker from './ModelPicker.svelte';
+  import EffortSelect from './EffortSelect.svelte';
   import { telemetryModel, escalationModel, activityLane, costStatusModel, issueUrl, prUrl, branchUrl, isWatchingPrFeedback, fmtRunCost, fmtDuration, fmtTokens, escapeHtml, humanizeState, humanizeHarness, schedulingLabel } from './render';
   import StateMachine from './StateMachine.svelte';
   import ScrollArea from './ScrollArea.svelte';
@@ -41,16 +42,12 @@
   // The run's effective model for the live badge: its override, else the default (only when the catalog
   // is this run's harness), else the generic "default".
   const model = $derived(run?.modelOverride ?? (catalogMatchesRun ? ui.models?.defaultModel : null) ?? 'default');
-  // Catalog models grouped for the dropdown's <optgroup>s (ungrouped models under the '' key).
-  const modelGroups = $derived.by(() => {
-    const cat = ui.models;
-    if (!cat) return [] as Array<[string, HarnessModel[]]>;
-    const m = new Map<string, HarnessModel[]>();
-    for (const hm of cat.models) {
-      const g = hm.group ?? '';
-      (m.get(g) ?? m.set(g, []).get(g)!).push(hm);
-    }
-    return [...m.entries()];
+  // The effort control appears when the run's effective model (override, else the harness default) supports
+  // effort — so a Claude run can bump reasoning per-run, while a Cursor run (no effort) never shows it.
+  const runEfforts = $derived.by(() => {
+    if (!catalogMatchesRun) return [] as string[];
+    const id = run?.modelOverride ?? ui.models?.defaultModel;
+    return (id ? ui.models?.models.find((m) => m.id === id)?.efforts : undefined) ?? [];
   });
 
   let revertTo = $state('');
@@ -121,25 +118,21 @@
     </div>
     <div class="af-controls">
       {#if !terminal && catalogMatchesRun && ui.models!.models.length}
-        <label class="af-model">
+        <!-- A plain wrapper (not a <label>): a <label> around the picker's button would forward a second
+             synthetic click to it, immediately re-closing the popover. -->
+        <div class="af-model">
           <span class="lbl">model</span>
-          <select
-            value={run.modelOverride ?? ''}
-            onchange={(e) => setModel(run.id, e.currentTarget.value || null)}
-            aria-label="run model"
-          >
-            <option value="">Default{ui.models?.defaultModel ? ` — ${ui.models.defaultModel}` : ''}</option>
-            {#each modelGroups as [group, models] (group)}
-              {#if group}
-                <optgroup label={group}>
-                  {#each models as m (m.id)}<option value={m.id}>{m.label}</option>{/each}
-                </optgroup>
-              {:else}
-                {#each models as m (m.id)}<option value={m.id}>{m.label}</option>{/each}
-              {/if}
-            {/each}
-          </select>
-        </label>
+          <ModelPicker
+            models={ui.models!.models}
+            value={run.modelOverride}
+            defaultLabel={ui.models!.defaultModel}
+            onselect={(id) => setModel(run.id, id)}
+            ariaLabel="run model"
+          />
+        </div>
+        {#if runEfforts.length}
+          <EffortSelect efforts={runEfforts} value={run.effortOverride} onselect={(e) => setEffort(run.id, e)} ariaLabel="run reasoning effort" />
+        {/if}
       {/if}
       {#if run.status === 'running'}
         <button type="button" onclick={() => control('pause')}>Pause</button>

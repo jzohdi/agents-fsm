@@ -409,9 +409,11 @@ Swap the per-stage harness from a CLI subprocess to the **Claude Agent SDK**, in
 
 Choosing between the two executors is configuration, not a rewrite — a deployment can keep the subprocess executor or opt into the SDK one. Neither the FSM engine nor its tests change.
 
-### Milestone 11 — Repo auto-pickup / continuous mode (post-MVP)
+### Milestone 11 — Repo auto-pickup / continuous mode (**core shipped** — see §9.10)
 
 Point the orchestrator at a **whole repository** (not a single issue) and have it work the backlog on its own: pick up an open issue, drive it to a merge-ready PR, **wait for a human to merge that PR, then automatically start the next issue** — repeating until the backlog is empty. This is the "set it and let it run" mode the dashboard's new-run box hints at.
+
+**Shipped:** the opt-in per-repo `watch` flag (`repos.watch`, migration 10; toggled from the home-ledger **Watch** button or `POST /repos/watch`), the **Issue Intake Poller** (`src/loop/issue-intake-poller.ts` around the pure `src/loop/issue-intake.ts`) that admits the next eligible issue **sequentially (in-flight cap 1)** each poll tick, and the **safety guards** (owner-filed / unassigned / non-`[WIP]`, with an `agent help wanted` override label) that stop an untrusted issue from becoming an injection or cost vector — operating guide §9.10. Auto-picked issues go through the same `POST /runs` admission (dedup, cost ceiling, enrollment) as manual runs. *Still open:* a configurable cap > 1 (parallel pickup) and a label/milestone filter to pull from a subset of the backlog.
 
 It is mostly **composition of pieces already planned**, which is why it is cheap to add once they exist:
 - **Issue ingestion** for a repo: list open issues via the GitHub adapter (`gh issue list` / `gh search`, the same surface `suggestIssues` already uses) and create a run per issue — gated by a configurable in-flight cap (default **1**, i.e. strictly sequential).
@@ -781,15 +783,43 @@ overwrite your remembered choice) → the **persisted default** (set from the da
   run whose harness isn't the current default shows a small badge on its card.
 - **Daemon:** `npm start -- serve --harness cursor …` (or `FLEET_HARNESS=cursor npm start -- serve …`).
 - **One-shot CLI:** `npm start -- <owner/repo#issue> --repo <owner/repo> --harness cursor`.
-- **API:** `POST /runs { "issueRef": "...", "harness": "cursor" }` (omit → the default; an unknown id →
-  `400`). `GET /settings` returns the current default + selectable ids; `PUT /settings/default-harness
-  { "harness": "cursor" }` changes it live (no restart) and persists it.
+- **API:** `POST /runs { "issueRef": "...", "harness": "cursor", "model": "gpt-5", "effort": "high" }` (all
+  optional; omit `harness` → the default, omit `model`/`effort` → the persisted sticky default or the model
+  default; an unknown value → `400`). `GET /settings` returns the current default harness + selectable ids
+  + the persisted `defaultModel`/`defaultEffort`; `PUT /settings/default-harness { "harness": "cursor" }`
+  changes the harness, `PUT /settings/default-model { "model": ..., "effort": ... }` the sticky pick. Live
+  per-run overrides: `POST /runs/:id/model` and `POST /runs/:id/effort` (`null` clears).
+
+**Selecting a model + effort.** The *File a new run* bar has a searchable **model picker** next to the
+harness control — pick one to start the run on a specific model (validated against the chosen harness's
+catalog), or leave it on the harness default. When the picked model supports **reasoning effort** (Claude
+Code's `--effort`), an effort selector appears alongside it (`low`/`medium`/`high`/`xhigh`/`max`). The same
+picker + effort selector in the run inspector change a live run's model/effort for its **next** stage.
+
+Your harness, model, and effort selection is **sticky**: it persists as the default for later runs and
+across restarts (`PUT /settings/default-model`; `GET /settings` returns it), until you pick again. Changing
+the harness clears the model/effort default (they belong to that harness's catalog). `GET /models` returns
+the active harness's catalog, each model carrying its supported effort levels.
+
+**Reasoning effort by harness — two different mechanisms.** Claude Code takes a **separate `--effort` flag**
+(`low`/`medium`/`high`/`xhigh`/`max`; Sonnet 5 / Opus 4.7–4.8 / Fable 5 take all five, Haiku none) —
+unsupported levels degrade gracefully, so the model picker pairs it with an effort selector. **Cursor bakes
+the effort into the model id** (`gpt-5.5-high`, `gpt-5.5-extra-high`, `claude-opus-4-8-xhigh`) and it's
+*required* for most models — so the effort ladder shows as distinct entries in the picker (no separate
+selector), and picking `GPT-5.5 · High` runs `--model gpt-5.5-high`. Cursor's naming is non-uniform
+(`extra-high` vs `xhigh`; some models omit the suffix for their default), which is why the catalog lists
+concrete ids rather than synthesizing them.
 
 **Before running Cursor:**
 1. Install the `cursor-agent` CLI and authenticate it (`cursor-agent login` or `CURSOR_API_KEY`) — see §9.1.
-2. **Confirm the model ids.** The shipped Cursor model map/catalog (`src/agent/cursor-profile.ts`,
-   `src/agent/harness-models.ts`) uses *provisional* ids (`sonnet-4.5`, `gpt-5`); check them against
-   `cursor-agent --list-models` and adjust if they differ, or Cursor will reject `--model`.
+2. **The model ids come from `cursor-agent --list-models`** — the authoritative set the CLI accepts (each is
+   passed verbatim to `--model`). The picker's catalog is curated in `src/agent/cursor-models.json` from that
+   list; `CURSOR_MODEL_MAP`'s frontier/cheap targets (`src/agent/cursor-profile.ts`) must stay in it.
+
+   **Refreshing the list:** `npm run models:refresh` runs `cursor-agent --list-models`, reports which models
+   are new/removed, and (with `-- --write`) updates `cursor-models.json` — adding discovered ids and merging
+   while preserving your curated labels/costs (`-fast` speed variants are skipped). Skim the added entries
+   afterwards to curate labels/cost. Requires the CLI on PATH.
 
 **Caveats (accepted for now):**
 - **Cursor doesn't report token/cost usage**, so its runs record `0`. The global cost ceiling (§9.3) and
@@ -798,9 +828,9 @@ overwrite your remembered choice) → the **persisted default** (set from the da
 - **Cursor auth failures are non-fatal**: an unauthenticated `cursor-agent` escalates only *its own* runs
   to `needs_human` (with a login remedy in the reason) — Claude Code runs keep flowing. (A Claude auth
   failure still aborts the whole drain, as before.)
-- The per-run **model dropdown** appears only for a run whose harness matches the loaded catalog (i.e. the
-  current default's), so it never offers wrong-harness models; per-harness catalogs for off-default runs
-  are deferred.
+- The per-run **model picker** (in the run inspector) appears only for a run whose harness matches the
+  loaded catalog (i.e. the current default's), so it never offers wrong-harness models; per-harness
+  catalogs for off-default runs are deferred.
 
 ### 9.9 Order work with dependencies (multi-issue)
 
@@ -841,4 +871,29 @@ in the reason: fix the `depends_on` blocks on the issues, then **Resume** each m
 first finishes); `POST /scheduler/check` (or waiting a tick) re-evaluates immediately; each run's FSM
 state is mirrored on its PR as an **`af:<state>` label** (best-effort, informational). Dependency
 workflows need the **daemon** (§9.3) — the one-shot CLI exits with a dependent run still parked.
+
+### 9.10 Watch a repo and let it work the backlog (continuous mode)
+
+Instead of filing each run by hand, put a repo in **continuous mode** and the daemon picks up its open
+issues on its own (Milestone 11). Enrolling a repo (§9.3) only makes it *serviceable*; watching it is a
+separate opt-in — flip the **Watch** toggle on the repo's row in the dashboard's home ledger, or
+`POST /repos/watch {"repoRef":"owner/name","watch":true}`. From then on the **Issue Intake Poller**
+(on `--poll-interval`, the same `--poll-timeout 0` disables it) scans that repo's open issues each tick
+and starts a run for the next eligible one.
+
+**Sequential by default (in-flight cap 1):** a watched repo runs **one issue at a time**. The next
+issue is admitted only when the current run's issue **closes** (a human merges its `Closes #N` PR — the
+same no-stacked-PRs discipline as §3.5) or the run is **stopped**. A run parked at `needs_human` holds
+the slot, so a broken issue pauses the queue rather than silently skipping ahead. Issues are picked up
+**oldest first** (issue number ascending).
+
+**Guards — an open issue is untrusted input.** To keep a stranger's issue from becoming an injection
+or cost vector, the poller only auto-picks an issue that is (1) **filed by the repo owner**, (2)
+**unassigned**, and (3) **not marked `[WIP]`** in its title or body. Any issue the owner explicitly
+opts in — by adding the **`agent help wanted`** label (configurable per repo via the `label` field of
+`POST /repos/watch`) — bypasses all three. A skipped issue is logged once (`[issue-intake] skipping
+…`) with the reason, so you can see *why* something wasn't picked up. Everything else flows through the
+same `POST /runs` admission as a manual run — the one-active-run-per-issue guard, the global cost
+ceiling, and enrollment all still apply — so continuous mode is admission control, not a bypass. It
+**never auto-merges**: a human still reviews and merges every PR. Needs the **daemon** (§9.3).
 

@@ -277,6 +277,33 @@ describe('Orchestrator — harness selection', () => {
     }
   });
 
+  it('stamps a pre-selected model, defaults when omitted, and validates it against the chosen harness', () => {
+    const { orchestrator, repo } = setup();
+
+    // A valid model for the (default) harness seeds the run's override at creation.
+    const withModel = orchestrator.start({ issueRef: 'o/r#1', model: 'sonnet' });
+    expect(repo.getRun(withModel.id)!.modelOverride).toBe('sonnet');
+
+    // Omitted / empty → no override (the daemon default applies).
+    expect(repo.getRun(orchestrator.start({ issueRef: 'o/r#2' }).id)!.modelOverride).toBeNull();
+    expect(repo.getRun(orchestrator.start({ issueRef: 'o/r#3', model: '' }).id)!.modelOverride).toBeNull();
+
+    // The model is validated against the *chosen* harness's catalog: a Cursor model is fine for a cursor
+    // run but rejected for the default (claude-code) harness, and an unknown model is always a 400.
+    const cursorRun = orchestrator.start({ issueRef: 'o/r#4', harness: 'cursor', model: 'gpt-5.4-high' });
+    expect(repo.getRun(cursorRun.id)!.modelOverride).toBe('gpt-5.4-high');
+
+    expect(() => orchestrator.start({ issueRef: 'o/r#5', model: 'gpt-5.4-high' })).toThrow(
+      /unknown model "gpt-5.4-high" for the claude-code harness/,
+    );
+    try {
+      orchestrator.start({ issueRef: 'o/r#6', model: 'no-such-model' });
+      throw new Error('expected an unknown model to be rejected');
+    } catch (err) {
+      expect((err as ApiError).status).toBe(400);
+    }
+  });
+
   it('reports + changes the default harness, persisting it and re-pointing getModels (no restart)', () => {
     const { orchestrator, repo } = setup();
 
@@ -317,8 +344,8 @@ describe('Orchestrator — harness selection', () => {
     const cursorRun = orchestrator.start({ issueRef: 'o/r#1', harness: 'cursor' });
 
     // A cursor model is accepted for a cursor run; a Claude-only model is a 400 (wrong harness).
-    orchestrator.setModel(cursorRun.id, 'sonnet-4.5');
-    expect(repo.getRun(cursorRun.id)!.modelOverride).toBe('sonnet-4.5');
+    orchestrator.setModel(cursorRun.id, 'claude-4.5-sonnet');
+    expect(repo.getRun(cursorRun.id)!.modelOverride).toBe('claude-4.5-sonnet');
     expect(() => orchestrator.setModel(cursorRun.id, 'opus')).toThrow(/unknown model "opus" for the cursor harness/);
 
     await orchestrator.settle();
@@ -377,6 +404,77 @@ describe('Orchestrator — model selection', () => {
     expect(seen.plan).toBe('frontier'); // the stage that made the change keeps the model it started with
     expect(seen.plan_review).toBe('sonnet'); // the NEXT stage's fresh dispatch picks up the override
     expect(seen.tdd).toBe('sonnet'); // …and every stage after it
+  });
+});
+
+describe('Orchestrator — reasoning effort', () => {
+  it('stamps a pre-start effort, and validates it against the harness + model', () => {
+    const { orchestrator, repo } = setup();
+
+    // A valid effort for an effort-capable model is stamped on the run.
+    const run = orchestrator.start({ issueRef: 'o/r#1', model: 'opus', effort: 'high' });
+    expect(repo.getRun(run.id)!.effortOverride).toBe('high');
+
+    // An unknown level, a model that doesn't support effort, and the cursor harness are each a 400.
+    expect(() => orchestrator.start({ issueRef: 'o/r#2', model: 'opus', effort: 'ultra' })).toThrow(/unknown effort/);
+    expect(() => orchestrator.start({ issueRef: 'o/r#3', model: 'haiku', effort: 'high' })).toThrow(/doesn't support the "high" effort/);
+    expect(() => orchestrator.start({ issueRef: 'o/r#4', harness: 'cursor', effort: 'high' })).toThrow(/cursor harness doesn't support reasoning effort/);
+  });
+
+  it('sets, clears, and validates a run effort override, and drops it when the model stops supporting it', () => {
+    const { orchestrator, repo, events } = setup();
+    const run = orchestrator.start({ issueRef: 'o/r#1', model: 'opus' });
+
+    orchestrator.setEffort(run.id, 'xhigh');
+    expect(repo.getRun(run.id)!.effortOverride).toBe('xhigh');
+    expect(events.some((e) => e.type === 'status' && e.runId === run.id)).toBe(true);
+
+    // Switching to a model without effort support silently clears the now-invalid effort.
+    orchestrator.setModel(run.id, 'haiku');
+    expect(repo.getRun(run.id)!.effortOverride).toBeNull();
+
+    // An unknown level is a 400 and nothing is stored.
+    orchestrator.setModel(run.id, 'opus');
+    orchestrator.setEffort(run.id, 'medium');
+    expect(() => orchestrator.setEffort(run.id, 'ultra')).toThrow(/unknown effort/);
+    expect(repo.getRun(run.id)!.effortOverride).toBe('medium');
+
+    orchestrator.setEffort(run.id, null); // clear
+    expect(repo.getRun(run.id)!.effortOverride).toBeNull();
+  });
+});
+
+describe('Orchestrator — sticky defaults (persisted pre-run selection)', () => {
+  it('persists the pre-run model + effort and pre-fills them back through getSettings', () => {
+    const { orchestrator } = setup();
+    expect(orchestrator.getSettings().defaultModel).toBeNull();
+
+    const saved = orchestrator.setDefaultModel('opus', 'high');
+    expect(saved).toEqual({ defaultModel: 'opus', defaultEffort: 'high' });
+    const settings = orchestrator.getSettings();
+    expect(settings.defaultModel).toBe('opus');
+    expect(settings.defaultEffort).toBe('high');
+
+    // An effort that doesn't fit the model is dropped (not a 400) so the stored pair stays consistent.
+    expect(orchestrator.setDefaultModel('haiku', 'high')).toEqual({ defaultModel: 'haiku', defaultEffort: null });
+    // A model the harness doesn't list is a 400.
+    expect(() => orchestrator.setDefaultModel('gpt-4', null)).toThrow(/unknown model/);
+  });
+
+  it('applies the persisted default when a start request omits model/effort, and clears it on harness change', () => {
+    const { orchestrator, repo } = setup();
+    orchestrator.setDefaultModel('opus', 'high');
+
+    // A start with no explicit model/effort falls back to the persisted default.
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    expect(repo.getRun(run.id)!.modelOverride).toBe('opus');
+    expect(repo.getRun(run.id)!.effortOverride).toBe('high');
+
+    // Changing the default harness clears the (now cross-harness) persisted model + effort.
+    orchestrator.setDefaultHarness('cursor');
+    const settings = orchestrator.getSettings();
+    expect(settings.defaultModel).toBeNull();
+    expect(settings.defaultEffort).toBeNull();
   });
 });
 
@@ -771,5 +869,51 @@ describe('Orchestrator — dependency scheduling (Milestone 9)', () => {
     await orchestrator.settle(); // the kick dispatched the freed work
 
     expect(repo.getRun(run.id)!.status).toBe('done');
+  });
+});
+
+describe('Orchestrator — repo watch + issue intake (Milestone 11)', () => {
+  it('setRepoWatch requires an enrolled repo (404) and a valid ref (400)', () => {
+    const { orchestrator } = setup();
+    expect(() => orchestrator.setRepoWatch({ repoRef: 'o/r', watch: true })).toThrow(/not enrolled/);
+    expect(() => orchestrator.setRepoWatch({ repoRef: 'not a repo', watch: true })).toThrow(ApiError);
+
+    orchestrator.enrollRepo({ repoRef: 'o/r', workingRoot: './w' });
+    const watched = orchestrator.setRepoWatch({ repoRef: 'o/r', watch: true, label: 'fleet: go' });
+    expect(watched).toMatchObject({ watch: true, watchLabel: 'fleet: go' });
+  });
+
+  it('a watch pass auto-starts a run for an eligible issue and drains it to done', async () => {
+    const { orchestrator, repo, github } = setup();
+    orchestrator.enrollRepo({ repoRef: 'o/r', workingRoot: './w' });
+    orchestrator.setRepoWatch({ repoRef: 'o/r', watch: true });
+    github.seedIssue('o/r#1', { number: 1, author: 'o' }); // owner-filed → eligible
+
+    const pass = await orchestrator.pollIssueIntakeOnce();
+    expect(pass).toMatchObject({ reposScanned: 1, started: 1 });
+    await orchestrator.settle(); // the auto-started run kicked the pump
+
+    const run = repo.listRuns()[0]!;
+    expect(run.issueRef).toBe('o/r#1');
+    expect(repo.getRun(run.id)!.status).toBe('done');
+  });
+
+  it('the intake path honors start guards: a non-owner issue is skipped, no run created', async () => {
+    const { orchestrator, repo, github } = setup();
+    orchestrator.enrollRepo({ repoRef: 'o/r', workingRoot: './w' });
+    orchestrator.setRepoWatch({ repoRef: 'o/r', watch: true });
+    github.seedIssue('o/r#1', { number: 1, author: 'stranger' });
+
+    expect(await orchestrator.pollIssueIntakeOnce()).toMatchObject({ started: 0, skipped: 1 });
+    expect(repo.listRuns()).toHaveLength(0);
+  });
+
+  it('an unwatched enrolled repo is never scanned', async () => {
+    const { orchestrator, repo, github } = setup();
+    orchestrator.enrollRepo({ repoRef: 'o/r', workingRoot: './w' }); // enrolled, not watched
+    github.seedIssue('o/r#1', { number: 1, author: 'o' });
+
+    expect(await orchestrator.pollIssueIntakeOnce()).toMatchObject({ reposScanned: 0, started: 0 });
+    expect(repo.listRuns()).toHaveLength(0);
   });
 });

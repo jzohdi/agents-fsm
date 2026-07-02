@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS runs (
   flags              TEXT    NOT NULL DEFAULT '{}',     -- JSON skip flags (needs_frontend/…), set by `plan`, read on every FORWARD
   archived_at        TEXT,                              -- when an operator archived this (terminal) run out of the dashboard's Resolved lane; NULL = not archived
   cost_override      TEXT,                              -- operator override of the global cost ceiling (M8 B3): 'next_step' (one stage) | 'full' (whole run) | NULL (none)
-  model_override     TEXT,                              -- per-run harness model override (the dashboard's model dropdown); NULL = use the daemon default. Read by the runner at each stage.
+  model_override     TEXT,                              -- per-run harness model override (the dashboard's model picker); NULL = use the daemon default. Read by the runner at each stage.
+  effort_override    TEXT,                              -- per-run reasoning-effort override (Claude Code's --effort): 'low'|'medium'|'high'|'xhigh'|'max' | NULL (model default). App-validated; read by the runner at each stage.
   harness            TEXT    NOT NULL DEFAULT 'claude-code', -- which agent harness runs this, pinned at start (like fsm_config_version). No CHECK: the valid set is app-validated (isHarnessId) and ALTER can't add a CHECK later — keeps a fresh DB identical to a migrated one.
   -- Scheduling declarations (Milestone 9), CACHED from the issue's §3.5 marker block — the issue owns
   -- them (the runner caches at triage-commit; the Scheduler Poller refreshes every tick; on conflict
@@ -152,7 +153,13 @@ CREATE TABLE IF NOT EXISTS repos (
   local_repo   TEXT,                               -- optional local checkout to clone working trees from (offline/fast)
   working_root TEXT    NOT NULL,                   -- where this repo's per-run trees clone (`<working_root>/run-<id>`)
   base_branch  TEXT    NOT NULL DEFAULT 'main',    -- branch PRs target / working trees branch off
-  created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  -- Continuous mode / repo auto-pickup (Milestone 11): when `watch` = 1 the Issue Intake Poller scans
+  -- this repo's open issues and starts a run per eligible one (sequential, one in-flight at a time).
+  -- Off by default — enrolling a repo makes it serviceable, watching it is a separate opt-in. Appended
+  -- after `created_at` so a fresh schema matches a DB retrofitted by the additive migration (db drift guard).
+  watch        INTEGER NOT NULL DEFAULT 0,         -- 1 = auto-pick eligible open issues; 0 = manual runs only
+  watch_label  TEXT                                -- label that bypasses the intake guards; NULL → default 'agent help wanted'
 );
 
 -- A tiny key/value store for daemon-level settings that must survive restarts (multi-harness support).

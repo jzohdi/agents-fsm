@@ -84,7 +84,7 @@ describe('buildHarnessRegistry', () => {
     const cursor = registry.for('cursor') as SubprocessStageExecutor;
 
     expect(claude.resolveModel('frontier')).toBe('sonnet'); // the daemon override
-    expect(cursor.resolveModel('frontier')).toBe('sonnet-4.5'); // CURSOR_MODEL_MAP, not the Claude override
+    expect(cursor.resolveModel('frontier')).toBe('claude-4.5-sonnet'); // CURSOR_MODEL_MAP, not the Claude override
   });
 });
 

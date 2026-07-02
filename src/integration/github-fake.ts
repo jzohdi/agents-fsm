@@ -23,6 +23,7 @@ import {
   type OpenPrInput,
   type PrComment,
   type PrepareWorkingTreeInput,
+  type RepoIssue,
   type Suggestion,
   type PullRequest,
   type ReadDiffInput,
@@ -37,6 +38,19 @@ interface SeedIssue {
   body?: string;
   /** Defaults to `open`; seed `closed` to simulate an already-landed dependency (README §3.5). */
   state?: Issue['state'];
+  /** Login of the filer, for the intake owner-guard (Milestone 11). Defaults to the ref's owner segment. */
+  author?: string;
+  /** Assignee logins, for the intake assigned-guard. Defaults to none. */
+  assignees?: string[];
+  /** Label names, for the intake override-label bypass. Defaults to none. */
+  labels?: string[];
+}
+
+/** The fake's stored issue: the public {@link Issue} plus the intake-only fields {@link RepoIssue} exposes. */
+interface StoredIssue extends Issue {
+  author: string;
+  assignees: string[];
+  labels: string[];
 }
 
 interface CommitEntry {
@@ -66,7 +80,7 @@ export interface FakeGitHubOptions {
  * anywhere a {@link GitHub} is expected.
  */
 export class FakeGitHub implements GitHub {
-  private readonly issues = new Map<string, Issue>();
+  private readonly issues = new Map<string, StoredIssue>();
   private readonly prs: PullRequest[] = [];
   /** PR comments (newest last), across all PRs; filtered by PR number on read. Carries author +
    *  createdAt so the PR Feedback Poller can distinguish the bot's comments from a human reviewer's. */
@@ -109,6 +123,11 @@ export class FakeGitHub implements GitHub {
       title: issue.title ?? `Issue ${issue.number}`,
       body: issue.body ?? '',
       state: issue.state ?? 'open',
+      // Default the author to the ref's owner segment so a plain `seedIssue` reads as owner-filed — the
+      // common case the intake owner-guard admits (tests override it to exercise the guard).
+      author: issue.author ?? (ref.split('/')[0] || 'owner'),
+      assignees: issue.assignees ?? [],
+      labels: issue.labels ?? [],
     });
     this.issueCounter = Math.max(this.issueCounter, issue.number);
     return this;
@@ -218,7 +237,7 @@ export class FakeGitHub implements GitHub {
 
   async readIssue(issueRef: string): Promise<Issue> {
     const issue = this.issues.get(issueRef);
-    if (issue) return { ...issue };
+    if (issue) return toIssue(issue);
     if (this.autoSeedIssues) {
       const m = /#(\d+)/.exec(issueRef);
       const number = m ? Number(m[1]) : 1;
@@ -246,15 +265,23 @@ export class FakeGitHub implements GitHub {
     const issue = this.requireIssueByNumber(input.number);
     if (input.title !== undefined) issue.title = input.title;
     if (input.body !== undefined) issue.body = input.body;
-    return { ...issue };
+    return toIssue(issue);
   }
 
   async createIssue(input: CreateIssueInput): Promise<Issue> {
     const number = ++this.issueCounter;
     const ref = `${this.repoRef}#${number}`;
-    const issue: Issue = { ref, number, title: input.title, body: input.body, state: 'open' };
+    // Attributed to the bot: a fleet-created issue (e.g. a triage split) is filed by the app's account.
+    const issue: StoredIssue = { ref, number, title: input.title, body: input.body, state: 'open', author: this.botLogin, assignees: [], labels: [] };
     this.issues.set(ref, issue);
-    return { ...issue };
+    return toIssue(issue);
+  }
+
+  async listOpenIssues(): Promise<RepoIssue[]> {
+    return [...this.issues.values()]
+      .filter((i) => i.state === 'open')
+      .sort((a, b) => a.number - b.number)
+      .map((i) => ({ ref: i.ref, number: i.number, title: i.title, body: i.body, author: i.author, assignees: [...i.assignees], labels: [...i.labels] }));
   }
 
   async postIssueComment(input: { issueNumber: number; body: string }): Promise<IssueComment> {
@@ -369,7 +396,7 @@ export class FakeGitHub implements GitHub {
     return pr;
   }
 
-  private requireIssueByNumber(number: number): Issue {
+  private requireIssueByNumber(number: number): StoredIssue {
     for (const issue of this.issues.values()) if (issue.number === number) return issue;
     throw new GitHubNotFoundError(`issue not found: #${number}`);
   }
@@ -377,4 +404,10 @@ export class FakeGitHub implements GitHub {
 
 function rangeKey(base: string, branch: string): string {
   return `${base}...${branch}`;
+}
+
+/** Project a stored issue down to the public {@link Issue} shape, dropping the intake-only fields so
+ *  `readIssue`/`updateIssue`/`createIssue` never leak them (they belong to {@link RepoIssue}). */
+function toIssue(stored: StoredIssue): Issue {
+  return { ref: stored.ref, number: stored.number, title: stored.title, body: stored.body, state: stored.state };
 }

@@ -248,12 +248,75 @@ input, textarea, button, select { font: inherit; }
 .af-revert input { width: 150px; }
 .af-revert input:focus, .af-revert select:focus { outline: none; background: var(--paper2); }
 
-/* Per-run model dropdown, in the run controls (matches the revert select's inline look). */
+/* Per-run model picker, in the run controls (matches the revert select's inline look). */
 .af-model { display: flex; align-items: center; border-left: 1px solid var(--rule); }
 .af-model:first-child { border-left: 0; }
 .af-model .lbl { padding: 9px 0 9px 14px; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink4); }
-.af-model select { border: 0; background: transparent; padding: 9px 12px; font-family: var(--mono); font-size: 12px; color: var(--ink); cursor: pointer; }
-.af-model select:focus { outline: none; background: var(--paper2); }
+
+/* --- searchable model picker (ModelPicker.svelte): shared by the new-run bar + the run controls --- */
+.af-mp { position: relative; display: inline-flex; }
+.af-mp-trigger {
+  display: inline-flex; align-items: center; gap: 8px; border: 0; background: transparent; cursor: pointer;
+  font-family: var(--mono); font-size: 12px; color: var(--ink); padding: 8px 10px; max-width: 220px;
+}
+.af-mp-trigger:hover:not(:disabled) { background: var(--paper2); }
+.af-mp-trigger:disabled { opacity: 0.5; cursor: not-allowed; }
+.af-mp-trigger .tlbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.af-mp-trigger .caret { color: var(--ink4); font-size: 10px; margin-left: auto; }
+.af-modelpick .af-mp-trigger { padding: 6px 8px; }
+/* Brand mark: the provider's real SVG logo on a light chip (see provider-logos.ts). `.mono` is the
+   monogram fallback for a provider we have no logo for; `.def` is the "harness default" star. */
+.af-mp .logo {
+  flex: 0 0 auto; width: 20px; height: 20px; border-radius: 5px; display: inline-flex;
+  align-items: center; justify-content: center; line-height: 1; overflow: hidden;
+  background: #fff; border: 1px solid var(--rule);
+}
+.af-mp .logo svg { display: block; }
+.af-mp .logo.mono {
+  background: var(--rule); border-color: transparent; color: var(--ink2);
+  font-size: 11px; font-weight: 700; font-family: var(--ui);
+}
+.af-mp .logo.def { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); font-size: 11px; }
+
+.af-mp-panel {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 50; width: 340px; max-width: 82vw;
+  background: var(--paper2); border: 1px solid var(--rule2); border-radius: 10px;
+  box-shadow: 0 14px 40px rgba(27, 26, 22, 0.16); overflow: hidden;
+}
+.af-mp-search { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--rule); }
+.af-mp-search .ic { color: var(--ink4); font-size: 14px; }
+.af-mp-search input {
+  flex: 1; border: 0; background: transparent; outline: none; min-width: 0;
+  font-family: var(--ui); font-size: 13.5px; color: var(--ink);
+}
+.af-mp-search input::placeholder { color: var(--ink4); }
+/* Dense list: tight rows so a long catalog stays scannable without a lot of scrolling. */
+.af-mp-list { max-height: 340px; overflow-y: auto; padding: 4px; }
+.af-mp-grp {
+  font-family: var(--mono); font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--ink4); padding: 8px 8px 2px;
+}
+.af-mp-opt {
+  display: flex; align-items: center; gap: 8px; padding: 3px 8px; border-radius: 6px; cursor: pointer;
+}
+.af-mp-opt.act { background: var(--accent-soft); }
+.af-mp-opt.sel { background: var(--paper); }
+.af-mp-opt.sel.act { background: var(--accent-soft); }
+.af-mp-opt .meta { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.af-mp-opt .meta .lbl { font-size: 12.5px; color: var(--ink); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.af-mp-opt .meta .sub { font-family: var(--mono); font-size: 10px; color: var(--ink4); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 0 auto; }
+.af-mp-opt .cost { margin-left: auto; font-family: var(--mono); font-size: 11.5px; letter-spacing: 1px; color: var(--ink4); flex: 0 0 auto; }
+.af-mp-opt .cost .on { color: var(--accent); }
+.af-mp-opt .chk { flex: 0 0 auto; width: 11px; text-align: center; color: var(--accent); font-size: 11px; }
+.af-mp-opt .cost + .chk { margin-left: 7px; }
+.af-mp-none { padding: 14px 10px; color: var(--ink3); font-size: 12.5px; }
+
+/* Reasoning-effort selector (EffortSelect.svelte) — mirrors the harness selector's inline native-select look. */
+.af-effort { display: flex; align-items: center; gap: 8px; padding: 0 14px; border-left: 1px solid var(--rule); white-space: nowrap; }
+.af-effort .elab { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink4); }
+.af-effort select { border: 0; background: transparent; font-family: var(--mono); font-size: 12.5px; color: var(--ink); cursor: pointer; padding: 6px 4px; }
+.af-effort select:focus { outline: none; background: var(--paper2); }
+.af-model + .af-effort { border-left: 0; padding-left: 0; }
 
 /* Global cost ceiling (M8 B3): the header chip + per-run override controls. */
 .af-cost { display: flex; align-items: center; gap: 7px; font-weight: 600; font-size: 12.5px; color: var(--ink2); font-family: var(--mono); }
@@ -455,8 +518,30 @@ input, textarea, button, select { font: inherit; }
 .af-henroll .af-enroll { padding-bottom: 0; }
 .af-enroll-go:disabled { opacity: 0.5; cursor: not-allowed; }
 .af-hempty { color: var(--ink3); font-size: 13.5px; padding: 26px 0 10px; }
-.af-hrepo { padding-top: 18px; padding-bottom: 18px; }
+/* The row is a flex wrapper: a full-width "open board" button plus a watch toggle sibling (avoids
+   nesting interactive elements — the toggle must not live inside the open button). */
+.af-hrepo { padding: 0; gap: 0; align-items: stretch; cursor: default; }
+.af-hrepo:hover { background: none; } /* the inner open button owns the hover, not the whole wrapper */
 .af-hrepo:last-child { border-bottom: 1px solid var(--rule); }
+.af-hrepo-open {
+  display: flex; align-items: baseline; gap: 18px; flex: 1 1 auto; min-width: 0; text-align: left;
+  cursor: pointer; background: none; border: 0; padding: 18px 2px; font: inherit; color: var(--ink);
+  transition: background 0.14s;
+}
+.af-hrepo-open:hover { background: var(--paper2); }
+.af-hrepo-open:hover .arr { color: var(--accent); transform: translateX(4px); }
+/* Watch toggle pill: muted when off, accent when watching (a live pulsing pip signals the auto-pickup). */
+.af-hwatch {
+  flex: 0 0 auto; align-self: center; display: inline-flex; align-items: center; gap: 7px; margin-left: 14px;
+  border: 1px solid var(--rule); background: none; color: var(--ink3); cursor: pointer;
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 6px 12px; border-radius: 2px; transition: 0.14s;
+}
+.af-hwatch .pip { width: 7px; height: 7px; border-radius: 50%; background: var(--ink4); transition: 0.14s; }
+.af-hwatch:hover:not(:disabled) { color: var(--accent); border-color: var(--accent-line); }
+.af-hwatch.on { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+.af-hwatch.on .pip { background: var(--accent); animation: af-watchpulse 1.9s ease-in-out infinite; }
+.af-hwatch:disabled { opacity: 0.4; cursor: not-allowed; }
 .af-hrepo .ix { font-family: var(--mono); font-size: 11px; color: var(--ink4); flex: 0 0 26px; }
 .af-hrepo .name { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .af-hrepo .nm { font-family: var(--display); font-weight: 560; font-variation-settings: "opsz" 28; font-size: 21px; letter-spacing: -0.01em; line-height: 1.1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

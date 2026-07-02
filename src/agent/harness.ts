@@ -31,6 +31,15 @@ export const DEFAULT_HARNESS: HarnessId = 'claude-code';
  */
 export const DEFAULT_HARNESS_SETTING_KEY = 'default_harness';
 
+/**
+ * Settings-store keys for the operator's persisted pre-run selection — the model + reasoning effort the
+ * *File a new run* bar last picked, so it "sticks" as the default for later runs (and across restarts).
+ * Harness-scoped implicitly: cleared when the default harness changes, since a model belongs to one
+ * harness. Written by `PUT /settings/default-model`, read as the fallback when a start request omits them.
+ */
+export const DEFAULT_MODEL_SETTING_KEY = 'default_model';
+export const DEFAULT_EFFORT_SETTING_KEY = 'default_effort';
+
 /** Narrow an untrusted value to a known {@link HarnessId} — the validation the API applies to a request. */
 export function isHarnessId(value: unknown): value is HarnessId {
   return typeof value === 'string' && (HARNESS_IDS as readonly string[]).includes(value);

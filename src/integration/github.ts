@@ -34,6 +34,27 @@ export interface Issue {
 }
 
 /**
+ * One **open** issue as the watch / auto-pickup loop sees it (Milestone 11 — continuous mode).
+ * Richer than {@link Issue}: it carries the `author`, `assignees`, and `labels` the eligibility guards
+ * filter on (only pick up owner-filed, unassigned, non-`[WIP]` issues unless an override label is
+ * present — see `loop/issue-intake`). `readIssue`, which drives an already-started run, needs none of
+ * these, so they live on this list-only type instead of bloating the core {@link Issue}.
+ */
+export interface RepoIssue {
+  /** Stable reference, e.g. `owner/repo#42`. */
+  ref: string;
+  number: number;
+  title: string;
+  body: string;
+  /** GitHub login of whoever filed the issue — compared against the repo owner by the owner-only guard. */
+  author: string;
+  /** Assignee logins — a non-empty list means someone already owns it, so the intake loop leaves it alone. */
+  assignees: string[];
+  /** Label names — the configured override label bypasses the guards; the rest are ignored here. */
+  labels: string[];
+}
+
+/**
  * A repo or issue the operator might start a run on — what the dashboard's new-run autocomplete shows.
  * Sourced from the logged-in user's own repos + their open issues in the real adapter (the user-scoped
  * `GitHubCliAccount`), and from the fake's seeded issues in tests.
@@ -170,6 +191,14 @@ export interface ReadDiffInput {
 export interface GitHub {
   /** Read an issue by reference (e.g. `owner/repo#42`). */
   readIssue(issueRef: string): Promise<Issue>;
+
+  /**
+   * Every **open** issue in the repo, for the watch / auto-pickup loop (Milestone 11 — continuous mode).
+   * Carries the author/assignees/labels the eligibility guards need. The real adapter maps `gh issue
+   * list --state open`; the fake returns its seeded open issues. Returns `[]` when the repo has none.
+   * Only the Issue Intake Poller calls this — never a run's hot path.
+   */
+  listOpenIssues(): Promise<RepoIssue[]>;
 
   /**
    * Rewrite an issue's title and/or body. Triage uses this to improve a vague issue into a

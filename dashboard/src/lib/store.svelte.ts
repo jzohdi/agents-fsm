@@ -34,8 +34,13 @@ export const ui = $state({
   // Global cost ceiling (Milestone 8 B3): the daemon's configured ceiling (null = off), fetched once.
   // Active spend is derived live from `ui.runs` in `costStatusModel`, so only this constant is fetched.
   costCeiling: null as number | null,
-  // The active harness's model catalog + default (the per-run model dropdown), fetched once at startup.
+  // The active harness's model catalog + default (the per-run model picker), fetched once at startup.
   models: null as ModelCatalog | null,
+  // The operator's sticky pre-run selection shown in the new-run bar (null = the harness/model default).
+  // Persisted server-side (PUT /settings/default-model) so it survives reloads and "sticks" as the default
+  // for later runs; loaded from GET /settings; cleared when the harness changes (its catalog no longer fits).
+  selectedModel: null as string | null,
+  selectedEffort: null as string | null,
   // The daemon's default harness + the selectable set (the harness selector). `defaultHarness` is both
   // the runtime selector value AND the persisted default (the unified control): changing it persists via
   // PUT /settings/default-harness and is the harness sent on the next run. `null` until settings load / on
@@ -102,6 +107,20 @@ export async function enrollRepo(repoRef: string, baseBranch?: string): Promise<
   } catch (err) {
     banner(`Enroll failed: ${(err as Error).message}`, 'err');
     return false;
+  }
+}
+
+/**
+ * Turn continuous mode on/off for an enrolled repo (`POST /repos/watch`, Milestone 11). When on, the
+ * daemon auto-picks the repo's eligible open issues. Refreshes the ledger so the toggle reflects state.
+ */
+export async function setRepoWatch(repoRef: string, watch: boolean): Promise<void> {
+  try {
+    await request<Repo>('POST', '/repos/watch', { repoRef, watch });
+    banner(watch ? `Watching ${repoRef} for new issues.` : `Stopped watching ${repoRef}.`, 'ok');
+    await loadRepos();
+  } catch (err) {
+    banner(`Could not update watch: ${(err as Error).message}`, 'err');
   }
 }
 
@@ -201,12 +220,15 @@ export async function loadModels(): Promise<void> {
   }
 }
 
-/** Fetch the harness settings once (the harness selector); tolerant of an older daemon (no route). */
+/** Fetch the harness settings once (the harness selector + the sticky pre-run pick); tolerant of an older
+ *  daemon (no route / no defaultModel field). */
 export async function loadSettings(): Promise<void> {
   try {
     const s = await request<Settings>('GET', '/settings');
     ui.defaultHarness = s.defaultHarness;
     ui.harnesses = s.harnesses;
+    ui.selectedModel = s.defaultModel ?? null; // pre-fill the bar from the persisted selection
+    ui.selectedEffort = s.defaultEffort ?? null;
   } catch {
     ui.defaultHarness = null; // older daemon without /settings — the selector hides
     ui.harnesses = [];
@@ -221,13 +243,58 @@ export async function loadSettings(): Promise<void> {
 export async function setDefaultHarness(harness: string): Promise<void> {
   const previous = ui.defaultHarness;
   ui.defaultHarness = harness; // optimistic
+  // The new harness has its own catalog — a stale model/effort pick would no longer be valid (the daemon
+  // clears the persisted pair too on a harness change).
+  ui.selectedModel = null;
+  ui.selectedEffort = null;
   try {
     const { defaultHarness } = await request<Settings>('PUT', '/settings/default-harness', { harness });
     ui.defaultHarness = defaultHarness;
-    await loadModels(); // the model dropdown's catalog follows the default harness
+    await loadModels(); // the model picker's catalog follows the default harness
   } catch (err) {
     ui.defaultHarness = previous; // roll back a rejected change
     banner(`Harness change failed: ${(err as Error).message}`, 'err');
+  }
+}
+
+/** The models of the currently-loaded (default-harness) catalog, or `[]` if none loaded. */
+function currentModels(): { id: string; efforts?: string[] }[] {
+  return ui.models?.models ?? [];
+}
+
+/**
+ * Pick the pre-run model in the new-run bar and **persist it as the sticky default** (`PUT
+ * /settings/default-model`), so it stays selected for later runs and across reloads. Picking a model that
+ * doesn't support the current effort drops the effort. Optimistic; rolls back on failure.
+ */
+export async function selectDefaultModel(model: string | null): Promise<void> {
+  const prev = { model: ui.selectedModel, effort: ui.selectedEffort };
+  const efforts = currentModels().find((m) => m.id === model)?.efforts ?? [];
+  ui.selectedModel = model;
+  if (ui.selectedEffort && !efforts.includes(ui.selectedEffort)) ui.selectedEffort = null; // effort no longer fits
+  await persistDefaultSelection(prev);
+}
+
+/** Pick the pre-run reasoning effort in the new-run bar and persist it (paired with the current model). */
+export async function selectDefaultEffort(effort: string | null): Promise<void> {
+  const prev = { model: ui.selectedModel, effort: ui.selectedEffort };
+  ui.selectedEffort = effort;
+  await persistDefaultSelection(prev);
+}
+
+async function persistDefaultSelection(prev: { model: string | null; effort: string | null }): Promise<void> {
+  try {
+    const saved = await request<{ defaultModel: string | null; defaultEffort: string | null }>(
+      'PUT',
+      '/settings/default-model',
+      { model: ui.selectedModel, effort: ui.selectedEffort },
+    );
+    ui.selectedModel = saved.defaultModel; // reflect any server-side normalization (e.g. a dropped effort)
+    ui.selectedEffort = saved.defaultEffort;
+  } catch (err) {
+    ui.selectedModel = prev.model; // roll back a rejected change
+    ui.selectedEffort = prev.effort;
+    banner(`Model change failed: ${(err as Error).message}`, 'err');
   }
 }
 
@@ -241,6 +308,16 @@ export async function setModel(id: number, model: string | null): Promise<void> 
     if (id === ui.selectedId) await refreshDetail();
   } catch (err) {
     banner(`Model change failed: ${(err as Error).message}`, 'err');
+  }
+}
+
+/** Set (or clear, with `null`) the selected run's reasoning effort. Takes effect on the run's next stage. */
+export async function setEffort(id: number, effort: string | null): Promise<void> {
+  try {
+    upsertRun(await request<Run>('POST', `/runs/${id}/effort`, { effort }));
+    if (id === ui.selectedId) await refreshDetail();
+  } catch (err) {
+    banner(`Effort change failed: ${(err as Error).message}`, 'err');
   }
 }
 
@@ -258,9 +335,13 @@ export async function overrideCost(id: number, mode: 'next_step' | 'full' | 'non
 }
 
 export async function startRun(issueRef: string): Promise<void> {
-  // Stamp the run with the currently-selected harness (the unified control's value). Omitted when
-  // unknown (older daemon / settings not loaded) so the server applies its own default.
-  const body = ui.defaultHarness ? { issueRef, harness: ui.defaultHarness } : { issueRef };
+  // Stamp the run with the currently-selected harness + the sticky pre-run model/effort. Each is omitted
+  // when unset (older daemon / settings not loaded / no pick) so the server applies its own default. The
+  // selection is NOT reset after — it persists as the default for later runs (item: sticky defaults).
+  const body: { issueRef: string; harness?: string; model?: string; effort?: string } = { issueRef };
+  if (ui.defaultHarness) body.harness = ui.defaultHarness;
+  if (ui.selectedModel) body.model = ui.selectedModel;
+  if (ui.selectedEffort) body.effort = ui.selectedEffort;
   const run = await request<Run>('POST', '/runs', body);
   upsertRun(run);
   await selectRun(run.id);

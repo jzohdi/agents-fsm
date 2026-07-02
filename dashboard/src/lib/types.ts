@@ -19,8 +19,10 @@ export interface Run {
   archivedAt: string | null;
   /** Operator override of the global cost ceiling (M8 B3): one more stage, the whole run, or none. */
   costOverride?: 'next_step' | 'full' | null;
-  /** Per-run harness model override (the model dropdown); null = the daemon default. Takes effect next stage. */
+  /** Per-run harness model override (the model picker); null = the daemon default. Takes effect next stage. */
   modelOverride: string | null;
+  /** Per-run reasoning-effort override (Claude Code's `--effort`); null = the model default. Takes effect next stage. */
+  effortOverride: string | null;
   /** Which agent harness runs this, pinned at start (e.g. `claude-code` | `cursor`). */
   harness: string;
   /** Cached §3.5 scheduling (M9): same-repo issue numbers that must close before later stages run. */
@@ -35,17 +37,29 @@ export interface Run {
   updatedAt: string;
 }
 
-/** The daemon's default harness + the selectable set (`GET /settings`; the harness selector). */
+/** The daemon's default harness + selectable set + the operator's sticky pre-run pick (`GET /settings`). */
 export interface Settings {
   defaultHarness: string;
   harnesses: string[];
+  /** The persisted pre-run model selection the new-run bar pre-fills (null = none). */
+  defaultModel: string | null;
+  /** The persisted pre-run reasoning-effort selection (null = none). */
+  defaultEffort: string | null;
 }
 
-/** One selectable harness model (the model dropdown), from `GET /models`. */
+/** One selectable harness model (the model picker), from `GET /models`. */
 export interface HarnessModel {
   id: string;
   label: string;
   group?: string;
+  /** Provider slug for the picker's brand mark (`anthropic`, `openai`, `google`, `xai`, `deepseek`, `moonshot`). */
+  provider?: string;
+  /** Relative cost tier 1–4, rendered as dollar signs (1 = cheapest). */
+  cost?: number;
+  /** Whether to surface this model in the picker's "Recommended" shortlist. */
+  recommended?: boolean;
+  /** Reasoning-effort levels this model accepts (empty/absent → the effort control is hidden). */
+  efforts?: string[];
 }
 
 /** The active harness's model catalog + the daemon default (`GET /models`). */
@@ -149,4 +163,8 @@ export interface Repo {
   localRepo: string | null;
   workingRoot: string;
   baseBranch: string;
+  /** Continuous mode (Milestone 11): the fleet auto-picks this repo's eligible open issues when true. */
+  watch: boolean;
+  /** The label that bypasses the intake guards; `null` → the default `agent help wanted`. */
+  watchLabel: string | null;
 }

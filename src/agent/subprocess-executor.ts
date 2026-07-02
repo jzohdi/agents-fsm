@@ -231,6 +231,9 @@ export const CLAUDE_PROFILE: HarnessProfile = {
       '--append-system-prompt',
       req.system,
     ];
+    // Reasoning effort (docs "Model configuration"): Claude Code reads `--effort <level>` and falls back
+    // to the highest level the active model supports at/below it, so an unsupported level never fails.
+    if (req.effort) args.push('--effort', req.effort);
     if (req.allowedTools && req.allowedTools.length > 0) {
       // Claude Code reads `--allowedTools` as a comma-separated list.
       args.push('--allowedTools', req.allowedTools.join(','));

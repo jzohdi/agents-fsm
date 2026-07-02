@@ -36,12 +36,13 @@ export const CURSOR_AUTH_REMEDY = [
 
 /**
  * Logical → concrete Cursor model map (`--model` tags). The recipe uses logical names (`frontier`/`cheap`),
- * so this must map every one it emits or the logical name is passed to Cursor verbatim and rejected.
+ * so this must map every one it emits or the logical name is passed to Cursor verbatim and rejected. Both
+ * targets must stay listed in the catalog ({@link ./cursor-models.json}) — a drift guard enforces it.
  * Confirm these ids against `cursor-agent --list-models` before a real run.
  */
 export const CURSOR_MODEL_MAP: Record<string, string> = {
-  frontier: 'sonnet-4.5',
-  cheap: 'gpt-5',
+  frontier: 'claude-4.5-sonnet',
+  cheap: 'gpt-5-mini',
 };
 
 /** Recognize Cursor's "not authenticated" wording (login required, missing/invalid key, unauthorized). */
@@ -56,7 +57,9 @@ export const CURSOR_PROFILE: HarnessProfile = {
   buildArgs(req, model) {
     // Cursor has no --append-system-prompt: fold the system prompt into the single prompt string. No
     // --allowedTools (Cursor has none); -p grants write/shell and --force auto-approves so a headless
-    // run can't stall on a permission prompt.
+    // run can't stall on a permission prompt. `req.effort` is intentionally ignored: cursor-agent has no
+    // reasoning-effort flag, and its model-suffix scheme is documented but ignored by the CLI today
+    // (README §9.8) — so Cursor models advertise no efforts and this never receives one.
     const prompt = `${req.system}\n\n${userPrompt(req.input)}`;
     return ['-p', prompt, '--output-format', 'stream-json', '--force', '--model', model];
   },

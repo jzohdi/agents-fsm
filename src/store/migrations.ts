@@ -122,6 +122,24 @@ export const MIGRATIONS: Migration[] = [
       addColumnIfMissing(db, 'runs', 'deps_satisfied_at', 'TEXT');
     },
   },
+  {
+    version: 9,
+    name: 'add runs.effort_override',
+    // Per-run reasoning-effort override (Claude Code's --effort). Additive column, so a plain ALTER ADD
+    // COLUMN retrofits a pre-existing DB; a fresh DB already has it from schema.sql.
+    apply: (db) => addColumnIfMissing(db, 'runs', 'effort_override', 'TEXT'),
+  },
+  {
+    version: 10,
+    name: 'add repos watch columns',
+    // Continuous mode / repo auto-pickup (Milestone 11). Additive columns with constant defaults, so a
+    // pre-existing DB backfills to "not watched" (behavior unchanged until a repo is explicitly watched)
+    // and a fresh DB already has them from schema.sql. Mirrors schema.sql.
+    apply: (db) => {
+      addColumnIfMissing(db, 'repos', 'watch', 'INTEGER NOT NULL DEFAULT 0');
+      addColumnIfMissing(db, 'repos', 'watch_label', 'TEXT');
+    },
+  },
 ];
 
 // Guard the invariants the runner relies on: versions a gap-free, strictly increasing 1..N sequence

@@ -35,6 +35,7 @@ import {
   type PrepareWorkingTreeInput,
   type PullRequest,
   type ReadDiffInput,
+  type RepoIssue,
   type UpdateIssueInput,
   type UpdatePrInput,
   type WorkingTree,
@@ -110,6 +111,26 @@ export class GitHubCli implements GitHub {
 
   async readIssue(issueRef: string): Promise<Issue> {
     return this.viewIssue(issueNumber(issueRef), issueRef);
+  }
+
+  async listOpenIssues(): Promise<RepoIssue[]> {
+    // `--search '-label:...'` can't express the guards (author/assignee live outside label search), so
+    // we pull the fields and filter in `loop/issue-intake` — one place, unit-tested without network.
+    // `--limit` bounds the page; a backlog beyond it is picked up over successive ticks as issues clear.
+    const json = await this.gh([
+      'issue', 'list', '--repo', this.repo, '--state', 'open',
+      '--json', 'number,title,body,author,assignees,labels', '--limit', '200',
+    ]);
+    const parsed = JSON.parse(json) as RawListIssue[];
+    return parsed.map((i) => ({
+      ref: `${this.repo}#${i.number}`,
+      number: i.number,
+      title: i.title,
+      body: i.body ?? '',
+      author: i.author?.login ?? 'unknown',
+      assignees: (i.assignees ?? []).map((a) => a.login),
+      labels: (i.labels ?? []).map((l) => l.name),
+    }));
   }
 
   async updateIssue(input: UpdateIssueInput): Promise<Issue> {
@@ -353,6 +374,16 @@ export function issueNumber(issueRef: string): number {
   const n = Number.parseInt(afterHash, 10);
   if (!Number.isInteger(n)) throw new Error(`cannot parse an issue number from ${JSON.stringify(issueRef)}`);
   return n;
+}
+
+/** The raw shape of a `gh issue list --json number,title,body,author,assignees,labels` row. */
+interface RawListIssue {
+  number: number;
+  title: string;
+  body?: string;
+  author?: { login: string } | null;
+  assignees?: Array<{ login: string }>;
+  labels?: Array<{ name: string }>;
 }
 
 /** The raw shape of a GitHub issue-comment object (`gh api .../comments`); extra fields ignored. */

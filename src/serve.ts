@@ -48,7 +48,7 @@ export async function serve(args: CliArgs): Promise<void> {
         : `  repos: ${repos.map((r) => r.repoRef).join(', ')} (file a run on any other repo to auto-enroll it)`,
     );
   }
-  console.log('  POST /runs · GET /runs · GET /runs/:id · POST /runs/:id/{pause,resume,stop,revert,archive,unarchive,cost-override,model} · GET|POST /repos · GET /cost · GET /models · GET /settings · PUT /settings/default-harness · GET|PUT /config · GET /stream');
+  console.log('  POST /runs · GET /runs · GET /runs/:id · POST /runs/:id/{pause,resume,stop,revert,archive,unarchive,cost-override,model,effort} · GET|POST /repos · POST /repos/watch · GET /cost · GET /models · GET /settings · PUT /settings/{default-harness,default-model} · GET|PUT /config · GET /stream');
   if (!existsSync(DEFAULT_PUBLIC_DIR)) {
     console.warn('  ⚠ dashboard not built — run `npm run build:dashboard` (or `npm run dev:dashboard` for HMR). The API works regardless.');
   }
@@ -64,6 +64,10 @@ export async function serve(args: CliArgs): Promise<void> {
   // dependencies are unmerged, wake them when the dependency's issue closes (the merge signal), and
   // escalate cycles. Same interval + disable switch as the other pollers.
   const stopSchedulerPolling = startSchedulerPolling(orchestrator, args);
+  // Background issue intake (Milestone 11 — continuous mode): scan each watched repo's open issues and
+  // auto-start a run for the next eligible one (sequential, one per repo). Same interval + disable
+  // switch as the other pollers; the Orchestrator owns the poller instance.
+  const stopIntakePolling = startIssueIntakePolling(orchestrator, args);
 
   // Graceful shutdown: stop accepting connections and clear the poll timer so the process can exit.
   await new Promise<void>((resolve) => {
@@ -72,6 +76,7 @@ export async function serve(args: CliArgs): Promise<void> {
       stopPolling();
       stopFeedbackPolling();
       stopSchedulerPolling();
+      stopIntakePolling();
       server.close(() => resolve());
       // Long-lived SSE connections would otherwise keep `close` from ever completing — terminate them
       // so the process can exit promptly on Ctrl-C (Node ≥18.2; engines require ≥20).
@@ -147,6 +152,24 @@ function startSchedulerPolling(
   if (args.pollTimeoutMinutes <= 0) return () => {};
   const timer = setInterval(() => {
     void orchestrator.checkDependencies().catch((err) => console.error(`[scheduler-poller] ${String(err)}`));
+  }, args.pollIntervalSeconds * 1000);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
+/**
+ * Periodically scan every **watched** repo's open issues and auto-start a run for the next eligible one
+ * (Milestone 11 — continuous mode). Sequential: one run in flight per repo, the next admitted when the
+ * current one's issue closes (a human merges its PR) or is stopped. Shares the other pollers' interval
+ * and `--poll-timeout 0` disable switch; the Orchestrator owns the poller. Returns a stop function.
+ */
+function startIssueIntakePolling(
+  orchestrator: ReturnType<typeof buildOrchestrator>['orchestrator'],
+  args: CliArgs,
+): () => void {
+  if (args.pollTimeoutMinutes <= 0) return () => {};
+  const timer = setInterval(() => {
+    void orchestrator.pollIssueIntakeOnce().catch((err) => console.error(`[issue-intake] ${String(err)}`));
   }, args.pollIntervalSeconds * 1000);
   timer.unref?.();
   return () => clearInterval(timer);

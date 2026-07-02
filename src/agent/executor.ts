@@ -63,6 +63,12 @@ export interface AgentRunRequest {
   phase: AgentPhase;
   /** Logical model name for this phase; the executor resolves it to a concrete model id. */
   model: string;
+  /**
+   * Optional reasoning-effort level for this phase (`low`|`medium`|`high`|`xhigh`|`max`). A harness that
+   * supports it (Claude Code, via `--effort`) applies it; one that doesn't (Cursor today) ignores it.
+   * Absent means the model's own default effort.
+   */
+  effort?: string;
   /** The phase/stage-specific system prompt. */
   system: string;
   /** Structured input: artifact refs + minimal state slice (never prior transcripts). */

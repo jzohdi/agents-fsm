@@ -16,7 +16,7 @@
  *   POST /runs/:id/archive      POST /runs/:id/unarchive
  *   POST /runs/:id/cost-override POST /runs/:id/model
  *   POST /runs/:id/check-pr-feedback
- *   GET  /repos                 POST /repos
+ *   GET  /repos                 POST /repos                 POST /repos/watch
  *   GET  /config                PUT /config
  *   GET  /cost                  GET /models
  *   GET  /suggestions[?q=]      POST /scheduler/check
@@ -73,10 +73,20 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
   // --- harness model catalog: selectable models + the daemon default (the model dropdown) ---
   if (method === 'GET' && path === '/models') return sendJson(res, 200, orch.getModels());
 
-  // --- settings: the default harness + the selectable set (the dashboard's harness selector) ---
+  // --- settings: the default harness + the operator's sticky pre-run model/effort selection ---
   if (method === 'GET' && path === '/settings') return sendJson(res, 200, orch.getSettings());
   if (method === 'PUT' && path === '/settings/default-harness') {
     return sendJson(res, 200, orch.setDefaultHarness(str(await readJson(req), 'harness')));
+  }
+  if (method === 'PUT' && path === '/settings/default-model') {
+    // `model`/`effort` persist the bar's pre-run pick; either may be `null` to clear (an absent field is
+    // treated as null). Validated in the orchestrator against the default harness's catalog.
+    const body = await readJson(req);
+    const model = body.model ?? null;
+    const effort = body.effort ?? null;
+    if (model !== null && typeof model !== 'string') return sendError(res, new ApiError(400, '"model" must be a string or null'));
+    if (effort !== null && typeof effort !== 'string') return sendError(res, new ApiError(400, '"effort" must be a string or null'));
+    return sendJson(res, 200, orch.setDefaultModel(model, effort));
   }
 
   // --- new-run autocomplete: your repos + their open issues matching ?q= (README §3.3 Layer 7) ---
@@ -88,6 +98,20 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
   // set span runs. The dashboard's "Check dependencies now"; returns what the pass did. ---
   if (method === 'POST' && path === '/scheduler/check') {
     return sendJson(res, 200, await orch.checkDependencies());
+  }
+
+  // --- repo watch (Milestone 11: turn continuous mode on/off for an enrolled repo). Body-carried
+  // repoRef (it contains a `/`, awkward in a path segment); `watch` boolean required, `label` optional
+  // (string to set a custom override label, null to reset to the default, absent to leave it). ---
+  if (method === 'POST' && path === '/repos/watch') {
+    const body = await readJson(req);
+    const watch = body.watch;
+    if (typeof watch !== 'boolean') return sendError(res, new ApiError(400, '"watch" (boolean) is required'));
+    const label = body.label;
+    if (label !== undefined && label !== null && typeof label !== 'string') {
+      return sendError(res, new ApiError(400, '"label" must be a string, null, or omitted'));
+    }
+    return sendJson(res, 200, orch.setRepoWatch({ repoRef: str(body, 'repoRef'), watch, label: label as string | null | undefined }));
   }
 
   // --- repos (Milestone 8 Phase A: enroll a repo the fleet can run / list enrolled repos) ---
@@ -121,6 +145,10 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
         issueRef: str(body, 'issueRef'),
         repoRef: optStr(body, 'repoRef'),
         harness: optStr(body, 'harness'),
+        // `model`/`effort` are optional: absent/empty → the operator's persisted default (or none); a
+        // present-but-invalid value → 400 (in `orch.start`, validated against the chosen harness/model).
+        model: optStr(body, 'model'),
+        effort: optStr(body, 'effort'),
       }));
     }
     return sendError(res, new ApiError(405, `method ${method} not allowed on /runs`));
@@ -129,7 +157,7 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
   const runMatch = /^\/runs\/(\d+)$/.exec(path);
   if (runMatch && method === 'GET') return sendJson(res, 200, orch.getRunDetail(Number(runMatch[1])));
 
-  const actionMatch = /^\/runs\/(\d+)\/(pause|resume|stop|revert|archive|unarchive|cost-override|model)$/.exec(path);
+  const actionMatch = /^\/runs\/(\d+)\/(pause|resume|stop|revert|archive|unarchive|cost-override|model|effort)$/.exec(path);
   if (actionMatch && method === 'POST') {
     const id = Number(actionMatch[1]);
     switch (actionMatch[2]) {
@@ -162,6 +190,14 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
           return sendError(res, new ApiError(400, '"model" (string, or null to clear) is required'));
         }
         return sendJson(res, 200, orch.setModel(id, raw));
+      }
+      case 'effort': {
+        // `effort`: a reasoning-effort level to run this run under, or `null` to clear back to the default.
+        const raw = (await readJson(req)).effort;
+        if (raw !== null && typeof raw !== 'string') {
+          return sendError(res, new ApiError(400, '"effort" (string, or null to clear) is required'));
+        }
+        return sendJson(res, 200, orch.setEffort(id, raw));
       }
     }
   }

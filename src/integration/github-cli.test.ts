@@ -75,6 +75,26 @@ describe('GitHubCli — gh-backed API (injected exec)', () => {
     expect(calls[0]!.args).toEqual(['issue', 'view', '42', '--repo', 'o/r', '--json', 'number,title,body,state']);
   });
 
+  it('lists open issues with the intake fields, mapping author/assignees/labels (Milestone 11)', async () => {
+    const rows = [
+      { number: 3, title: 'A', body: 'b', author: { login: 'acme' }, assignees: [{ login: 'dev' }], labels: [{ name: 'bug' }] },
+      { number: 5, title: 'C', body: '', author: null, assignees: [], labels: [] }, // missing author → 'unknown'
+    ];
+    const { exec, calls } = stubExec({ 'gh issue': ok(JSON.stringify(rows)) });
+    const gh = new GitHubCli({ repo: 'acme/web', workingRoot: '/w', exec });
+
+    const issues = await gh.listOpenIssues();
+
+    expect(calls[0]!.args).toEqual([
+      'issue', 'list', '--repo', 'acme/web', '--state', 'open',
+      '--json', 'number,title,body,author,assignees,labels', '--limit', '200',
+    ]);
+    expect(issues).toEqual([
+      { ref: 'acme/web#3', number: 3, title: 'A', body: 'b', author: 'acme', assignees: ['dev'], labels: ['bug'] },
+      { ref: 'acme/web#5', number: 5, title: 'C', body: '', author: 'unknown', assignees: [], labels: [] },
+    ]);
+  });
+
   it('normalizes a URL `repo` so the `gh api` path is owner/repo, not a broken URL path', async () => {
     // Regression: `--repo https://github.com/jzohdi/tmux-speedrun` once produced
     // `gh api repos/https://github.com/.../comments` → "unsupported protocol scheme".

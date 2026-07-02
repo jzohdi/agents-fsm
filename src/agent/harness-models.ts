@@ -12,14 +12,57 @@
  * harness accepts. Keep this list current with the harness's supported tags (README model catalog).
  */
 
-/** One selectable model: the harness tag (`id`) plus a human label and an optional dropdown group. */
+import cursorModels from './cursor-models.json';
+
+/** One selectable model: the harness tag (`id`) plus a human label and optional picker metadata. */
 export interface HarnessModel {
   /** The value handed to the harness's model selector (Claude Code's `--model`). */
   id: string;
   /** Human-readable label for the dropdown. */
   label: string;
-  /** Optional grouping header for the dropdown (e.g. `Aliases`, `Pinned versions`). */
+  /** Optional grouping header for the dropdown (e.g. a provider name, `Aliases`, `Pinned versions`). */
   group?: string;
+  /**
+   * Optional provider slug for the model picker's logo + colour (`anthropic`, `openai`, `google`, `xai`,
+   * `deepseek`, `moonshot`). Purely presentational — the dashboard maps it to a brand mark; an unknown or
+   * absent slug falls back to a neutral monogram.
+   */
+  provider?: string;
+  /** Optional relative cost tier 1–4, rendered as dollar signs in the picker (1 = cheapest). */
+  cost?: number;
+  /** Optional flag: surface this model in the picker's "Recommended" shortlist at the top. */
+  recommended?: boolean;
+  /**
+   * Optional reasoning-effort levels this model accepts, in ascending order (a subset of {@link
+   * EFFORT_LEVELS}). Absent/empty → the model has no selectable effort (the picker hides the effort
+   * control). Claude Code applies the chosen level via its `--effort` flag; Cursor's CLI has no working
+   * effort parameter today (its model-suffix scheme is documented but ignored — see README §9.8), so its
+   * models leave this empty.
+   */
+  efforts?: string[];
+}
+
+/**
+ * Reasoning-effort levels, ascending. Claude Code's `--effort` accepts exactly these; a model advertises
+ * the subset it supports via {@link HarnessModel.efforts}. `max` is the deepest (session-only in the CLI,
+ * but the flag accepts it). Kept as the single source of truth the API validates a chosen effort against.
+ */
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+
+/** Whether `value` is a known effort level (the typo guard the API applies before storing an effort). */
+export function isEffortLevel(value: string): value is EffortLevel {
+  return (EFFORT_LEVELS as readonly string[]).includes(value);
+}
+
+/** The effort levels a specific model in a catalog supports (empty when the model has none / is unknown). */
+export function modelEfforts(catalog: HarnessCatalog, modelId: string): string[] {
+  return catalog.models.find((m) => m.id === modelId)?.efforts ?? [];
+}
+
+/** Whether any model in the catalog supports reasoning effort — i.e. the harness offers it at all. */
+export function catalogSupportsEffort(catalog: HarnessCatalog): boolean {
+  return catalog.models.some((m) => m.efforts && m.efforts.length > 0);
 }
 
 /** The set of models a harness accepts, in display order. */
@@ -37,31 +80,40 @@ export interface HarnessCatalog {
  *  - **Pinned versions** — exact model ids, for a reproducible run that won't shift when a new latest
  *    ships.
  * Keep in sync with the models Claude Code accepts (the README model catalog).
+ *
+ * `efforts` mirror Claude Code's `--effort` support (docs "Model configuration"): the `opus`/`sonnet`
+ * aliases (latest Opus/Sonnet) and the pinned frontier models take all five levels; Haiku has none.
  */
+const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 export const CLAUDE_CODE_CATALOG: HarnessCatalog = {
   harness: 'claude-code',
   models: [
-    { id: 'opus', label: 'Opus (latest)', group: 'Aliases' },
-    { id: 'sonnet', label: 'Sonnet (latest)', group: 'Aliases' },
-    { id: 'haiku', label: 'Haiku (latest)', group: 'Aliases' },
-    { id: 'claude-opus-4-8', label: 'Opus 4.8', group: 'Pinned versions' },
-    { id: 'claude-sonnet-5', label: 'Sonnet 5', group: 'Pinned versions' },
-    { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', group: 'Pinned versions' },
-    { id: 'claude-fable-5', label: 'Fable 5', group: 'Pinned versions' },
+    { id: 'opus', label: 'Opus (latest)', group: 'Aliases', provider: 'anthropic', cost: 4, recommended: true, efforts: CLAUDE_EFFORTS },
+    { id: 'sonnet', label: 'Sonnet (latest)', group: 'Aliases', provider: 'anthropic', cost: 3, recommended: true, efforts: CLAUDE_EFFORTS },
+    { id: 'haiku', label: 'Haiku (latest)', group: 'Aliases', provider: 'anthropic', cost: 1, recommended: true },
+    { id: 'claude-opus-4-8', label: 'Opus 4.8', group: 'Pinned versions', provider: 'anthropic', cost: 4, efforts: CLAUDE_EFFORTS },
+    { id: 'claude-sonnet-5', label: 'Sonnet 5', group: 'Pinned versions', provider: 'anthropic', cost: 3, efforts: CLAUDE_EFFORTS },
+    { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', group: 'Pinned versions', provider: 'anthropic', cost: 1 },
+    { id: 'claude-fable-5', label: 'Fable 5', group: 'Pinned versions', provider: 'anthropic', cost: 2, efforts: CLAUDE_EFFORTS },
   ],
 };
 
 /**
- * Cursor's selectable `--model` tags. Cursor exposes models from several providers under its own tags;
- * the two below are the ones {@link CURSOR_MODEL_MAP} resolves the recipe's logical names to (frontier /
- * cheap). Keep in sync with `cursor-agent --list-models`; a model's `id` is passed verbatim to Cursor.
+ * Cursor's selectable `--model` tags — the **exact** ids `cursor-agent` accepts, each passed verbatim to
+ * `--model`. Unlike Claude Code (a separate `--effort` flag), Cursor bakes the **reasoning effort into the
+ * model id** (e.g. `gpt-5.5-high`, `gpt-5.5-extra-high`, `claude-opus-4-8-xhigh`) and it is *required* for
+ * most models — so the effort ladder is expressed as distinct catalog entries, not a separate control. The
+ * naming is non-uniform (`extra-high` vs `xhigh`; some models omit the suffix for their default), so we
+ * list concrete ids rather than synthesize them.
+ *
+ * The list is **data, not code** — it lives in {@link ./cursor-models.json}, curated from
+ * `cursor-agent --list-models` and refreshable with `npm run models:refresh` (see
+ * {@link ./cursor-models-source}). {@link CURSOR_MODEL_MAP}'s two values (frontier / cheap) must stay
+ * listed there (drift guard in the tests). Cost tiers are relative hints, not billing figures.
  */
 export const CURSOR_CATALOG: HarnessCatalog = {
   harness: 'cursor',
-  models: [
-    { id: 'sonnet-4.5', label: 'Claude Sonnet 4.5' },
-    { id: 'gpt-5', label: 'GPT-5' },
-  ],
+  models: cursorModels as HarnessModel[],
 };
 
 /** Every harness's catalog, keyed by harness id — the source {@link catalogForHarness} resolves against. */

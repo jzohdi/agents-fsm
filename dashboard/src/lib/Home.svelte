@@ -3,7 +3,7 @@
   // the attention queue, the repositories ledger (with inline enrollment), and a recent-activity
   // feed. Everything derives from `ui.runs`/`ui.repos`, which the SSE stream keeps live — this page
   // is pure derivation, no polling of its own.
-  import { ui, enrollRepo, openRepoBoard, openRun } from './store.svelte';
+  import { ui, enrollRepo, openRepoBoard, openRun, setRepoWatch } from './store.svelte';
   import {
     attentionModel,
     costStatusModel,
@@ -162,23 +162,41 @@
     {/if}
 
     {#each ledger as row, i (row.repoRef)}
-      <button type="button" class="af-hrow af-hrepo" onclick={() => openRepoBoard(row.repoRef)}>
-        <span class="ix">{pad(i)}</span>
-        <span class="name">
-          <span class="nm">{row.repoRef}{#if row.active > 0}<span class="livedot" title="Agents working now"></span>{/if}</span>
-          <span class="meta2">
-            {#if row.baseBranch}base {row.baseBranch}{:else}history only — re-enroll to run{/if}
-            {#if row.needsHuman > 0}<span class="warn">· {row.needsHuman} escalated</span>{/if}
+      <div class="af-hrow af-hrepo" class:watching={row.watch}>
+        <button type="button" class="af-hrepo-open" onclick={() => openRepoBoard(row.repoRef)}>
+          <span class="ix">{pad(i)}</span>
+          <span class="name">
+            <span class="nm">{row.repoRef}{#if row.active > 0}<span class="livedot" title="Agents working now"></span>{/if}</span>
+            <span class="meta2">
+              {#if row.baseBranch}base {row.baseBranch}{:else}history only — re-enroll to run{/if}
+              {#if row.needsHuman > 0}<span class="warn">· {row.needsHuman} escalated</span>{/if}
+            </span>
           </span>
-        </span>
-        <span class="fig"><b>{row.active}</b><i>working</i></span>
-        <span class="fig"><b class:warn={row.awaiting > 0}>{row.awaiting}</b><i>awaiting</i></span>
-        <span class="fig"><b>{row.resolved}</b><i>resolved</i></span>
-        <span class="fig wide"><b>{fmtTokens(row.tokens)}</b><i>tokens</i></span>
-        <span class="fig wide"><b>{row.costLabel}</b><i>spend</i></span>
-        <span class="when">{fmtRelTime(row.lastActivity)}</span>
-        <span class="arr">→</span>
-      </button>
+          <span class="fig"><b>{row.active}</b><i>working</i></span>
+          <span class="fig"><b class:warn={row.awaiting > 0}>{row.awaiting}</b><i>awaiting</i></span>
+          <span class="fig"><b>{row.resolved}</b><i>resolved</i></span>
+          <span class="fig wide"><b>{fmtTokens(row.tokens)}</b><i>tokens</i></span>
+          <span class="fig wide"><b>{row.costLabel}</b><i>spend</i></span>
+          <span class="when">{fmtRelTime(row.lastActivity)}</span>
+          <span class="arr">→</span>
+        </button>
+        <!-- Continuous mode toggle (Milestone 11): auto-pick this repo's eligible new issues. Only an
+             enrolled repo can be watched (a history-only row must be re-enrolled first). -->
+        <button
+          type="button"
+          class="af-hwatch"
+          class:on={row.watch}
+          disabled={!row.enrolled}
+          title={!row.enrolled
+            ? 'Re-enroll this repo to watch it for new issues'
+            : row.watch
+              ? 'Auto-picking new issues — click to stop watching'
+              : 'Watch for new issues (auto-pick eligible ones)'}
+          onclick={() => setRepoWatch(row.repoRef, !row.watch)}
+        >
+          <span class="pip"></span>{row.watch ? 'Watching' : 'Watch'}
+        </button>
+      </div>
     {/each}
   </div>
 </section>

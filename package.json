@@ -17,7 +17,8 @@
     "dev:dashboard": "vite dashboard",
     "dev:preview": "tsx src/dev-preview.ts",
     "build:dashboard": "vite build dashboard",
-    "watch:dashboard": "vite build dashboard --watch"
+    "watch:dashboard": "vite build dashboard --watch",
+    "models:refresh": "tsx scripts/refresh-cursor-models.ts"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1",

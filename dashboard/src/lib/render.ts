@@ -375,6 +375,8 @@ export interface RepoLedgerRow {
   repoRef: string;
   /** Whether the daemon has this repo enrolled (`GET /repos`); a repo seen only via runs shows a hint. */
   enrolled: boolean;
+  /** Continuous mode is on for this repo (Milestone 11) — only meaningful for an enrolled repo. */
+  watch: boolean;
   baseBranch: string;
   runs: number;
   active: number;
@@ -396,11 +398,11 @@ export interface RepoLedgerRow {
 export function repoLedgerModel(repos: Repo[] | undefined, runs: Run[] | undefined): RepoLedgerRow[] {
   const rows = new Map<string, RepoLedgerRow>();
   const blank = (repoRef: string): RepoLedgerRow => ({
-    repoRef, enrolled: false, baseBranch: '', runs: 0, active: 0, awaiting: 0, needsHuman: 0,
+    repoRef, enrolled: false, watch: false, baseBranch: '', runs: 0, active: 0, awaiting: 0, needsHuman: 0,
     resolved: 0, tokens: 0, cost: 0, costLabel: '$0.00', lastActivity: null,
   });
   for (const repo of repos ?? []) {
-    rows.set(repo.repoRef, { ...blank(repo.repoRef), enrolled: true, baseBranch: repo.baseBranch });
+    rows.set(repo.repoRef, { ...blank(repo.repoRef), enrolled: true, watch: repo.watch, baseBranch: repo.baseBranch });
   }
   for (const r of runs ?? []) {
     const row = rows.get(r.repoRef) ?? rows.set(r.repoRef, blank(r.repoRef)).get(r.repoRef)!;

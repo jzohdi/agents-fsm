@@ -418,7 +418,11 @@ export class AgentRunner {
     // The run's model override (dashboard dropdown) replaces the frontier role; `run` is the snapshot the
     // loop loaded when this stage was dispatched, so the whole stage uses one model and a mid-run change
     // is picked up by the *next* stage's fresh dispatch (README event loop). null override → default.
-    const model = phaseModel(recipe.models[phase] ?? DEFAULT_MODELS[phase], run.modelOverride);
+    const logical = recipe.models[phase] ?? DEFAULT_MODELS[phase];
+    const model = phaseModel(logical, run.modelOverride);
+    // The run's reasoning-effort override pairs with the model override: both target the frontier role
+    // (the primary produce/review work), so the cheaper `simplify` pass isn't pushed to high effort.
+    const effort = run.effortOverride && logical === OVERRIDE_ROLE ? run.effortOverride : undefined;
     const input = {
       issueRef: run.issueRef,
       repoRef: run.repoRef,
@@ -442,6 +446,7 @@ export class AgentRunner {
         stage: run.currentState,
         phase,
         model,
+        ...(effort ? { effort } : {}),
         system: this.systemPrompt(run.currentState, phase),
         input,
         onActivity: (activity) => this.handleActivity(run.id, run.currentState, phase, activity),

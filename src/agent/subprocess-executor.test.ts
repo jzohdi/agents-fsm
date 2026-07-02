@@ -153,6 +153,13 @@ describe('SubprocessStageExecutor — argv', () => {
     expect(exec.buildArgs(req())).not.toContain('--allowedTools');
   });
 
+  it('passes --effort only when a reasoning effort is set', () => {
+    const exec = new SubprocessStageExecutor();
+    const withEffort = exec.buildArgs(req({ effort: 'xhigh' }));
+    expect(withEffort[withEffort.indexOf('--effort') + 1]).toBe('xhigh');
+    expect(exec.buildArgs(req())).not.toContain('--effort'); // absent → the model's default effort
+  });
+
   it('maps logical model names, passing unknown names through', () => {
     const exec = new SubprocessStageExecutor();
     expect(exec.resolveModel('frontier')).toBe('opus');

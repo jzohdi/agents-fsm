@@ -7,8 +7,12 @@ import { CURSOR_MODEL_MAP } from './cursor-profile';
 import {
   CLAUDE_CODE_CATALOG,
   CURSOR_CATALOG,
+  EFFORT_LEVELS,
   catalogForHarness,
   catalogHasModel,
+  catalogSupportsEffort,
+  isEffortLevel,
+  modelEfforts,
   type HarnessCatalog,
 } from './harness-models';
 
@@ -24,6 +28,15 @@ describe('CLAUDE_CODE_CATALOG', () => {
     }
     // The everyday aliases must be selectable.
     expect(ids).toEqual(expect.arrayContaining(['opus', 'sonnet', 'haiku']));
+  });
+
+  it('advertises reasoning-effort levels on the frontier models but not on Haiku', () => {
+    // Claude Code's --effort support (docs): opus/sonnet aliases + pinned frontier models take all levels.
+    expect(modelEfforts(CLAUDE_CODE_CATALOG, 'opus')).toEqual([...EFFORT_LEVELS]);
+    expect(modelEfforts(CLAUDE_CODE_CATALOG, 'claude-opus-4-8')).toEqual([...EFFORT_LEVELS]);
+    // Haiku isn't in Claude Code's effort list.
+    expect(modelEfforts(CLAUDE_CODE_CATALOG, 'haiku')).toEqual([]);
+    expect(catalogSupportsEffort(CLAUDE_CODE_CATALOG)).toBe(true);
   });
 });
 
@@ -44,6 +57,45 @@ describe('CURSOR_CATALOG', () => {
     // never reproduce the harness's own default choice.
     const ids = CURSOR_CATALOG.models.map((m) => m.id);
     expect(ids).toEqual(expect.arrayContaining(Object.values(CURSOR_MODEL_MAP)));
+  });
+
+  it('is a long, provider-grouped catalog with picker metadata (provider, cost, a recommended shortlist)', () => {
+    // The picker leans on this metadata: several providers to group under, a cost tier per model, and at
+    // least one "recommended" model surfaced at the top. Guard the shape so a bad edit is caught here.
+    expect(CURSOR_CATALOG.models.length).toBeGreaterThanOrEqual(12);
+    for (const m of CURSOR_CATALOG.models) {
+      expect(m.provider, `model ${m.id} needs a provider for its brand mark`).toBeTruthy();
+      expect(m.cost, `model ${m.id} needs a cost tier 1–4`).toBeGreaterThanOrEqual(1);
+      expect(m.cost!).toBeLessThanOrEqual(4);
+    }
+    expect(new Set(CURSOR_CATALOG.models.map((m) => m.provider)).size).toBeGreaterThanOrEqual(3);
+    expect(CURSOR_CATALOG.models.some((m) => m.recommended)).toBe(true);
+  });
+
+  it('offers no reasoning effort — cursor-agent has no working effort parameter today', () => {
+    expect(catalogSupportsEffort(CURSOR_CATALOG)).toBe(false);
+    expect(CURSOR_CATALOG.models.every((m) => !m.efforts || m.efforts.length === 0)).toBe(true);
+  });
+});
+
+describe('effort helpers', () => {
+  it('recognizes the known effort levels and rejects anything else', () => {
+    for (const level of EFFORT_LEVELS) expect(isEffortLevel(level)).toBe(true);
+    expect(isEffortLevel('ultra')).toBe(false);
+    expect(isEffortLevel('')).toBe(false);
+    expect(EFFORT_LEVELS).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+  });
+
+  it('reports a model\'s effort levels, empty for an unknown or effort-less model', () => {
+    const catalog: HarnessCatalog = {
+      harness: 'x',
+      models: [{ id: 'a', label: 'A', efforts: ['low', 'high'] }, { id: 'b', label: 'B' }],
+    };
+    expect(modelEfforts(catalog, 'a')).toEqual(['low', 'high']);
+    expect(modelEfforts(catalog, 'b')).toEqual([]);
+    expect(modelEfforts(catalog, 'missing')).toEqual([]);
+    expect(catalogSupportsEffort(catalog)).toBe(true);
+    expect(catalogSupportsEffort({ harness: 'y', models: [{ id: 'b', label: 'B' }] })).toBe(false);
   });
 });
 
