@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ui, control, revertRun, overrideCost, setModel, setEffort, checkPrFeedback } from './store.svelte';
+  import { ui, control, revertRun, overrideCost, setModel, setEffort, setHarness, loadRunModels, checkPrFeedback } from './store.svelte';
   import ModelPicker from './ModelPicker.svelte';
   import EffortSelect from './EffortSelect.svelte';
   import { telemetryModel, escalationModel, activityLane, costStatusModel, issueUrl, prUrl, branchUrl, isWatchingPrFeedback, fmtRunCost, fmtDuration, fmtTokens, escapeHtml, humanizeState, humanizeHarness, schedulingLabel } from './render';
@@ -35,19 +35,22 @@
   const revertable = $derived(
     ui.config ? Object.entries(ui.config.fsm.states).filter(([, d]) => !d.terminal).map(([name]) => name) : [],
   );
-  // The model catalog (`ui.models`, from GET /models) is the *default* harness's. It only applies to a
-  // run on that same harness — a run on a different harness must not offer that catalog's models (setModel
-  // would 400) nor show its default. Per-harness catalogs for non-default runs are a later enhancement.
-  const catalogMatchesRun = $derived(!!ui.models && ui.models.harness === run?.harness);
-  // The run's effective model for the live badge: its override, else the default (only when the catalog
-  // is this run's harness), else the generic "default".
-  const model = $derived(run?.modelOverride ?? (catalogMatchesRun ? ui.models?.defaultModel : null) ?? 'default');
+  // Load the *run's own* harness catalog (GET /models?harness=run.harness) whenever the selected run's
+  // harness changes — including right after an operator switches it. This drives RunDetail's model/effort
+  // controls off the run's harness rather than the default one, so they render for any harness.
+  $effect(() => {
+    if (run?.harness) void loadRunModels(run.harness);
+  });
+  // The per-run catalog, but only once it matches the current run's harness (guards the brief window after a
+  // harness switch where `ui.runModels` still holds the previous harness's catalog). Null → controls hide.
+  const runCatalog = $derived(ui.runModels && ui.runModels.harness === run?.harness ? ui.runModels : null);
+  // The run's effective model for the live badge: its override, else the run-harness default, else "default".
+  const model = $derived(run?.modelOverride ?? runCatalog?.defaultModel ?? 'default');
   // The effort control appears when the run's effective model (override, else the harness default) supports
   // effort — so a Claude run can bump reasoning per-run, while a Cursor run (no effort) never shows it.
   const runEfforts = $derived.by(() => {
-    if (!catalogMatchesRun) return [] as string[];
-    const id = run?.modelOverride ?? ui.models?.defaultModel;
-    return (id ? ui.models?.models.find((m) => m.id === id)?.efforts : undefined) ?? [];
+    const id = run?.modelOverride ?? runCatalog?.defaultModel;
+    return (id ? runCatalog?.models.find((m) => m.id === id)?.efforts : undefined) ?? [];
   });
 
   let revertTo = $state('');
@@ -126,15 +129,25 @@
       </div>
     </div>
     <div class="af-controls">
-      {#if !terminal && catalogMatchesRun && ui.models!.models.length}
+      {#if !terminal && ui.harnesses.length > 1}
+        <!-- Switch the paused/non-terminal run's harness; takes effect on its next stage. The daemon clears
+             the run's model/effort overrides on change, and the model dropdown below follows the new harness. -->
+        <label class="af-model af-runharness">
+          <span class="lbl">harness</span>
+          <select value={run.harness} onchange={(e) => setHarness(run.id, e.currentTarget.value)} aria-label="run harness">
+            {#each ui.harnesses as h (h)}<option value={h}>{humanizeHarness(h)}</option>{/each}
+          </select>
+        </label>
+      {/if}
+      {#if !terminal && runCatalog && runCatalog.models.length}
         <!-- A plain wrapper (not a <label>): a <label> around the picker's button would forward a second
              synthetic click to it, immediately re-closing the popover. -->
         <div class="af-model">
           <span class="lbl">model</span>
           <ModelPicker
-            models={ui.models!.models}
+            models={runCatalog.models}
             value={run.modelOverride}
-            defaultLabel={ui.models!.defaultModel}
+            defaultLabel={runCatalog.defaultModel}
             onselect={(id) => setModel(run.id, id)}
             ariaLabel="run model"
           />

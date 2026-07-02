@@ -34,8 +34,12 @@ export const ui = $state({
   // Global cost ceiling (Milestone 8 B3): the daemon's configured ceiling (null = off), fetched once.
   // Active spend is derived live from `ui.runs` in `costStatusModel`, so only this constant is fetched.
   costCeiling: null as number | null,
-  // The active harness's model catalog + default (the per-run model picker), fetched once at startup.
+  // The active harness's model catalog + default (the new-run bar's model picker), fetched once at startup.
   models: null as ModelCatalog | null,
+  // The *selected run's* harness catalog (RunDetail's model picker), fetched per run via
+  // GET /models?harness=<run.harness>. Unlike `ui.models` (the default harness's) it follows the run's
+  // own — possibly newly-switched — harness, so the RunDetail model dropdown renders for any harness.
+  runModels: null as ModelCatalog | null,
   // The operator's sticky pre-run selection shown in the new-run bar (null = the harness/model default).
   // Persisted server-side (PUT /settings/default-model) so it survives reloads and "sticks" as the default
   // for later runs; loaded from GET /settings; cleared when the harness changes (its catalog no longer fits).
@@ -220,6 +224,19 @@ export async function loadModels(): Promise<void> {
   }
 }
 
+/**
+ * Fetch the model catalog for a specific harness (the selected run's), into `ui.runModels`; tolerant of
+ * an older daemon (no `?harness=` support) or an unknown harness → null, like `loadModels`. This is what
+ * lets the RunDetail model dropdown follow the run's own harness rather than the default one.
+ */
+export async function loadRunModels(harness: string): Promise<void> {
+  try {
+    ui.runModels = await request<ModelCatalog>('GET', `/models?harness=${encodeURIComponent(harness)}`);
+  } catch {
+    ui.runModels = null; // older daemon / unknown harness — the RunDetail dropdown just won't render
+  }
+}
+
 /** Fetch the harness settings once (the harness selector + the sticky pre-run pick); tolerant of an older
  *  daemon (no route / no defaultModel field). */
 export async function loadSettings(): Promise<void> {
@@ -318,6 +335,22 @@ export async function setEffort(id: number, effort: string | null): Promise<void
     if (id === ui.selectedId) await refreshDetail();
   } catch (err) {
     banner(`Effort change failed: ${(err as Error).message}`, 'err');
+  }
+}
+
+/**
+ * Change the selected run's harness (the RunDetail harness selector). Takes effect on the run's next stage
+ * (the current stage keeps its harness). The daemon clears the run's model/effort overrides on this change
+ * — their catalog no longer fits — so the refreshed run row reflects that. Reloads the per-run catalog for
+ * the new harness so the model dropdown follows it.
+ */
+export async function setHarness(id: number, harness: string): Promise<void> {
+  try {
+    upsertRun(await request<Run>('POST', `/runs/${id}/harness`, { harness }));
+    await loadRunModels(harness); // the RunDetail catalog follows the newly-chosen harness
+    if (id === ui.selectedId) await refreshDetail();
+  } catch (err) {
+    banner(`Harness change failed: ${(err as Error).message}`, 'err');
   }
 }
 

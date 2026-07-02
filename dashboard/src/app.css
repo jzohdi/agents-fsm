@@ -252,6 +252,9 @@ input, textarea, button, select { font: inherit; }
 .af-model { display: flex; align-items: center; border-left: 1px solid var(--rule); }
 .af-model:first-child { border-left: 0; }
 .af-model .lbl { padding: 9px 0 9px 14px; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink4); }
+/* Per-run harness selector, in the run controls (native inline select, matches the revert select's look). */
+.af-runharness select { border: 0; background: transparent; padding: 9px 12px; font-family: var(--mono); font-size: 12px; color: var(--ink); cursor: pointer; }
+.af-runharness select:focus { outline: none; background: var(--paper2); }
 
 /* --- searchable model picker (ModelPicker.svelte): shared by the new-run bar + the run controls --- */
 .af-mp { position: relative; display: inline-flex; }
