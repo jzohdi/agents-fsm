@@ -19,7 +19,7 @@
 
 import { execFile } from 'node:child_process';
 import { existsSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import {
   GitHubNotFoundError,
@@ -229,8 +229,22 @@ export class GitHubCli implements GitHub {
 
   // --- local working tree + git (no network) ----------------------------------
 
+  /**
+   * Absolute path to a run's working tree. It **must** be absolute: the git worktree/clone commands run
+   * with a `-C`/cwd of the source repo (worktree mode) while the `existsSync` idempotency guard resolves
+   * against the daemon's process cwd. A relative `workingRoot` (e.g. the `--work ./.agent-work` default)
+   * would therefore point at two different directories, so a resume/back-edge never recognized the live
+   * tree and fell through to `worktree add`, colliding with the already-registered worktree (git 128).
+   * Anchor a relative root where git actually creates the tree: the source checkout in worktree mode,
+   * process cwd in clone mode. (`resolve` ignores earlier segments when `workingRoot` is already absolute.)
+   */
+  private runTreePath(runId: number): string {
+    const leaf = `run-${runId}`;
+    return this.localRepo ? resolve(this.localRepo, this.workingRoot, leaf) : resolve(this.workingRoot, leaf);
+  }
+
   async prepareWorkingTree(input: PrepareWorkingTreeInput): Promise<WorkingTree> {
-    const path = join(this.workingRoot, `run-${input.runId}`);
+    const path = this.runTreePath(input.runId);
     // Two source modes (Milestone 12): a configured `localRepo` means the operator's validated checkout
     // is the source, serviced via `git worktree` (isolated per-run tree, shared object store, pushes
     // straight to the checkout's GitHub `origin`); otherwise clone a fresh tree from the GitHub remote.
@@ -265,8 +279,13 @@ export class GitHubCli implements GitHub {
       return { path, branch: input.branch, base: input.base };
     }
 
-    // Fresh worktree. Restore a pushed branch from the remote (crash recovery of a lost tree), else
-    // branch off up-to-date base; `-B` creates-or-resets the branch to that start point as it adds it.
+    // Fresh worktree. First prune stale registrations: if a previous tree's directory was removed but
+    // its worktree metadata survived (a crash between rm and prune), git still considers the branch/path
+    // "already used" and rejects the add. Prune drops only registrations whose directory is gone, so it's
+    // a safe no-op otherwise — and it makes the add idempotent against that leftover state.
+    await this.execIgnore(['-C', source, 'worktree', 'prune']);
+    // Restore a pushed branch from the remote (crash recovery of a lost tree), else branch off up-to-date
+    // base; `-B` creates-or-resets the branch to that start point as it adds it.
     const startPoint = (await this.refExists(source, `refs/remotes/origin/${input.branch}`))
       ? `origin/${input.branch}`
       : `origin/${input.base}`;
@@ -292,7 +311,7 @@ export class GitHubCli implements GitHub {
   }
 
   async dropWorkingTree(runId: number): Promise<void> {
-    const path = join(this.workingRoot, `run-${runId}`);
+    const path = this.runTreePath(runId);
     if (this.localRepo) {
       // A worktree is registered in the source repo's metadata, so a plain rm would leave a stale
       // registration that blocks re-adding it. Remove it through git (force past a dirty/missing tree),

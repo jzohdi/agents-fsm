@@ -15,7 +15,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
@@ -374,6 +374,53 @@ describe('GitHubCli — local git (real temp repo)', () => {
     const restored = await gh.prepareWorkingTree({ runId: 11, branch: 'agent/run-11', base: 'main' });
     expect(restored.path).toBe(tree.path);
     expect(git(tree.path, ['log', '--oneline'])).toContain('pushed work'); // restored, not reset to base
+  });
+
+  it('re-prepares a worktree idempotently when workingRoot is relative (daemon cwd ≠ source repo)', async () => {
+    // Regression: the `--work ./.agent-work` default is a *relative* path. The git worktree command runs
+    // with `-C localRepo` (resolving it against the source repo) while the `existsSync` reuse guard
+    // resolved it against the daemon's process cwd. When those differ — the normal case, daemon started
+    // outside the source checkout — the guard always missed and the second prepare hit `worktree add`,
+    // failing with "'<branch>' is already used by worktree at …". Path must be absolute for both to agree.
+    const remote = makeRemote();
+    const localRoot = mkdtempSync(join(tmpdir(), 'agent-fleet-local-'));
+    const localRepo = join(localRoot, 'checkout');
+    git(localRoot, ['clone', remote, localRepo]);
+
+    // A relative workingRoot, and a process cwd that is NOT the source repo (the temp local root here) —
+    // so an unfixed reuse guard would resolve `.agent-work/run-N` to the wrong place and never match.
+    const relativeRoot = `.agent-work-${Math.random().toString(36).slice(2)}`;
+    const gh = new GitHubCli({ repo: 'o/r', workingRoot: relativeRoot, cloneUrl: remote, localRepo });
+
+    const tree = await gh.prepareWorkingTree({ runId: 42, branch: 'agent/run-42', base: 'main' });
+    expect(isAbsolute(tree.path)).toBe(true); // absolute so git and existsSync anchor identically
+    expect(tree.path.startsWith(localRepo)).toBe(true); // created under the source checkout, where git put it
+    expect(git(localRepo, ['worktree', 'list'])).toContain(tree.path);
+
+    // Re-prepare, as a resume/back-edge does. Before the fix this threw GitCommandError (git 128).
+    const again = await gh.prepareWorkingTree({ runId: 42, branch: 'agent/run-42', base: 'main' });
+    expect(again.path).toBe(tree.path);
+  });
+
+  it('re-adds a worktree after its directory vanished but the registration was left stale', async () => {
+    // Crash between the rm and the prune leaves a dangling worktree registration: git still thinks the
+    // branch is "already used" though the directory is gone. prepareWorktree now prunes before adding,
+    // so recovery does not wedge on that leftover state.
+    const remote = makeRemote();
+    const localRoot = mkdtempSync(join(tmpdir(), 'agent-fleet-local-'));
+    const localRepo = join(localRoot, 'checkout');
+    git(localRoot, ['clone', remote, localRepo]);
+    const workingRoot = mkdtempSync(join(tmpdir(), 'agent-fleet-work-'));
+    const gh = new GitHubCli({ repo: 'o/r', workingRoot, cloneUrl: remote, localRepo });
+
+    const tree = await gh.prepareWorkingTree({ runId: 13, branch: 'agent/run-13', base: 'main' });
+    // Delete the directory directly (no `git worktree remove`), leaving the registration behind.
+    rmSync(tree.path, { recursive: true, force: true });
+    expect(git(localRepo, ['worktree', 'list'])).toContain(tree.path); // still registered (stale)
+
+    const again = await gh.prepareWorkingTree({ runId: 13, branch: 'agent/run-13', base: 'main' });
+    expect(again.path).toBe(tree.path);
+    expect(statSync(join(again.path, '.git')).isFile()).toBe(true); // a live worktree again
   });
 
   it('syncBaseBranch fast-forwards a clean on-base checkout, and leaves a dirty/off-base one alone', async () => {

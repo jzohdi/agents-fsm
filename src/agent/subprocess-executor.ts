@@ -18,8 +18,33 @@
  */
 
 import { spawn } from 'node:child_process';
+import { delimiter, join } from 'node:path';
+import { homedir } from 'node:os';
 
 import { FatalExecutorError, type AgentActivity, type AgentRunRequest, type AgentRunResult, type StageExecutor } from './executor';
+
+/**
+ * Directories where harness CLIs (`claude`, `cursor-agent`) are commonly installed but which a
+ * process launched from a GUI / `launchd` context often lacks on `PATH` — such a process inherits a
+ * minimal `PATH` (roughly `/usr/bin:/bin:/usr/sbin:/sbin`), not the login shell's. `cursor-agent`'s
+ * default installer drops it in `~/.local/bin`, so a daemon started outside a full login shell spawns
+ * it as ENOENT even though `which cursor-agent` succeeds in the operator's terminal. We append (never
+ * prepend) these so the operator's own `PATH` still wins when it already resolves the binary.
+ */
+export function harnessPathDirs(home = homedir()): string[] {
+  return [join(home, '.local', 'bin'), '/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin'];
+}
+
+/**
+ * `env` for a harness spawn: the caller's env with {@link harnessPathDirs} appended to `PATH` (deduped,
+ * existing entries kept ahead so nothing the operator installed is shadowed). Pure so it is testable.
+ */
+export function harnessEnv(env: NodeJS.ProcessEnv = process.env, home = homedir()): NodeJS.ProcessEnv {
+  const existing = (env.PATH ?? '').split(delimiter).filter(Boolean);
+  const merged = [...existing];
+  for (const dir of harnessPathDirs(home)) if (!merged.includes(dir)) merged.push(dir);
+  return { ...env, PATH: merged.join(delimiter) };
+}
 
 /** The result of running a subprocess to completion. */
 export interface ProcessResult {
@@ -289,7 +314,7 @@ export class SubprocessStageExecutor implements StageExecutor {
 
   async run(req: AgentRunRequest): Promise<AgentRunResult> {
     const cwd = req.workingDir ?? this.defaultWorkingDir;
-    const options: SpawnOptions = { cwd, env: process.env, timeoutMs: this.timeoutMs };
+    const options: SpawnOptions = { cwd, env: harnessEnv(), timeoutMs: this.timeoutMs };
     // Only stream when someone is listening: parse each stream-json line and forward the activities the
     // profile summarizes it to. Streaming is pure observability — a throwing sink must never affect the run.
     if (req.onActivity) options.onStdoutLine = (line) => emitActivities(line, req.onActivity!, this.profile.summarize);
@@ -606,9 +631,23 @@ export function defaultSpawnProcess(command: string, args: string[], options: Sp
       for (const line of lines) options.onStdoutLine(line);
     });
     child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
-    child.on('error', (err) => {
+    child.on('error', (err: NodeJS.ErrnoException) => {
       if (timer) clearTimeout(timer);
-      reject(err); // e.g. the binary is not on PATH
+      // ENOENT = the binary is not on the spawning process's PATH. The bare `spawn <cmd> ENOENT` is
+      // cryptic and misleads operators into thinking it's a harness bug, so rewrite it into an
+      // actionable remedy that names the CLI and shows the PATH that was actually searched.
+      if (err.code === 'ENOENT') {
+        reject(
+          new HarnessError(
+            `${command} was not found on PATH (spawn ENOENT). Install the ${command} CLI, or add its ` +
+              `directory to the PATH of the process running the fleet (a daemon started from a GUI/launchd ` +
+              `context inherits a minimal PATH, not your login shell's), then resume. ` +
+              `PATH searched: ${options.env.PATH ?? '(unset)'}`,
+          ),
+        );
+        return;
+      }
+      reject(err);
     });
     child.on('close', (code) => {
       if (timer) clearTimeout(timer);

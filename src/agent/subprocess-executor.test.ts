@@ -14,6 +14,8 @@ import {
   backoffMs,
   classifyFailure,
   defaultSpawnProcess,
+  harnessEnv,
+  harnessPathDirs,
   HarnessError,
   isRateLimit,
   parseHarnessOutput,
@@ -115,6 +117,44 @@ describe('defaultSpawnProcess — stdin is closed', () => {
     const result = await defaultSpawnProcess('cat', [], { cwd: process.cwd(), env: process.env });
     expect(result.code).toBe(0);
     expect(result.stdout).toBe('');
+  }, 5000);
+});
+
+describe('harnessEnv — PATH augmentation for GUI/launchd-spawned daemons', () => {
+  it('appends the common harness install dirs a minimal PATH lacks (e.g. ~/.local/bin)', () => {
+    const env = harnessEnv({ PATH: '/usr/bin:/bin', FOO: 'bar' }, '/home/op');
+    const dirs = (env.PATH ?? '').split(':');
+    expect(dirs).toContain('/home/op/.local/bin'); // where cursor-agent's installer drops the CLI
+    expect(dirs).toContain('/opt/homebrew/bin');
+    expect(env.FOO).toBe('bar'); // other env untouched
+  });
+
+  it('keeps the operator PATH ahead and never duplicates an entry it already has', () => {
+    const env = harnessEnv({ PATH: '/home/op/.local/bin:/usr/bin' }, '/home/op');
+    const dirs = (env.PATH ?? '').split(':');
+    expect(dirs[0]).toBe('/home/op/.local/bin'); // existing entry stays first — nothing is shadowed
+    expect(dirs.filter((d) => d === '/home/op/.local/bin')).toHaveLength(1); // deduped
+  });
+
+  it('harnessPathDirs is homedir-relative for ~/.local/bin', () => {
+    expect(harnessPathDirs('/home/op')).toContain('/home/op/.local/bin');
+  });
+});
+
+describe('defaultSpawnProcess — a missing binary (ENOENT) gets an actionable error', () => {
+  it('rewrites the cryptic spawn ENOENT into a remedy that names the CLI and shows the PATH', async () => {
+    await expect(
+      defaultSpawnProcess('cursor-agent-definitely-not-installed', [], {
+        cwd: process.cwd(),
+        env: { PATH: '/nowhere' },
+      }),
+    ).rejects.toThrow(HarnessError);
+    await expect(
+      defaultSpawnProcess('cursor-agent-definitely-not-installed', [], {
+        cwd: process.cwd(),
+        env: { PATH: '/nowhere' },
+      }),
+    ).rejects.toThrow(/was not found on PATH.*PATH searched: \/nowhere/s);
   }, 5000);
 });
 
