@@ -419,7 +419,7 @@ describe('Orchestrator — per-run harness switch', () => {
   });
 
   it('404s an unknown run, 400s an unknown harness, and 409s a terminal run', async () => {
-    const { orchestrator } = setup();
+    const { orchestrator, repo } = setup();
     expect(() => orchestrator.setHarness(99999, 'cursor')).toThrow(/not found/);
 
     const run = orchestrator.start({ issueRef: 'o/r#1' });
@@ -437,6 +437,7 @@ describe('Orchestrator — per-run harness switch', () => {
     } catch (err) {
       expect((err as ApiError).status).toBe(409);
     }
+    expect(repo.getRun(run.id)!.harness).toBe('claude-code'); // both guards precede any write
   });
 
   it('dispatches the next stage on the new harness executor — pause, switch, resume (through the loop)', async () => {
@@ -475,6 +476,39 @@ describe('Orchestrator — per-run harness switch', () => {
     expect(seenClaude).toEqual(['triage', 'plan']); // everything up to the pause, and nothing after
     expect(seenCursor).toContain('plan_review'); // the very next stage onward ran on cursor
     expect(seenCursor).toContain('code_review');
+  });
+
+  it('leaves a paused run paused (no status change, no premature advance)', async () => {
+    const holder: { orchestrator?: Orchestrator } = {};
+    const handler = golden_with_interrupt('plan', (runId) => holder.orchestrator!.pause(runId));
+    const { orchestrator, repo } = setup({ handler });
+    holder.orchestrator = orchestrator;
+
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle(); // parks paused mid-pipeline
+    expect(repo.getRun(run.id)!.status).toBe('paused');
+    const parkedState = repo.getRun(run.id)!.currentState;
+
+    orchestrator.setHarness(run.id, 'cursor');
+    await orchestrator.settle(); // a harness change must NOT kick the run forward
+
+    const after = repo.getRun(run.id)!;
+    expect(after.status).toBe('paused'); // still parked — only Resume advances it
+    expect(after.currentState).toBe(parkedState); // its parked stage is untouched
+    expect(after.harness).toBe('cursor'); // …but the change is applied, ready for the next stage on resume
+  });
+
+  it('400s an unknown harness id and leaves the run (and its overrides) untouched', () => {
+    const { orchestrator, repo } = setup();
+    const run = orchestrator.start({ issueRef: 'o/r#1', model: 'opus', effort: 'high' });
+
+    expectApiError(() => orchestrator.setHarness(run.id, 'gemini'), 400);
+
+    // The validation precedes every write: harness unchanged AND the overrides are NOT cleared.
+    const after = repo.getRun(run.id)!;
+    expect(after.harness).toBe('claude-code');
+    expect(after.modelOverride).toBe('opus');
+    expect(after.effortOverride).toBe('high');
   });
 });
 

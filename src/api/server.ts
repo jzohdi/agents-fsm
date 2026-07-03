@@ -15,13 +15,13 @@
  *   POST /runs/:id/stop         POST /runs/:id/revert
  *   POST /runs/:id/archive      POST /runs/:id/unarchive
  *   POST /runs/:id/cost-override POST /runs/:id/model
- *   POST /runs/:id/harness
+ *   POST /runs/:id/effort       POST /runs/:id/harness
  *   POST /runs/:id/check-pr-feedback   POST /runs/:id/check-reply
  *   GET  /repos                 POST /repos                 POST /repos/watch
  *   POST /repos/source          (Milestone 12: bind clone-on-run / a local directory)
  *   GET  /fs/dirs[?q=]          (Milestone 12: path completions for the local-directory picker)
  *   GET  /config                PUT /config
- *   GET  /cost                  GET /models
+ *   GET  /cost                  GET /models[?harness=]
  *   GET  /suggestions[?q=]      POST /scheduler/check
  *   GET  /settings              PUT /settings/default-harness
  *   GET  /stream[?runId=&repo=] GET /health
@@ -75,7 +75,8 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
   if (method === 'GET' && path === '/cost') return sendJson(res, 200, orch.costStatus());
 
   // --- harness model catalog: selectable models + the daemon default (the model dropdowns). An
-  // optional `?harness=` resolves that harness's catalog (the per-run picker); absent → the default's. ---
+  // optional `?harness=` resolves that harness's catalog (the per-run picker); absent → the default's.
+  // An unknown id is a 400, raised in `getModels` (validation lives in the orchestrator). ---
   if (method === 'GET' && path === '/models') {
     return sendJson(res, 200, orch.getModels(url.searchParams.get('harness') ?? undefined));
   }

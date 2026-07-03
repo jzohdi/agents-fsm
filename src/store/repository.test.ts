@@ -129,10 +129,25 @@ describe('runs', () => {
     expect(repo.getRun(chosen.id)!.harness).toBe('cursor'); // pinned per-run, round-trips through the store
   });
 
-  it('re-points a run at another harness (the per-run harness switch)', () => {
+  it('changes a run harness, writing only that column and round-tripping through the store', () => {
     const run = newRun();
+    expect(repo.getRun(run.id)!.harness).toBe('claude-code');
+
+    // Give it some unrelated state, so we can prove setRunHarness touches only the harness column.
+    repo.setRunModelOverride(run.id, 'sonnet');
+    repo.setRunState(run.id, 'plan');
+
     repo.setRunHarness(run.id, 'cursor');
-    expect(repo.getRun(run.id)!.harness).toBe('cursor');
+    const after = repo.getRun(run.id)!;
+    expect(after.harness).toBe('cursor'); // survives a reload → the "persists across restart" criterion
+    // Only the harness column moved — no incidental clobbering of the run's other fields.
+    expect(after.modelOverride).toBe('sonnet');
+    expect(after.currentState).toBe('plan');
+    expect(after.status).toBe('running');
+
+    // A subsequent change replaces the value in place (not a second row / stale read).
+    repo.setRunHarness(run.id, 'claude-code');
+    expect(repo.getRun(run.id)!.harness).toBe('claude-code');
   });
 
   it('round-trips a setting and upserts on a repeated key', () => {

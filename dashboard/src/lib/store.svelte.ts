@@ -34,7 +34,7 @@ export const ui = $state({
   // Global cost ceiling (Milestone 8 B3): the daemon's configured ceiling (null = off), fetched once.
   // Active spend is derived live from `ui.runs` in `costStatusModel`, so only this constant is fetched.
   costCeiling: null as number | null,
-  // The active harness's model catalog + default (the per-run model picker), fetched once at startup.
+  // The active harness's model catalog + default (the new-run bar's model picker), fetched once at startup.
   models: null as ModelCatalog | null,
   // Per-harness catalog cache (`GET /models?harness=`), keyed by harness id — the per-run picker reads
   // the catalog of the harness the *run* is on, which need not be the daemon default's (`ui.models`).
@@ -360,6 +360,8 @@ export async function setEffort(id: number, effort: string | null): Promise<void
 /**
  * Re-point a run at another harness (the per-run harness selector). Takes effect on the run's next
  * stage; the daemon clears the model/effort overrides (they belong to the old harness's catalog).
+ * The RunDetail catalog follows automatically: its `$effect` on the refreshed run's harness pulls the
+ * new harness's catalog through the per-harness cache (`loadCatalog`).
  */
 export async function setHarness(id: number, harness: string): Promise<void> {
   try {

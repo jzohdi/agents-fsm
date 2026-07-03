@@ -130,37 +130,6 @@ describe('HTTP API', () => {
     expect(bad.status).toBe(400);
   });
 
-  it('re-points a run at another harness via POST /runs/:id/harness, clearing its model override', async () => {
-    // Park the run in needs_human at `plan` so it can't drain to terminal before the switch lands.
-    const { base, repo, orchestrator } = await start({
-      handler: (req) => {
-        if (req.stage === 'plan') throw new Error('parked for the harness-switch test');
-        return goldenPathHandler(req);
-      },
-    });
-
-    const run = (await (await fetch(`${base}/runs`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ issueRef: 'o/r#1', model: 'sonnet' }),
-    })).json()) as { id: number };
-    await orchestrator.settle();
-    expect(repo.getRun(run.id)!.status).toBe('needs_human'); // parked, not terminal — switchable
-
-    const switched = await fetch(`${base}/runs/${run.id}/harness`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ harness: 'cursor' }),
-    });
-    expect(switched.status).toBe(200);
-    expect((await switched.json()) as object).toMatchObject({ harness: 'cursor', modelOverride: null });
-    expect(repo.getRun(run.id)!.harness).toBe('cursor');
-
-    // Unknown harness → 400; missing body field → 400.
-    expect((await fetch(`${base}/runs/${run.id}/harness`, { method: 'POST', body: JSON.stringify({ harness: 'gemini' }) })).status).toBe(400);
-    expect((await fetch(`${base}/runs/${run.id}/harness`, { method: 'POST', body: '{}' })).status).toBe(400);
-  });
-
   it('serves a specific harness\'s catalog via GET /models?harness=, 400ing an unknown one', async () => {
     const { base } = await start();
 
@@ -384,6 +353,42 @@ describe('HTTP API', () => {
     // A bad id → 400; a missing field → 400.
     expect((await fetch(`${base}/settings/default-harness`, { method: 'PUT', body: JSON.stringify({ harness: 'gemini' }) })).status).toBe(400);
     expect((await fetch(`${base}/settings/default-harness`, { method: 'PUT', body: JSON.stringify({}) })).status).toBe(400);
+  });
+
+  it('changes a run harness via POST /runs/:id/harness, clearing its model/effort overrides', async () => {
+    // A malformed-output handler parks the run in needs_human (non-terminal), so the harness change
+    // applies regardless of how far the background drain has progressed — no race on the run finishing.
+    const { base, repo } = await start({ handler: () => ({ output: { unparseable: true } }) });
+
+    const run = (await (await fetch(`${base}/runs`, { method: 'POST', body: JSON.stringify({ issueRef: 'o/r#1', model: 'opus', effort: 'high' }) })).json()) as {
+      id: number;
+      harness: string;
+    };
+    expect(run.harness).toBe('claude-code');
+
+    // A valid harness id is echoed back on the updated run, and the overrides are cleared to null.
+    const set = await fetch(`${base}/runs/${run.id}/harness`, { method: 'POST', body: JSON.stringify({ harness: 'cursor' }) });
+    expect(set.status).toBe(200);
+    const body = (await set.json()) as { harness: string; modelOverride: string | null; effortOverride: string | null };
+    expect(body.harness).toBe('cursor');
+    expect(body.modelOverride).toBeNull();
+    expect(body.effortOverride).toBeNull();
+    expect(repo.getRun(run.id)!.harness).toBe('cursor'); // persisted
+
+    // A missing / non-string body → 400; an unknown harness id → 400.
+    expect((await fetch(`${base}/runs/${run.id}/harness`, { method: 'POST', body: JSON.stringify({}) })).status).toBe(400);
+    expect((await fetch(`${base}/runs/${run.id}/harness`, { method: 'POST', body: JSON.stringify({ harness: 42 }) })).status).toBe(400);
+    expect((await fetch(`${base}/runs/${run.id}/harness`, { method: 'POST', body: JSON.stringify({ harness: 'gemini' }) })).status).toBe(400);
+  });
+
+  it('409s a harness change on a terminal run', async () => {
+    const { base, orchestrator, repo } = await start();
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle(); // drives it to done (terminal)
+    expect(repo.getRun(run.id)!.status).toBe('done');
+
+    expect((await fetch(`${base}/runs/${run.id}/harness`, { method: 'POST', body: JSON.stringify({ harness: 'cursor' }) })).status).toBe(409);
+    expect(repo.getRun(run.id)!.harness).toBe('claude-code'); // unchanged
   });
 
   it('routes POST /runs/:id/check-pr-feedback to an on-demand PR feedback check', async () => {
