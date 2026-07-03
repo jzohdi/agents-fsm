@@ -254,6 +254,16 @@ export interface GitHub {
   commitAndPush(input: CommitAndPushInput): Promise<CommitRef>;
 
   /**
+   * Commit (never push) any uncommitted changes in the run's working tree — the daemon's graceful
+   * shutdown calls this for each stage it interrupted, so the agent's in-progress edits survive the
+   * restart as a `wip` commit on the run branch instead of sitting uncommitted in a tree someone might
+   * clean. Local-only on purpose: pushing WIP would ping PR watchers/feedback pollers with half-done
+   * work. Idempotent + best-effort friendly: a missing tree or a clean tree is a no-op (returns false);
+   * returns true when a savepoint commit was created.
+   */
+  savepointWorkingTree(runId: number, message: string): Promise<boolean>;
+
+  /**
    * The diff of the working branch against its base (`base...branch`) — what `code_review`
    * reads. Branch-relative rather than PR-numbered so it needs no network and is a property
    * of the code, not of the PR record.

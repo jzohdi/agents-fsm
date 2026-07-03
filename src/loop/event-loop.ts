@@ -59,6 +59,23 @@ export const DEPENDENCY_CYCLE_TRIGGER = 'dependency_cycle';
 export const DEFAULT_FEEDBACK_REENTRY_STATE = 'plan';
 
 /**
+ * A stage failure observed **while the daemon is shutting down** ({@link EventLoop.beginShutdown}).
+ * When the operator stops the daemon, in-flight harness children die from the same signal (terminal
+ * Ctrl-C signals the whole process group; a SIGTERM shutdown interrupts them deliberately) — so their
+ * non-zero exits are the *operator's* interruption, not a harness fault. Escalating them would park
+ * healthy runs in `needs_human` (the Run-5 "cursor-agent exited with code 130" bug). Instead the loop
+ * throws this: the drain aborts, the event stays `processing`, and startup recovery
+ * ({@link EventLoop.recover}) re-queues it — the stage simply re-runs where it left off, on the same
+ * branch and working tree (stage side effects are idempotent by design, README §2).
+ */
+export class ShutdownInterruptError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ShutdownInterruptError';
+  }
+}
+
+/**
  * Run flag set when a run is re-opened to address PR feedback. The Agent Runner reads it to inject
  * the open PR + its comment thread into every stage's input (so stages iterate on the existing PR
  * instead of rebuilding it). Once set it stays set for the run's life — a PR, once opened, is always
@@ -96,6 +113,14 @@ export class EventLoop {
    * `start` — starves behind that stage even though the concurrency cap has room.
    */
   private activePump: (() => void) | null = null;
+
+  /**
+   * Graceful-shutdown latch ({@link beginShutdown}). Once set: the claim gate stops handing out new
+   * events (queued work stays `pending` for the next start), and an in-flight stage failure is treated
+   * as an operator interruption ({@link ShutdownInterruptError}) rather than escalated. Never reset —
+   * the loop instance dies with the process.
+   */
+  private shuttingDown = false;
 
   constructor(
     private readonly repo: Repository,
@@ -135,6 +160,21 @@ export class EventLoop {
   /** Reclaim events stranded `processing` by a crash. Call once on startup, before ticking. */
   recover(): number {
     return this.repo.recoverProcessingEvents();
+  }
+
+  /**
+   * Enter shutdown mode (the loop half of the daemon's graceful shutdown; see Orchestrator.shutdown).
+   * From this point on no new event is claimed, and an in-flight stage that fails is *interrupted*
+   * (its event left `processing` for startup recovery), not escalated to `needs_human`. In-flight
+   * stages that complete normally still commit — finished work is never thrown away.
+   */
+  beginShutdown(): void {
+    this.shuttingDown = true;
+  }
+
+  /** Whether {@link beginShutdown} has been called (read by the Orchestrator's shutdown sequencing). */
+  get isShuttingDown(): boolean {
+    return this.shuttingDown;
   }
 
   /**
@@ -435,6 +475,10 @@ export class EventLoop {
    * and {@link drain} (pool) so both honor the ceiling identically.
    */
   private claimNext(): EventRow | undefined {
+    // Shutdown gate first: once the daemon is stopping, no new stage starts — queued events stay
+    // `pending` and dispatch on the next start (recovery kicks the pump). Cheaper and safer than
+    // cancelling: nothing to undo, nothing racing the in-flight workers we are waiting out.
+    if (this.shuttingDown) return undefined;
     const ceiling = this.options.costCeiling;
     if (ceiling === undefined) return this.repo.claimNextEvent();
     const overCeiling = this.repo.sumActiveCost() >= ceiling;
@@ -606,11 +650,25 @@ export class EventLoop {
     try {
       outcome = await this.runner.runStage(run);
     } catch (err) {
+      // During shutdown a failure is (almost surely) our own interruption — the harness child was
+      // signalled, or a git/gh subprocess died with it. Never park the run in `needs_human` for that:
+      // throw so the event stays `processing` and startup recovery re-runs the stage. (If the failure
+      // was actually genuine, the re-run fails again after restart and escalates normally then.)
+      if (this.shuttingDown) {
+        throw new ShutdownInterruptError(`stage "${run.currentState}" of run ${run.id} interrupted by shutdown: ${String(err)}`);
+      }
       if (err instanceof FatalExecutorError) throw err;
       this.escalate(run, event, 'executor_error', { error: String(err) });
       return;
     }
     if (outcome.kind === 'escalate') {
+      // Same shutdown rule for runner-labeled escalations (git_error, malformed_output, …): a git
+      // subprocess or truncated harness stream killed by the shutdown signal must not park the run.
+      if (this.shuttingDown) {
+        throw new ShutdownInterruptError(
+          `stage "${run.currentState}" of run ${run.id} interrupted by shutdown (would have escalated: ${outcome.trigger})`,
+        );
+      }
       // The runner labels *why* it escalated (malformed_output, internal_review_cap, git_error),
       // so the cause is a first-class trigger in the log, not buried in the reason payload.
       this.escalate(run, event, outcome.trigger, outcome.reason);

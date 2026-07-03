@@ -356,6 +356,18 @@ export class GitHubCli implements GitHub {
     return { sha };
   }
 
+  async savepointWorkingTree(runId: number, message: string): Promise<boolean> {
+    const path = this.runTreePath(runId);
+    if (!existsSync(join(path, '.git'))) return false; // no tree (never prepared, or already dropped)
+    const status = await this.git(['status', '--porcelain'], path);
+    if (status.trim().length === 0) return false; // clean — the stage had committed (or written) nothing
+    await this.git(['add', '-A'], path);
+    // Commit locally only — see the interface doc. The commit is authored by the daemon (it, not the
+    // agent, created it), which also keeps it from failing in a tree with no user.name/email configured.
+    await this.git(['-c', 'user.name=agent-fleet', '-c', 'user.email=agent-fleet@localhost', 'commit', '-m', message], path);
+    return true;
+  }
+
   async readDiff(input: ReadDiffInput): Promise<string> {
     // Diff the (local, latest-committed) branch against the up-to-date remote base, so it
     // works even when `base` is not the clone's checked-out default branch. (Not used to feed

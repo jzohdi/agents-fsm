@@ -385,6 +385,15 @@ export class FakeGitHub implements GitHub {
     return { sha };
   }
 
+  /** Records each shutdown savepoint request so a test can assert graceful shutdown committed WIP. */
+  readonly savepoints: Array<{ runId: number; message: string }> = [];
+  async savepointWorkingTree(runId: number, message: string): Promise<boolean> {
+    // Mirrors the real adapter's no-op contract: nothing to save without a prepared tree.
+    if (!this.workingTrees.has(runId)) return false;
+    this.savepoints.push({ runId, message });
+    return true;
+  }
+
   async readDiff(input: ReadDiffInput): Promise<string> {
     const override = this.diffs.get(rangeKey(input.base, input.branch));
     if (override !== undefined) return override;

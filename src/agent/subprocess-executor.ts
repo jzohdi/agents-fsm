@@ -17,7 +17,7 @@
  * cannot silently drift from harness behavior (README Milestone 3 tests).
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { delimiter, join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -606,9 +606,33 @@ function sumTokens(usage: Record<string, unknown> | undefined): number {
  * the result is marked non-zero with a timeout note, so the executor turns it into an escalation
  * rather than letting one stage run forever.
  */
+/**
+ * Live harness children spawned by {@link defaultSpawnProcess}, for the daemon's graceful shutdown.
+ * A terminal Ctrl-C already SIGINTs the whole process group (children included), but a `kill`/launchd
+ * SIGTERM reaches only the daemon — its in-flight `claude`/`cursor-agent` children would keep running
+ * until their stage timeout while shutdown waits. {@link interruptHarnessChildren} closes that gap.
+ */
+const liveHarnessChildren = new Set<ChildProcess>();
+
+/**
+ * SIGINT every live harness child (graceful shutdown): each aborts promptly, its stage failure is
+ * classified as a `ShutdownInterruptError` interruption by the shutting-down loop, and the stage
+ * re-runs on the next daemon start. Idempotent — a child that
+ * already exited (or already took the process group's Ctrl-C SIGINT) is unaffected. Returns how many
+ * children were signalled.
+ */
+export function interruptHarnessChildren(): number {
+  let signalled = 0;
+  for (const child of liveHarnessChildren) {
+    if (child.kill('SIGINT')) signalled++;
+  }
+  return signalled;
+}
+
 export function defaultSpawnProcess(command: string, args: string[], options: SpawnOptions): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd: options.cwd, env: options.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    liveHarnessChildren.add(child);
     let stdout = '';
     let stderr = '';
     let timedOut = false;
@@ -632,6 +656,7 @@ export function defaultSpawnProcess(command: string, args: string[], options: Sp
     });
     child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
     child.on('error', (err: NodeJS.ErrnoException) => {
+      liveHarnessChildren.delete(child);
       if (timer) clearTimeout(timer);
       // ENOENT = the binary is not on the spawning process's PATH. The bare `spawn <cmd> ENOENT` is
       // cryptic and misleads operators into thinking it's a harness bug, so rewrite it into an
@@ -650,6 +675,7 @@ export function defaultSpawnProcess(command: string, args: string[], options: Sp
       reject(err);
     });
     child.on('close', (code) => {
+      liveHarnessChildren.delete(child);
       if (timer) clearTimeout(timer);
       if (options.onStdoutLine && lineBuf.length > 0) options.onStdoutLine(lineBuf); // flush a final newline-less line
       if (timedOut) {

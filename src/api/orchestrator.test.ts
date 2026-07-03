@@ -1270,3 +1270,48 @@ describe('Orchestrator — drain pump wake (mid-flight admission)', () => {
     expect(repo.getRun(b.id)!.status).toBe('done');
   });
 });
+
+describe('Orchestrator — graceful shutdown', () => {
+  it('interrupts an in-flight stage without escalating, savepoints its tree, and leaves the event recoverable', async () => {
+    // A stage held in flight, like a real harness child mid-run when the operator hits Ctrl-C.
+    let interrupt: ((err: Error) => void) | undefined;
+    const stub = new StubExecutor(goldenPathHandler);
+    const executor: StageExecutor = {
+      run(req: AgentRunRequest): Promise<AgentRunResult> {
+        if (req.stage === 'plan' && !interrupt) {
+          return new Promise((_, reject) => {
+            interrupt = reject;
+          });
+        }
+        return stub.run(req);
+      },
+    };
+    const { orchestrator, repo, github } = setup({ executor });
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    for (let i = 0; i < 200 && !interrupt; i++) await new Promise((r) => setTimeout(r, 0)); // until plan is in flight
+    expect(interrupt).toBeDefined(); // plan started: its working tree exists, its harness "child" is live
+
+    const shutdown = orchestrator.shutdown(); // latch the loop, then wait for the drain to settle…
+    interrupt!(new Error('cursor-agent exited with code 130: Aborting operation...')); // …as the signalled child dies
+    const summary = await shutdown;
+
+    // The interruption was recognized as shutdown, not misfiled as a harness failure.
+    expect(summary).toEqual({ interruptedRuns: 1, savepointed: 1 });
+    expect(github.savepoints).toEqual([{ runId: run.id, message: `wip: shutdown savepoint (run ${run.id}, stage plan)` }]);
+    const parked = repo.getRun(run.id)!;
+    expect(parked.status).toBe('running'); // NOT needs_human
+    expect(parked.currentState).toBe('plan'); // still at the interrupted stage
+    // The event is stranded `processing` — exactly what the next start's recover() re-queues.
+    expect(repo.listProcessingRunIds()).toEqual([run.id]);
+    expect(repo.recoverProcessingEvents()).toBe(1);
+  });
+
+  it('with nothing in flight, shutdown is a clean no-op summary', async () => {
+    const { orchestrator, repo } = setup();
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle(); // run completes before shutdown begins
+
+    expect(await orchestrator.shutdown()).toEqual({ interruptedRuns: 0, savepointed: 0 });
+    expect(repo.getRun(run.id)!.status).toBe('done'); // untouched
+  });
+});

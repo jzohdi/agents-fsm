@@ -21,7 +21,7 @@ import {
   type StubHandler,
 } from '../agent/executor';
 import { FakeGitHub } from '../integration/github-fake';
-import { ADDRESSING_PR_FEEDBACK_FLAG, EVENT_ADVANCE, EventLoop, PR_FEEDBACK_TRIGGER, type EventLoopOptions } from './event-loop';
+import { ADDRESSING_PR_FEEDBACK_FLAG, EVENT_ADVANCE, EventLoop, PR_FEEDBACK_TRIGGER, ShutdownInterruptError, type EventLoopOptions } from './event-loop';
 
 function setup(handler: StubHandler, opts: EventLoopOptions = {}, fsmOverride?: (fsm: FsmConfig) => FsmConfig) {
   const loaded = loadDefaultConfig();
@@ -1153,5 +1153,115 @@ describe('dependency-scheduling control methods (Milestone 9)', () => {
     const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
     repo.setRunStatus(run.id, 'awaiting_input');
     expect(() => loop.escalateDependencyCycle(run.id, { kind: 'dependency_cycle' })).toThrow(/not running\/blocked/);
+  });
+});
+
+describe('graceful shutdown (interruption ≠ escalation)', () => {
+  // Simulate the daemon's restart: a fresh loop over the same store (the shutdown latch dies with the
+  // old instance), recovering stranded events exactly like `Orchestrator.recover()` does on boot.
+  function restart(repo: Repository, runner: AgentRunner) {
+    const loaded = loadDefaultConfig();
+    const loop = new EventLoop(repo, loaded.fsm, loaded.version, runner);
+    loop.recover();
+    return loop;
+  }
+
+  it('stops claiming new events once shutdown begins; queued work dispatches on the next start', async () => {
+    const { repo, loop, runner } = setup(goldenPathHandler);
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+
+    loop.beginShutdown();
+    await loop.runUntilIdle(); // idles immediately — the claim gate hands out nothing
+
+    expect(repo.getRun(run.id)!.currentState).toBe('triage'); // untouched
+    expect(repo.getRun(run.id)!.status).toBe('running');
+    expect(repo.listAgentRuns(run.id)).toHaveLength(0); // no stage ever started
+
+    const resumed = restart(repo, runner);
+    await resumed.runUntilIdle();
+    expect(repo.getRun(run.id)!.currentState).toBe('done'); // picked up right where it waited
+  });
+
+  it('an executor failure during shutdown interrupts (recoverable) instead of parking the run needs_human', async () => {
+    // The Run-5 regression: Ctrl-C SIGINTs the harness child ("cursor-agent exited with code 130"),
+    // and that operator interruption must not become an executor_error escalation.
+    const ref: { loop?: EventLoop } = {};
+    let first = true;
+    const handler: StubHandler = (req) => {
+      if (req.stage === 'plan' && req.phase === 'produce' && first) {
+        first = false;
+        ref.loop!.beginShutdown(); // the shutdown signal lands while this stage is in flight…
+        throw new Error('cursor-agent exited with code 130: Aborting operation...'); // …and kills its child
+      }
+      return goldenPathHandler(req);
+    };
+    const { repo, loop, runner } = setup(handler);
+    ref.loop = loop;
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+
+    await expect(loop.runUntilIdle()).rejects.toThrow(ShutdownInterruptError);
+
+    const parked = repo.getRun(run.id)!;
+    expect(parked.status).toBe('running'); // NOT needs_human — the operator, not the harness, did this
+    expect(parked.currentState).toBe('plan'); // still at the interrupted stage
+    expect(sequence(repo, run.id).some(([, trigger]) => trigger === 'executor_error')).toBe(false);
+    expect(repo.listProcessingRunIds()).toEqual([run.id]); // the event is stranded, i.e. recoverable
+
+    const resumed = restart(repo, runner);
+    await resumed.runUntilIdle();
+    expect(repo.getRun(run.id)!.currentState).toBe('done'); // the interrupted stage simply re-ran
+  });
+
+  it('a runner-labeled escalation during shutdown (e.g. git_error from a signalled git) is also an interruption', async () => {
+    const ref: { loop?: EventLoop } = {};
+    let failPush = true;
+    const handler: StubHandler = (req) => {
+      if (req.stage === 'plan' && req.phase === 'produce' && failPush) {
+        ref.loop!.beginShutdown(); // shutdown lands mid-stage; the git child dies with the process group
+      }
+      return goldenPathHandler(req);
+    };
+    const { repo, loop, github, runner } = setup(handler);
+    ref.loop = loop;
+    const realCommit = github.commitAndPush.bind(github);
+    github.commitAndPush = (input) => {
+      if (failPush) {
+        failPush = false;
+        return Promise.reject(new Error('git: terminated by signal'));
+      }
+      return realCommit(input);
+    };
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+
+    await expect(loop.runUntilIdle()).rejects.toThrow(/interrupted by shutdown \(would have escalated: git_error\)/);
+
+    expect(repo.getRun(run.id)!.status).toBe('running'); // never parked
+    expect(sequence(repo, run.id).some(([, trigger]) => trigger === 'git_error')).toBe(false);
+
+    const resumed = restart(repo, runner);
+    await resumed.runUntilIdle();
+    expect(repo.getRun(run.id)!.currentState).toBe('done');
+  });
+
+  it('a stage that finishes during shutdown still commits — completed work is never thrown away', async () => {
+    const ref: { loop?: EventLoop } = {};
+    const handler: StubHandler = (req) => {
+      if (req.stage === 'plan' && req.phase === 'produce') ref.loop!.beginShutdown(); // lands mid-stage…
+      return goldenPathHandler(req); // …but the stage completes normally
+    };
+    const { repo, loop, runner } = setup(handler);
+    ref.loop = loop;
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+
+    await loop.runUntilIdle(); // no throw: the in-flight stage commits, then the gate stops the loop
+
+    const paused = repo.getRun(run.id)!;
+    expect(paused.currentState).toBe('plan_review'); // plan's transition committed
+    expect(paused.status).toBe('running');
+    expect(sequence(repo, run.id).at(-1)).toEqual(['plan', 'proceed', 'plan_review']);
+
+    const resumed = restart(repo, runner);
+    await resumed.runUntilIdle();
+    expect(repo.getRun(run.id)!.currentState).toBe('done'); // the pending follow-up dispatched on restart
   });
 });

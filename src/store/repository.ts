@@ -866,6 +866,17 @@ export class Repository {
   }
 
   /**
+   * The run ids whose event is stranded `processing` — after a graceful shutdown's drain settles,
+   * these are exactly the runs whose in-flight stage was interrupted (a finished stage marks its
+   * event done; an unstarted one is still `pending`). The Orchestrator savepoints their working
+   * trees before exit; `recoverProcessingEvents` re-queues them on the next start.
+   */
+  listProcessingRunIds(): number[] {
+    const rows = this.db.prepare("SELECT DISTINCT run_id FROM events WHERE status = 'processing'").all() as Array<{ run_id: number }>;
+    return rows.map((r) => r.run_id);
+  }
+
+  /**
    * Reclaim events stranded in `processing` by a crash, resetting them to `pending`
    * so they are re-picked-up. The event loop calls this once on startup; without it
    * `claimNextEvent` (which only selects `pending`) would never see them again,

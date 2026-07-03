@@ -16,7 +16,8 @@
  */
 
 import { saveConfig, type LoadedConfig } from '../fsm/config';
-import { EventLoop } from '../loop/event-loop';
+import { EventLoop, ShutdownInterruptError } from '../loop/event-loop';
+import { interruptHarnessChildren } from '../agent/subprocess-executor';
 import { PrFeedbackPoller, type PrFeedbackCheck } from '../loop/pr-feedback-poller';
 import { SchedulerPoller, type SchedulerPass } from '../loop/scheduler-poller';
 import { IssueIntakePoller, type IntakePass } from '../loop/issue-intake-poller';
@@ -215,6 +216,47 @@ export class Orchestrator {
   recover(): void {
     this.loop.recover();
     this.kick();
+  }
+
+  /**
+   * Graceful shutdown (the daemon's SIGINT/SIGTERM path). Pauses the fleet in a state the next start
+   * resumes from exactly where it left off:
+   *
+   *  1. **Stop dispatching** — the loop's shutdown latch keeps the pump from claiming new events;
+   *     queued work stays `pending` and dispatches on the next start's `recover()`.
+   *  2. **Interrupt in-flight harness children** — a terminal Ctrl-C already SIGINTs them via the
+   *     process group; this covers SIGTERM (kill/launchd) so shutdown never waits out a stage timeout.
+   *  3. **Wait for the drain to settle** — an interrupted stage's failure surfaces as a
+   *     {@link ShutdownInterruptError} (never a `needs_human` escalation) and its event stays
+   *     `processing`, which startup recovery re-queues; a stage that finishes in this window still
+   *     commits its transition normally, so completed work is never discarded.
+   *  4. **Savepoint** — each interrupted run's dirty working tree is committed locally
+   *     (`wip: shutdown savepoint …`, never pushed) so the agent's in-progress edits survive and the
+   *     re-run stage finds them in the tree + `git log`.
+   *
+   * Returns a summary for the daemon's shutdown log. Idempotent; safe with zero in-flight work.
+   */
+  async shutdown(): Promise<{ interruptedRuns: number; savepointed: number }> {
+    this.loop.beginShutdown();
+    interruptHarnessChildren();
+    await this.current; // the background drain (if any) — its workers either commit or abort as interrupted
+    const runIds = this.repo.listProcessingRunIds();
+    let savepointed = 0;
+    for (const runId of runIds) {
+      const run = this.repo.getRun(runId);
+      if (!run) continue;
+      try {
+        // Savepoints are best-effort by contract: a failure (missing tree, git hiccup) must never block
+        // exit — worst case the stage re-runs from its last commit, the same crash recovery already handles.
+        const committed = await this.resolver
+          .for(run.repoRef)
+          .github.savepointWorkingTree(run.id, `wip: shutdown savepoint (run ${run.id}, stage ${run.currentState})`);
+        if (committed) savepointed++;
+      } catch (err) {
+        console.error(`[shutdown] savepoint for run ${run.id} failed (continuing): ${String(err)}`);
+      }
+    }
+    return { interruptedRuns: runIds.length, savepointed };
   }
 
   // --- commands ----------------------------------------------------------------
@@ -924,6 +966,13 @@ export class Orchestrator {
         await this.loop.drain(this.concurrency);
       } while (this.rerun);
     } catch (err) {
+      // An interruption during graceful shutdown is expected, not an error: the event stays
+      // `processing` and the next start resumes it. Log it calmly so the operator's Ctrl-C doesn't
+      // end on a scary stack trace for behavior that is working as designed.
+      if (err instanceof ShutdownInterruptError) {
+        console.log(`[shutdown] ${err.message} — it will resume on the next start`);
+        return;
+      }
       // A throwing drain (e.g. a FatalExecutorError when the harness is unauthenticated) aborts the
       // whole pass; surface it rather than crashing the daemon. The triggering event stays recoverable
       // (unmarked), so fixing the cause and re-kicking resumes from there.

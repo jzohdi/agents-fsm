@@ -423,6 +423,28 @@ describe('GitHubCli — local git (real temp repo)', () => {
     expect(statSync(join(again.path, '.git')).isFile()).toBe(true); // a live worktree again
   });
 
+  it('savepointWorkingTree commits dirty work locally (never pushes); clean or missing trees are no-ops', async () => {
+    const remote = makeRemote();
+    const workingRoot = mkdtempSync(join(tmpdir(), 'agent-fleet-work-'));
+    const gh = new GitHubCli({ repo: 'o/r', workingRoot, cloneUrl: remote });
+
+    // No tree prepared yet → nothing to save (the run never reached a working-tree stage).
+    expect(await gh.savepointWorkingTree(21, 'wip: shutdown savepoint (run 21, stage plan)')).toBe(false);
+
+    const tree = await gh.prepareWorkingTree({ runId: 21, branch: 'agent/run-21', base: 'main' });
+    // Clean tree → no empty savepoint commit.
+    expect(await gh.savepointWorkingTree(21, 'wip: shutdown savepoint (run 21, stage plan)')).toBe(false);
+
+    // Dirty tree (the agent was mid-edit when the daemon shut down) → committed, tree clean after.
+    writeFileSync(join(tree.path, 'half-done.txt'), 'in progress\n');
+    expect(await gh.savepointWorkingTree(21, 'wip: shutdown savepoint (run 21, stage tdd)')).toBe(true);
+    expect(git(tree.path, ['log', '-1', '--pretty=%s'])).toContain('shutdown savepoint');
+    expect(git(tree.path, ['status', '--porcelain']).trim()).toBe('');
+
+    // Local-only by contract: the run branch never reached the remote.
+    expect(execFileSync('git', ['ls-remote', '--heads', remote, 'agent/run-21'], { encoding: 'utf8' }).trim()).toBe('');
+  });
+
   it('syncBaseBranch fast-forwards a clean on-base checkout, and leaves a dirty/off-base one alone', async () => {
     const remote = makeRemote();
     const localRoot = mkdtempSync(join(tmpdir(), 'agent-fleet-local-'));

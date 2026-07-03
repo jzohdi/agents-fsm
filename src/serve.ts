@@ -71,22 +71,60 @@ export async function serve(args: CliArgs): Promise<void> {
   // switch as the other pollers; the Orchestrator owns the poller instance.
   const stopIntakePolling = startIssueIntakePolling(orchestrator, args);
 
-  // Graceful shutdown: stop accepting connections and clear the poll timer so the process can exit.
+  // Graceful shutdown (SIGINT/SIGTERM): pause the fleet so the next start resumes where it left off.
+  // Order matters: pollers first (no new work admitted), then the Orchestrator's shutdown — stop
+  // claiming events, interrupt in-flight harness children, wait for the drain to settle, savepoint
+  // interrupted runs' dirty worktrees — then close HTTP + SSE. An interrupted stage is *not* escalated
+  // to needs_human (it wasn't a harness fault); its event stays `processing` and `recover()` re-runs it
+  // on the next start. A second signal force-quits, and a hard cap keeps a wedged child from hanging
+  // the exit — either way, events stay recoverable, which is the same guarantee a crash already has.
   await new Promise<void>((resolve) => {
+    const forceQuit = () => {
+      console.error('\nForced shutdown — in-flight stages will be recovered on the next start.');
+      process.exit(130);
+    };
     const shutdown = () => {
-      console.log('\nShutting down…');
+      console.log('\nShutting down gracefully… (press Ctrl-C again to force-quit)');
+      process.once('SIGINT', forceQuit);
+      process.once('SIGTERM', forceQuit);
       stopPolling();
       stopFeedbackPolling();
       stopSchedulerPolling();
       stopIntakePolling();
-      server.close(() => resolve());
-      // Long-lived SSE connections would otherwise keep `close` from ever completing — terminate them
-      // so the process can exit promptly on Ctrl-C (Node ≥18.2; engines require ≥20).
-      server.closeAllConnections();
+      void (async () => {
+        const summary = await withTimeout(orchestrator.shutdown(), SHUTDOWN_GRACE_MS);
+        if (summary) {
+          if (summary.interruptedRuns > 0) {
+            console.log(
+              `  ${summary.interruptedRuns} in-flight stage(s) interrupted (${summary.savepointed} savepoint commit(s)); they resume on the next start.`,
+            );
+          }
+        } else {
+          console.warn('  shutdown grace period elapsed; exiting anyway — in-flight stages will be recovered on the next start.');
+        }
+        server.close(() => resolve());
+        // Long-lived SSE connections would otherwise keep `close` from ever completing — terminate them
+        // so the process can exit promptly on Ctrl-C (Node ≥18.2; engines require ≥20).
+        server.closeAllConnections();
+      })();
     };
     process.once('SIGINT', shutdown);
     process.once('SIGTERM', shutdown);
   });
+}
+
+/** How long a graceful shutdown waits for in-flight stages to abort/finish before exiting anyway. */
+const SHUTDOWN_GRACE_MS = 30_000;
+
+/** Resolve with `promise`'s value, or `undefined` if it hasn't settled within `ms` (never rejects the race). */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  return Promise.race([
+    promise.catch((err) => {
+      console.error(`[shutdown] ${String(err)}`);
+      return undefined;
+    }),
+    new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), ms).unref()),
+  ]);
 }
 
 function listen(server: Server, port: number): Promise<void> {

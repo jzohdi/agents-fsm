@@ -17,6 +17,7 @@ import {
   harnessEnv,
   harnessPathDirs,
   HarnessError,
+  interruptHarnessChildren,
   isRateLimit,
   parseHarnessOutput,
   RateLimitError,
@@ -139,6 +140,17 @@ describe('harnessEnv — PATH augmentation for GUI/launchd-spawned daemons', () 
   it('harnessPathDirs is homedir-relative for ~/.local/bin', () => {
     expect(harnessPathDirs('/home/op')).toContain('/home/op/.local/bin');
   });
+});
+
+describe('interruptHarnessChildren — the daemon-shutdown seam', () => {
+  it('SIGINTs a live child so shutdown never waits out a stage timeout, and forgets it once it exits', async () => {
+    // A real child that would run far longer than any shutdown grace period.
+    const pending = defaultSpawnProcess('sleep', ['30'], { cwd: process.cwd(), env: process.env });
+    expect(interruptHarnessChildren()).toBeGreaterThanOrEqual(1); // registered synchronously at spawn
+    const result = await pending;
+    expect(result.code).not.toBe(0); // died from the signal, not a clean exit
+    expect(interruptHarnessChildren()).toBe(0); // deregistered on close — nothing left to signal
+  }, 5000);
 });
 
 describe('defaultSpawnProcess — a missing binary (ENOENT) gets an actionable error', () => {
