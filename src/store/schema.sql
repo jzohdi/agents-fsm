@@ -159,7 +159,13 @@ CREATE TABLE IF NOT EXISTS repos (
   -- Off by default — enrolling a repo makes it serviceable, watching it is a separate opt-in. Appended
   -- after `created_at` so a fresh schema matches a DB retrofitted by the additive migration (db drift guard).
   watch        INTEGER NOT NULL DEFAULT 0,         -- 1 = auto-pick eligible open issues; 0 = manual runs only
-  watch_label  TEXT                                -- label that bypasses the intake guards; NULL → default 'agent help wanted'
+  watch_label  TEXT,                               -- label that bypasses the intake guards; NULL → default 'agent help wanted'
+  -- Working-directory source binding (Milestone 12). The fleet must know where a repo lives before it can
+  -- run: NULL = unconfigured (attached but no working directory chosen → runs blocked with an actionable
+  -- error); 'clone' = clone a fresh per-run tree from the GitHub remote; 'local' = use `local_repo` as a
+  -- validated local checkout via `git worktree` (isolated per-run tree, shared object store). Appended last
+  -- so a fresh schema matches a DB retrofitted by the additive migration (db drift guard).
+  source_mode  TEXT                                -- NULL = unconfigured | 'clone' | 'local' (with local_repo set)
 );
 
 -- A tiny key/value store for daemon-level settings that must survive restarts (multi-harness support).

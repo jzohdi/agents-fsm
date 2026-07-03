@@ -52,6 +52,9 @@ export class IssueIntakePoller {
     const currentSkips = new Set<string>();
     for (const repo of this.repo.listRepos()) {
       if (!repo.watch) continue;
+      // Defensive: `setRepoWatch` refuses to watch an unconfigured repo, but skip one here too so a repo
+      // that lost its source binding never has its auto-picked runs bounce at the start gate (Milestone 12).
+      if (repo.sourceMode === null) continue;
       pass.reposScanned += 1;
       try {
         await this.checkRepo(repo.repoRef, repo.watchLabel ?? DEFAULT_WATCH_LABEL, pass, currentSkips);

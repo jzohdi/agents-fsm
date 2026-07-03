@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   ConfigValidationError,
+  DEFAULT_REVIEW_CAP,
   hashConfig,
   loadDefaultConfig,
   parseConfigFile,
@@ -40,7 +41,7 @@ describe('default config', () => {
     expect(recipeFor('code_review', agents).phases).toEqual(['produce']);
     // Producing stages fall back to the full default recipe.
     expect(recipeFor('plan', agents).phases).toEqual(['produce', 'self_review', 'simplify']);
-    expect(recipeFor('plan', agents).reviewCap).toBe(2);
+    expect(recipeFor('plan', agents).reviewCap).toBe(DEFAULT_REVIEW_CAP);
   });
 
   it('declares the per-stage io for the default pipeline', () => {

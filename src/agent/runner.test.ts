@@ -98,6 +98,39 @@ describe('AgentRunner — phase recipe', () => {
     ]);
   });
 
+  it('gives each round its context, carrying the previous findings from round 2 on (convergence aid)', async () => {
+    const reviewRounds: unknown[] = [];
+    const fixRounds: unknown[] = [];
+    let reviews = 0;
+    const { runner, run } = setup(
+      (req) => {
+        const round = (req.input as { reviewRound?: unknown }).reviewRound;
+        if (req.phase === 'self_review') {
+          reviewRounds.push(round);
+          reviews += 1;
+          return { output: { acceptable: reviews > 2, notes: `round ${reviews} findings` } };
+        }
+        if (req.phase === 'simplify') fixRounds.push(round);
+        return { output: { requestedTransition: 'proceed' } };
+      },
+      { plan: { phases: ['produce', 'self_review', 'simplify'], reviewCap: 3 } },
+    );
+
+    const outcome = await runner.runStage(run);
+
+    expect(outcome.kind).toBe('handoff'); // converged on round 3
+    expect(reviewRounds).toEqual([
+      { round: 1, cap: 3 },
+      { round: 2, cap: 3, previousNotes: 'round 1 findings' },
+      { round: 3, cap: 3, previousNotes: 'round 2 findings' },
+    ]);
+    // The fix phase shares the same round context it is fixing within.
+    expect(fixRounds).toEqual([
+      { round: 1, cap: 3 },
+      { round: 2, cap: 3, previousNotes: 'round 1 findings' },
+    ]);
+  });
+
   it('hands off after produce only when the recipe has no self-review', async () => {
     const { repo, runner, run } = setup(() => ({ output: { requestedTransition: 'approve' } }), {
       plan: { phases: ['produce'] },
@@ -174,7 +207,7 @@ describe('AgentRunner — harness request', () => {
     }
   });
 
-  it('forwards the run reasoning effort to the frontier phases only, not the cheap simplify pass', async () => {
+  it('forwards the run reasoning effort to every frontier-role phase — including the fix pass', async () => {
     const seen: AgentRunRequest[] = [];
     const handler: StubHandler = (req) => {
       seen.push(req);
@@ -186,12 +219,32 @@ describe('AgentRunner — harness request', () => {
 
     await runner.runStage(repo.getRun(run.id)!);
 
-    // produce uses the frontier role, so it carries the effort; simplify is the cheap role, left untouched.
+    // All default phases use the frontier role now (the fix pass must match the reviewer), so all carry the effort.
     expect(seen.find((r) => r.phase === 'produce')!.effort).toBe('high');
-    expect(seen.find((r) => r.phase === 'simplify')!.effort).toBeUndefined();
+    expect(seen.find((r) => r.phase === 'simplify')!.effort).toBe('high');
   });
 
-  it('omits allowedTools and the working dir for a tree-less triage stage', async () => {
+  it('spares a phase explicitly configured onto a cheaper logical model from the effort override', async () => {
+    const seen: AgentRunRequest[] = [];
+    const handler: StubHandler = (req) => {
+      seen.push(req);
+      if (req.phase === 'self_review') return { output: { acceptable: false, notes: 'again' } };
+      return { output: { requestedTransition: 'proceed' } };
+    };
+    const { repo, runner, run } = setup(handler, {
+      plan: { phases: ['produce', 'self_review', 'simplify'], reviewCap: 1, models: { simplify: 'cheap' } },
+    });
+    repo.setRunEffortOverride(run.id, 'high');
+
+    await runner.runStage(repo.getRun(run.id)!);
+
+    expect(seen.find((r) => r.phase === 'produce')!.effort).toBe('high');
+    expect(seen.find((r) => r.phase === 'simplify')!.effort).toBeUndefined(); // stays on its configured cheap role
+  });
+
+  it('runs triage inside the prepared repo checkout, still omitting allowedTools (Milestone 12)', async () => {
+    // triage prepares a working tree so the harness runs *in the target repo*, not the daemon's own cwd
+    // (the tmux-speedrun#35 failure). It still carries no allowedTools (that's a per-recipe setting).
     const seen: AgentRunRequest[] = [];
     const { runner, run } = setup(
       (req) => {
@@ -206,7 +259,7 @@ describe('AgentRunner — harness request', () => {
     await runner.runStage(run);
 
     expect(seen[0]!.allowedTools).toBeUndefined();
-    expect(seen[0]!.workingDir).toBeUndefined();
+    expect(seen[0]!.workingDir).toBe(`/tmp/agent-fleet-fake/run-${run.id}`);
   });
 
   it('records a failed agent_run and propagates when the executor throws', async () => {
@@ -481,7 +534,7 @@ describe('AgentRunner — malformed output (retry, then escalate, never coerce)'
 
 describe('AgentRunner — per-run model override', () => {
   /** Run one produce → self_review → simplify stage, capturing the model each phase asked the harness for. */
-  async function modelsForOverride(override: string | null): Promise<Record<string, string>> {
+  async function modelsForOverride(override: string | null, agents: AgentsConfig = {}): Promise<Record<string, string>> {
     const models: Record<string, string> = {};
     // Reject the first review so `simplify` also runs, giving us all three phases in one stage.
     let reviewed = false;
@@ -493,24 +546,32 @@ describe('AgentRunner — per-run model override', () => {
       }
       if (req.phase === 'self_review') return { output: { acceptable: true } };
       return { output: { requestedTransition: 'proceed' } };
-    });
+    }, agents);
     repo.setRunModelOverride(run.id, override);
     await runner.runStage(repo.getRun(run.id)!); // fresh snapshot, the way the loop dispatches a stage
     return models;
   }
 
-  it('replaces the frontier role (produce + self_review) but leaves the cheap simplify phase', async () => {
+  it('replaces every frontier-role phase — produce, self_review, and the fix pass', async () => {
     const models = await modelsForOverride('sonnet');
     expect(models.produce).toBe('sonnet');
     expect(models.self_review).toBe('sonnet');
-    expect(models.simplify).toBe('cheap'); // the cheaper pass is untouched by the override
+    expect(models.simplify).toBe('sonnet'); // the fix pass runs on the same brain as the reviewer
   });
 
   it('falls through to the recipe logical models when no override is set', async () => {
     const models = await modelsForOverride(null);
     expect(models.produce).toBe('frontier'); // the Layer-5 executor resolves these logical names
     expect(models.self_review).toBe('frontier');
-    expect(models.simplify).toBe('cheap');
+    expect(models.simplify).toBe('frontier');
+  });
+
+  it('leaves a phase explicitly configured onto a cheaper logical model untouched by the override', async () => {
+    const models = await modelsForOverride('sonnet', {
+      plan: { phases: ['produce', 'self_review', 'simplify'], models: { simplify: 'cheap' } },
+    });
+    expect(models.produce).toBe('sonnet');
+    expect(models.simplify).toBe('cheap'); // per-stage config wins over the default frontier fix pass
   });
 });
 

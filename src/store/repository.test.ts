@@ -129,6 +129,12 @@ describe('runs', () => {
     expect(repo.getRun(chosen.id)!.harness).toBe('cursor'); // pinned per-run, round-trips through the store
   });
 
+  it('re-points a run at another harness (the per-run harness switch)', () => {
+    const run = newRun();
+    repo.setRunHarness(run.id, 'cursor');
+    expect(repo.getRun(run.id)!.harness).toBe('cursor');
+  });
+
   it('round-trips a setting and upserts on a repeated key', () => {
     expect(repo.getSetting('default_harness')).toBeUndefined(); // never set → undefined
     repo.setSetting('default_harness', 'cursor');
@@ -534,8 +540,32 @@ describe('repos registry (Milestone 8 Phase A)', () => {
       localRepo: null,
       watch: false, // continuous mode is opt-in (Milestone 11)
       watchLabel: null,
+      sourceMode: null, // no working directory until one is chosen (Milestone 12)
     });
     expect(repo.getRepo('owner/repo')).toEqual(enrolled);
+  });
+
+  it('binds a working-directory source independently of the adapter config, surviving a re-enroll (Milestone 12)', () => {
+    repo.upsertRepo({ repoRef: 'o/r', workingRoot: './a' });
+    expect(repo.getRepo('o/r')?.sourceMode).toBeNull(); // unconfigured
+
+    // Clone-on-run: no local path.
+    repo.setRepoSource('o/r', 'clone', null);
+    expect(repo.getRepo('o/r')).toMatchObject({ sourceMode: 'clone', localRepo: null });
+
+    // Local mode: stores the path…
+    repo.setRepoSource('o/r', 'local', '/home/me/o-r');
+    expect(repo.getRepo('o/r')).toMatchObject({ sourceMode: 'local', localRepo: '/home/me/o-r' });
+
+    // …and a re-enroll (upsert never touches the source columns) keeps it.
+    repo.upsertRepo({ repoRef: 'o/r', workingRoot: './b', baseBranch: 'develop' });
+    expect(repo.getRepo('o/r')).toMatchObject({ workingRoot: './b', sourceMode: 'local', localRepo: '/home/me/o-r' });
+
+    // Switching back to clone clears the stored path; `null` returns it to unconfigured.
+    repo.setRepoSource('o/r', 'clone', null);
+    expect(repo.getRepo('o/r')?.localRepo).toBeNull();
+    repo.setRepoSource('o/r', null, null);
+    expect(repo.getRepo('o/r')?.sourceMode).toBeNull();
   });
 
   it('toggles watch independently of the adapter config (Milestone 11)', () => {

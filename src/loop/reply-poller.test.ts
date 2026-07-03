@@ -10,6 +10,7 @@ import { goldenPathHandler, StubExecutor, type StubHandler } from '../agent/exec
 import { AgentRunner } from '../agent/runner';
 import { loadDefaultConfig } from '../fsm/config';
 import { FakeGitHub } from '../integration/github-fake';
+import { BOT_COMMENT_MARKER } from '../integration/issue-markers';
 import type { RepoResolver } from '../integration/github-resolver';
 import { openDb } from '../store/db';
 import { Repository, type Run } from '../store/repository';
@@ -21,10 +22,11 @@ const ISSUE_REF = 'o/r#7';
 const BOT = 'bot[bot]';
 const noopSleep = () => Promise.resolve();
 
-/** Build a run, drive it through triage so it clarifies and parks awaiting the human. */
-async function parkOnClarify(handler: StubHandler) {
+/** Build a run, drive it through triage so it clarifies and parks awaiting the human. `botLogin` sets
+ *  the login the daemon posts under — pass the operator's own login to exercise the shared-identity case. */
+async function parkOnClarify(handler: StubHandler, botLogin = BOT) {
   const repo = new Repository(openDb(':memory:'));
-  const github = new FakeGitHub({ repoRef: 'o/r', botLogin: BOT });
+  const github = new FakeGitHub({ repoRef: 'o/r', botLogin });
   github.seedIssue(ISSUE_REF, { number: 7, title: 'Do a thing' });
   const runner = new AgentRunner(repo, new StubExecutor(handler), agents, github);
   const loop = new EventLoop(repo, fsm, version, runner);
@@ -73,12 +75,25 @@ describe('ReplyPoller — checkOnce', () => {
     expect(repo.getRun(run.id)!.status).toBe('awaiting_input'); // still parked
   });
 
-  it('ignores a later comment authored by the bot itself (not a human reply)', async () => {
+  it('ignores a later comment the fleet posted itself (identified by its marker, not a human reply)', async () => {
     const { repo, github, loop } = await parkOnClarify(alwaysClarify);
-    github.seedIssueComment(7, { author: BOT, body: 'a follow-up from the agent' });
+    // A fleet-posted comment carries the bot marker — even a later one is not a human reply.
+    github.seedIssueComment(7, { author: BOT, body: `a follow-up from the agent\n\n${BOT_COMMENT_MARKER}` });
 
     const poller = new ReplyPoller(repo, github, loop, { sleep: noopSleep });
     expect(await poller.checkOnce()).toBe(0);
+  });
+
+  it('detects the human reply even when the daemon posts under the operator\'s own login (shared-identity bug)', async () => {
+    // The real-world case: the daemon comments via the operator's `gh` account, so the "bot" login and
+    // the human's login are identical. Author-based filtering rejected the reply; the marker fixes it.
+    const OPERATOR = 'jzohdi';
+    const { repo, github, loop, run } = await parkOnClarify(alwaysClarify, OPERATOR);
+    github.seedIssueComment(7, { author: OPERATOR, body: 'feedback: use Postgres, proceed.' }); // human reply, same login, no marker
+
+    const poller = new ReplyPoller(repo, github, loop, { sleep: noopSleep });
+    expect(await poller.checkOnce()).toBe(1);
+    expect(repo.getRun(run.id)!.status).toBe('running');
   });
 
   it('survives a transient read error on one run (logs it, leaves the run parked, does not throw)', async () => {
@@ -118,6 +133,33 @@ describe('ReplyPoller — checkOnce', () => {
     expect(await poller.checkOnce()).toBe(1);
     await loop.runUntilIdle();
     expect(repo.getRun(run.id)!.status).toBe('done');
+  });
+});
+
+describe('ReplyPoller — checkRun (on-demand)', () => {
+  it('resumes a parked run when a reply is present', async () => {
+    const { repo, github, loop, run } = await parkOnClarify(alwaysClarify);
+    github.seedIssueComment(7, { author: 'alice', body: 'Use Postgres.' });
+
+    const poller = new ReplyPoller(repo, github, loop, { sleep: noopSleep });
+    expect(await poller.checkRun(run.id)).toBe('resumed');
+    expect(repo.getRun(run.id)!.status).toBe('running');
+  });
+
+  it('reports no_reply while parked with nothing new', async () => {
+    const { repo, github, loop, run } = await parkOnClarify(alwaysClarify);
+    const poller = new ReplyPoller(repo, github, loop, { sleep: noopSleep });
+    expect(await poller.checkRun(run.id)).toBe('no_reply');
+    expect(repo.getRun(run.id)!.status).toBe('awaiting_input');
+  });
+
+  it('reports not_awaiting for a run that isn\'t parked on input', async () => {
+    const { repo, github, loop, run } = await parkOnClarify(clarifyOnceThenProceed());
+    github.seedIssueComment(7, { author: 'alice', body: 'go' });
+    const poller = new ReplyPoller(repo, github, loop, { sleep: noopSleep });
+    await poller.checkRun(run.id); // resumes it
+    await loop.runUntilIdle(); // run proceeds to done
+    expect(await poller.checkRun(run.id)).toBe('not_awaiting');
   });
 });
 

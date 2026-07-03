@@ -371,6 +371,12 @@ export class FakeGitHub implements GitHub {
     this.workingTrees.delete(runId);
   }
 
+  /** Records each requested base so a test can assert the merge-sync fired; no filesystem here. */
+  readonly syncedBases: string[] = [];
+  async syncBaseBranch(base: string): Promise<void> {
+    this.syncedBases.push(base);
+  }
+
   async commitAndPush(input: CommitAndPushInput): Promise<CommitRef> {
     const sha = `fakesha${(++this.commitCounter).toString().padStart(8, '0')}`;
     const list = this.commits.get(input.workingDir) ?? [];

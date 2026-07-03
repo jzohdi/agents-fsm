@@ -638,6 +638,39 @@ describe('M5 control methods (pause / resume-paused / stop / revert)', () => {
     expect(() => loop.resumePausedRun(run.id)).toThrowError(/not paused/);
   });
 
+  it('resumeStoppedRun re-opens a stopped run and continues from where it left off', async () => {
+    // Stop the run mid-`plan` (so it is stopped at a non-terminal state), then resume it.
+    const holder: { loop?: EventLoop } = {};
+    const handler: StubHandler = (req) => {
+      if (req.stage === 'plan' && req.phase === 'produce') holder.loop!.stopRun(req.runId);
+      return goldenPathHandler(req);
+    };
+    const { repo, loop } = setup(handler);
+    holder.loop = loop;
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.runUntilIdle();
+    const stopped = repo.getRun(run.id)!;
+    expect(stopped.status).toBe('stopped');
+    const stateAtStop = stopped.currentState;
+
+    const resumed = loop.resumeStoppedRun(run.id);
+    expect(resumed.status).toBe('running');
+    expect(resumed.currentState).toBe(stateAtStop); // continues from where it left off, no state change
+    // A single fresh advance event drives it; nothing was double-enqueued.
+    await loop.runUntilIdle();
+    expect(repo.getRun(run.id)!.status).toBe('done');
+
+    // A self-transition records why it re-ran (audit trail), tagged with the resume trigger.
+    const last = repo.listTransitions(run.id).filter((t) => t.trigger === 'resume').at(-1);
+    expect(last).toMatchObject({ fromState: stateAtStop, toState: stateAtStop });
+  });
+
+  it('resumeStoppedRun refuses a run that is not stopped', async () => {
+    const { loop } = setup(goldenPathHandler);
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    expect(() => loop.resumeStoppedRun(run.id)).toThrowError(/not stopped/);
+  });
+
   it('revert moves a parked run to an earlier state with a reset, discarding the stale follow-up event', async () => {
     // Park paused mid-`plan` so the run carries a leftover pending event, then revert.
     const holder: { loop?: EventLoop } = {};
@@ -809,6 +842,98 @@ describe('bounded worker pool (Milestone 8 Phase B — drain concurrency)', () =
     });
 
     await expect(loop.drain(2)).rejects.toThrow(/database is locked/);
+  });
+});
+
+describe('drain wake — work enqueued mid-drain fills a free slot promptly (regression)', () => {
+  // Regression for a starvation bug: a run admitted *while a long stage is in flight* (an auto-picked
+  // watched-repo issue, a resume, a fresh start) sat unclaimed until the in-flight stage finished —
+  // even with idle concurrency slots — because the pool only re-pumped on a worker's completion.
+  // `wake()` nudges the running pool so the new event dispatches immediately.
+
+  /** A stage executor whose every stage blocks until explicitly released, recording start order so a
+   *  test can observe a second run beginning while the first is still in flight. */
+  class GatedExecutor implements StageExecutor {
+    started: string[] = [];
+    private waiters: Array<() => void> = [];
+    async run(req: AgentRunRequest): Promise<AgentRunResult> {
+      this.started.push(`${req.runId}:${req.stage}`);
+      await new Promise<void>((resolve) => this.waiters.push(resolve));
+      const reply = goldenPathHandler(req);
+      return { output: reply.output, usage: { tokens: reply.tokens ?? 1 } };
+    }
+    /** Release every currently-waiting stage (one wave). */
+    releaseAll(): void {
+      const waiting = this.waiters;
+      this.waiters = [];
+      for (const r of waiting) r();
+    }
+  }
+
+  function gatedSetup() {
+    const loaded = loadDefaultConfig();
+    const repo = new Repository(openDb(':memory:'));
+    const executor = new GatedExecutor();
+    const runner = new AgentRunner(repo, executor, loaded.agents, new FakeGitHub({ autoSeedIssues: true }));
+    const loop = new EventLoop(repo, loaded.fsm, loaded.version, runner);
+    return { repo, loop, executor };
+  }
+
+  /** A few macrotasks — enough for a claim → processEvent → executor.run to reach its gate. */
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 3; i++) await new Promise((r) => setTimeout(r, 0));
+  };
+
+  /** Release stage waves until the drain settles (bounded so a wedge fails the test, not hangs). */
+  async function finish(executor: GatedExecutor, drainP: Promise<void>): Promise<void> {
+    let settled = false;
+    void drainP.then(() => (settled = true));
+    for (let i = 0; i < 1000 && !settled; i++) {
+      executor.releaseAll();
+      await flush();
+    }
+    await drainP;
+  }
+
+  it('wake() dispatches a run enqueued mid-drain before the in-flight stage finishes', async () => {
+    const { repo, loop, executor } = gatedSetup();
+    const a = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+
+    const drainP = loop.drain(4); // cap has room; do not await — hold A's first stage in flight
+    await flush();
+    expect(executor.started).toEqual([`${a.id}:triage`]); // A gated, in flight
+
+    // B is admitted while A is still gated — enqueue + wake (exactly what Orchestrator.kick does).
+    const b = loop.startRun({ issueRef: 'o/r#2', repoRef: 'o/r' });
+    loop.wake();
+    await flush();
+
+    expect(executor.started).toContain(`${b.id}:triage`); // dispatched WITHOUT A completing
+
+    await finish(executor, drainP);
+    expect(repo.getRun(a.id)!.status).toBe('done');
+    expect(repo.getRun(b.id)!.status).toBe('done');
+  });
+
+  it('without wake(), the mid-drain run starves behind the in-flight stage (the bug)', async () => {
+    const { repo, loop, executor } = gatedSetup();
+    loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    const drainP = loop.drain(4);
+    await flush();
+
+    const b = loop.startRun({ issueRef: 'o/r#2', repoRef: 'o/r' });
+    // No wake(): the running pool is not nudged.
+    await flush();
+    expect(executor.started).not.toContain(`${b.id}:triage`); // starved while A's stage is gated
+
+    // Completing the in-flight stage re-pumps, which finally claims B — so no work is lost either way.
+    await finish(executor, drainP);
+    expect(repo.getRun(b.id)!.status).toBe('done');
+  });
+
+  it('wake() is a no-op when no drain is running', () => {
+    const { loop } = gatedSetup();
+    expect(() => loop.wake()).not.toThrow();
   });
 });
 

@@ -30,14 +30,17 @@ function newRunAt(repo: Repository, state: string) {
 }
 
 describe('AgentRunner lifecycle — triage', () => {
-  it('reads the issue but creates no branch, tree, or commit', async () => {
+  it('prepares the repo checkout (branch + tree) but makes no commit or PR (Milestone 12)', async () => {
+    // triage now runs inside the target repo's working tree (so the harness can inspect the codebase to
+    // scope the issue — the tmux-speedrun#35 fix), which creates and persists the run branch. It still
+    // performs no produce side effects: no commit, no PR (those belong to the produce stages).
     const { repo, github, runner } = setup();
     const run = newRunAt(repo, 'triage');
 
     const outcome = await runner.runStage(run);
 
     expect(outcome.kind).toBe('handoff');
-    expect(repo.getRun(run.id)!.branch).toBeNull();
+    expect(repo.getRun(run.id)!.branch).toMatch(new RegExp(`^agent/run-${run.id}-[0-9a-f]{6}$`));
     expect(github.commitCount()).toBe(0);
     expect(github.listPrs()).toHaveLength(0);
   });

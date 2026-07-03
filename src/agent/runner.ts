@@ -22,7 +22,7 @@ import { randomBytes } from 'node:crypto';
 import { recipeFor, type AgentsConfig, type StageIo } from '../fsm/config';
 import { ADDRESSING_PR_FEEDBACK_FLAG, RESUME_TRIGGER, REVERT_TRIGGER } from '../loop/event-loop';
 import type { GitHub, Issue, IssueComment, PullRequest } from '../integration/github';
-import { defaultScheduling, parseMarker, upsertMarker, type SchedulingDecl } from '../integration/issue-markers';
+import { BOT_COMMENT_MARKER, defaultScheduling, parseMarker, upsertMarker, type SchedulingDecl } from '../integration/issue-markers';
 import { isRepoResolver, singleRepoResolver, type RepoContext, type RepoResolver } from '../integration/github-resolver';
 import type { AgentPhase, Repository, Run, Transition } from '../store/repository';
 import type { AgentActivity, AgentRunResult, StageExecutor } from './executor';
@@ -39,11 +39,18 @@ import {
 } from './envelope';
 import { AmbiguousSideEffectError, SideEffectLedger } from './side-effects';
 
-/** Default logical model per phase (README §3.3: frontier to produce/critique, cheaper to simplify). */
+/**
+ * Default logical model per phase. `simplify` is the review loop's **fix** phase (prompts/phases/
+ * simplify.md): it is handed the blocking findings a frontier reviewer raised, and a weaker model
+ * reliably fails to resolve them — the loop then never converges and trips the review cap, which
+ * costs an escalation + a human + a re-run, dwarfing the tokens saved. So it defaults to the
+ * frontier role too; a stage whose fixes are mechanical can set `models.simplify: 'cheap'` in its
+ * agent config to restore the economy.
+ */
 export const DEFAULT_MODELS: Record<AgentPhase, string> = {
   produce: 'frontier',
   self_review: 'frontier',
-  simplify: 'cheap',
+  simplify: 'frontier',
 };
 
 /**
@@ -171,6 +178,13 @@ export interface AgentRunnerOptions {
 interface PhaseExtra {
   producedEnvelope?: AgentEnvelope;
   reviewNotes?: unknown;
+  /**
+   * Which round of the bounded self-review → fix loop this phase runs in (1-based, of `cap`), with
+   * the previous round's verdict notes once there are any. Lets the reviewer *verify the prior
+   * findings were resolved* instead of re-reviewing cold each round — the convergence half of the
+   * review-cap guard (documented in prompts/base.md).
+   */
+  reviewRound?: { round: number; cap: number; previousNotes?: unknown };
   /** On a malformed-output retry: why the previous attempt failed, so the agent can correct it. */
   retry?: { attempt: number; previousError: string };
 }
@@ -276,18 +290,31 @@ export class AgentRunner {
    * (improve the issue, ask the human, split into smaller issues) and map it to a {@link StageOutcome}.
    */
   private async runTriageStage(run: Run, recipe: Recipe): Promise<StageOutcome> {
-    const { github } = this.repoContext(run);
+    const { github, baseBranch } = this.repoContext(run);
     let issue: Issue;
     let comments: IssueComment[];
+    let workingDir: string;
+    let branch: string;
     try {
       issue = await github.readIssue(run.issueRef);
       comments = await github.listIssueComments(issue.number);
+      // Prepare the repo checkout so triage runs *inside the target repository*, not the daemon's own
+      // cwd (Milestone 12 — the tmux-speedrun#35 failure). triage needs to inspect the codebase to scope
+      // the issue; without a working tree the harness subprocess would inherit `process.cwd()`. No commit
+      // or push happens in triage (that's only in produce stages), so creating the local branch here is
+      // harmless and `plan` reuses it.
+      branch = run.branch ?? branchName(run);
+      const tree = await github.prepareWorkingTree({ runId: run.id, branch, base: baseBranch });
+      if (run.branch === null) this.repo.setRunBranch(run.id, branch);
+      workingDir = tree.path;
     } catch (err) {
       return gitError(run, 'prepare', err);
     }
     // The comment thread is the human↔agent conversation; pass it so triage can read the latest reply.
     const prep: StagePrep = {
       issue,
+      workingDir,
+      branch,
       input: { issue, comments: comments.map((c) => ({ author: c.author, body: c.body, createdAt: c.createdAt })) },
     };
 
@@ -430,13 +457,23 @@ export class AgentRunner {
 
     let lastNotes: unknown;
     for (let round = 0; round < recipe.reviewCap; round++) {
-      const verdict = await this.invokeParsed(run, 'self_review', recipe, prep, { producedEnvelope: envelope }, parseReviewVerdict);
+      // Round context: the reviewer verifies the previous round's findings were resolved (rather
+      // than re-reviewing cold), and both phases know how much round budget remains.
+      const reviewRound = { round: round + 1, cap: recipe.reviewCap, ...(round > 0 ? { previousNotes: lastNotes } : {}) };
+      const verdict = await this.invokeParsed(run, 'self_review', recipe, prep, { producedEnvelope: envelope, reviewRound }, parseReviewVerdict);
       if (!verdict.ok) return malformed('self_review', verdict.error, verdict.raw);
       if (verdict.value.acceptable) return { kind: 'handoff', envelope };
 
       lastNotes = verdict.value.notes;
       if (recipe.phases.includes('simplify')) {
-        const fixed = await this.invokeParsed(run, 'simplify', recipe, prep, { producedEnvelope: envelope, reviewNotes: lastNotes }, parseEnvelope);
+        const fixed = await this.invokeParsed(
+          run,
+          'simplify',
+          recipe,
+          prep,
+          { producedEnvelope: envelope, reviewNotes: lastNotes, reviewRound },
+          parseEnvelope,
+        );
         if (!fixed.ok) return malformed('simplify', fixed.error, fixed.raw);
         envelope = fixed.value;
       }
@@ -480,8 +517,9 @@ export class AgentRunner {
     // is picked up by the *next* stage's fresh dispatch (README event loop). null override → default.
     const logical = recipe.models[phase] ?? DEFAULT_MODELS[phase];
     const model = phaseModel(logical, run.modelOverride);
-    // The run's reasoning-effort override pairs with the model override: both target the frontier role
-    // (the primary produce/review work), so the cheaper `simplify` pass isn't pushed to high effort.
+    // The run's reasoning-effort override pairs with the model override: both target the frontier
+    // role, so a phase a stage explicitly configured onto a cheaper logical model keeps its default
+    // effort (and its model) rather than being silently promoted.
     const effort = run.effortOverride && logical === OVERRIDE_ROLE ? run.effortOverride : undefined;
     // Why this stage is being re-run (operator resume/revert, agent back-edge), if it is — the
     // escalation reason + operator guidance would otherwise sit unread in the transition log.
@@ -691,7 +729,7 @@ function issueSummary(issue: Issue): { ref: string; number: number; title: strin
 function signoffComment(message?: string): string {
   const lines = ['✅ **Triage sign-off** — this issue is clear and scoped; handing it to planning.'];
   if (message) lines.push('', message);
-  return lines.join('\n');
+  return withBotMarker(lines);
 }
 
 /** The comment triage posts when it needs the human to answer before work can start. */
@@ -699,7 +737,7 @@ function clarifyComment(questions: string[], message?: string): string {
   const lines = ['🤖 **Triage needs more detail before work can start.** Reply on this issue and I’ll pick it back up.'];
   if (message) lines.push('', message);
   if (questions.length > 0) lines.push('', ...questions.map((q) => `- ${q}`));
-  return lines.join('\n');
+  return withBotMarker(lines);
 }
 
 /** The comment triage posts on the original issue after splitting it into smaller ones. */
@@ -707,7 +745,13 @@ function splitComment(created: Issue[], message?: string): string {
   const lines = ['🤖 **Triage split this issue into smaller pieces:**'];
   if (message) lines.push('', message);
   lines.push('', ...created.map((c) => `- ${c.ref} — ${c.title}`));
-  return lines.join('\n');
+  return withBotMarker(lines);
+}
+
+/** Append the invisible bot-comment marker so the Reply Poller can tell the fleet's own comments from a
+ *  human reply by content — the daemon posts via the operator's `gh` account, so login alone can't. */
+function withBotMarker(lines: string[]): string {
+  return [...lines, '', BOT_COMMENT_MARKER].join('\n');
 }
 
 function malformed(phase: AgentPhase, error: string, raw: unknown): StageOutcome {

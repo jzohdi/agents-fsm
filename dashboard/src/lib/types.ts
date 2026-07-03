@@ -167,4 +167,7 @@ export interface Repo {
   watch: boolean;
   /** The label that bypasses the intake guards; `null` → the default `agent help wanted`. */
   watchLabel: string | null;
+  /** Working-directory source (Milestone 12): `null` = unconfigured (runs blocked until chosen),
+   *  `'clone'` = clone a fresh per-run tree from GitHub, `'local'` = use {@link localRepo} via git worktree. */
+  sourceMode: 'clone' | 'local' | null;
 }

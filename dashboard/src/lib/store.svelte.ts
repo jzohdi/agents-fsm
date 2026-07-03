@@ -36,6 +36,9 @@ export const ui = $state({
   costCeiling: null as number | null,
   // The active harness's model catalog + default (the per-run model picker), fetched once at startup.
   models: null as ModelCatalog | null,
+  // Per-harness catalog cache (`GET /models?harness=`), keyed by harness id — the per-run picker reads
+  // the catalog of the harness the *run* is on, which need not be the daemon default's (`ui.models`).
+  catalogs: {} as Record<string, ModelCatalog>,
   // The operator's sticky pre-run selection shown in the new-run bar (null = the harness/model default).
   // Persisted server-side (PUT /settings/default-model) so it survives reloads and "sticks" as the default
   // for later runs; loaded from GET /settings; cleared when the harness changes (its catalog no longer fits).
@@ -107,6 +110,39 @@ export async function enrollRepo(repoRef: string, baseBranch?: string): Promise<
   } catch (err) {
     banner(`Enroll failed: ${(err as Error).message}`, 'err');
     return false;
+  }
+}
+
+/**
+ * Bind an enrolled repo's working directory (`POST /repos/source`, Milestone 12): `clone` clones a fresh
+ * per-run tree from GitHub; `local` uses an absolute path on the daemon's machine via git worktree, after
+ * the daemon validates it's a checkout of this repo (a wrong directory surfaces as the banner error).
+ * Returns whether it succeeded; refreshes the ledger so the new label/state shows.
+ */
+export async function configureRepoSource(repoRef: string, mode: 'clone' | 'local', localRepo?: string): Promise<boolean> {
+  try {
+    const body = mode === 'local' ? { repoRef, mode, localRepo } : { repoRef, mode };
+    await request<Repo>('POST', '/repos/source', body);
+    banner(mode === 'local' ? `Using local directory for ${repoRef}.` : `${repoRef} will clone on each run.`, 'ok');
+    await loadRepos();
+    return true;
+  } catch (err) {
+    banner(`Could not set working directory: ${(err as Error).message}`, 'err');
+    return false;
+  }
+}
+
+/**
+ * Directory-path completions for the local-checkout picker (`GET /fs/dirs`, Milestone 12). The browser
+ * can't read absolute paths out of a native folder dialog, so the daemon (running on the operator's
+ * machine) supplies shell-style tab-completions the input renders as a click-to-drill dropdown.
+ * Best-effort: any failure (older daemon, unreadable path) is just "no suggestions".
+ */
+export async function fetchDirSuggestions(q: string): Promise<string[]> {
+  try {
+    return (await request<{ dirs: string[] }>('GET', `/fs/dirs?q=${encodeURIComponent(q)}`)).dirs;
+  } catch {
+    return [];
   }
 }
 
@@ -322,6 +358,36 @@ export async function setEffort(id: number, effort: string | null): Promise<void
 }
 
 /**
+ * Re-point a run at another harness (the per-run harness selector). Takes effect on the run's next
+ * stage; the daemon clears the model/effort overrides (they belong to the old harness's catalog).
+ */
+export async function setHarness(id: number, harness: string): Promise<void> {
+  try {
+    upsertRun(await request<Run>('POST', `/runs/${id}/harness`, { harness }));
+    if (id === ui.selectedId) await refreshDetail();
+    banner(`Run ${id} switches to ${harness} from its next stage.`, 'ok');
+  } catch (err) {
+    banner(`Harness change failed: ${(err as Error).message}`, 'err');
+  }
+}
+
+/**
+ * The model catalog for one harness (`GET /models?harness=`), cached per harness id — the per-run
+ * picker calls this for the harness the selected run is on. An older daemon that ignores the query
+ * param returns the *default* harness's catalog; the harness-field check refuses to cache that
+ * mismatch, so such a run simply shows no picker rather than another harness's models.
+ */
+export async function loadCatalog(harness: string): Promise<void> {
+  if (ui.catalogs[harness]) return;
+  try {
+    const catalog = await request<ModelCatalog>('GET', `/models?harness=${encodeURIComponent(harness)}`);
+    if (catalog.harness === harness) ui.catalogs[harness] = catalog;
+  } catch {
+    // No catalog for this harness (or the request failed) — the picker stays hidden for its runs.
+  }
+}
+
+/**
  * Override the cost ceiling for a run (Milestone 8 B3): `next_step` runs one more stage, `full` runs it
  * to completion, `none` clears the override. The daemon kicks the pump, so an over-ceiling run resumes.
  */
@@ -413,6 +479,31 @@ export async function checkPrFeedback(id: number): Promise<void> {
             ? `No new feedback yet — still watching ${pr}.`
             : `Run ${id} isn't being watched for PR feedback.`;
     banner(msg, result === 'not_watching' ? 'err' : 'ok');
+  } catch (err) {
+    banner(`Check failed: ${(err as Error).message}`, 'err');
+  }
+}
+
+/**
+ * Ask the daemon to check an `awaiting_input` run's issue thread for a human reply **now** (the "Check
+ * now" button on a run waiting for your answer), instead of waiting for the next background poll.
+ * Banners the outcome and refreshes the run so a resume shows immediately.
+ */
+export async function checkReply(id: number): Promise<void> {
+  try {
+    const { run, result } = await request<{ run: Run; result: 'resumed' | 'no_reply' | 'not_awaiting' }>(
+      'POST',
+      `/runs/${id}/check-reply`,
+    );
+    upsertRun(run);
+    if (id === ui.selectedId) await refreshDetail();
+    const msg =
+      result === 'resumed'
+        ? `Reply found — resuming run ${id}.`
+        : result === 'no_reply'
+          ? `No reply yet — reply on the issue and I’ll pick it back up.`
+          : `Run ${id} isn’t waiting for a reply.`;
+    banner(msg, result === 'not_awaiting' ? 'err' : 'ok');
   } catch (err) {
     banner(`Check failed: ${(err as Error).message}`, 'err');
   }

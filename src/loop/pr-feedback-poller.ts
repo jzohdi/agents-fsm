@@ -180,13 +180,23 @@ export class PrFeedbackPoller {
   /** Process one watched run; returns the outcome of the check (see {@link PrFeedbackCheck}). */
   private async processRun(run: Run): Promise<Exclude<PrFeedbackCheck, 'not_watching'>> {
     const prNumber = run.prNumber!; // isWatchable filtered out null PRs
-    const { github } = this.resolver.for(run.repoRef);
+    const { github, baseBranch } = this.resolver.for(run.repoRef);
 
     // Stop watching a landed/abandoned PR: nothing left to iterate on.
     const pr = await github.getPr(prNumber);
     if (pr.state !== 'open') {
       this.repo.mergeRunFlags(run.id, { [PR_FEEDBACK_CLOSED_FLAG]: true });
       this.repo.recordLog({ runId: run.id, message: `PR #${prNumber} is ${pr.state} — no longer watching for feedback`, data: { kind: 'pr_feedback_stopped', prNumber, state: pr.state } });
+      // On a merge, fast-forward the operator's local checkout so future worktrees (and their own base
+      // branch) pick up the landed change (Milestone 12). Best-effort + guarded in the adapter (only when
+      // on-base and clean; a no-op for clone-on-run mode) — a sync failure must never abort the pass.
+      if (pr.state === 'merged') {
+        try {
+          await github.syncBaseBranch(baseBranch);
+        } catch (err) {
+          this.repo.recordLog({ runId: run.id, level: 'warn', message: `post-merge sync of the local checkout failed: ${String(err)}`, data: { kind: 'post_merge_sync_error', prNumber } });
+        }
+      }
       return 'stopped';
     }
 

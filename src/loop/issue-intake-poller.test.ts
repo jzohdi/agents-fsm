@@ -27,6 +27,7 @@ function setup(options: { watch?: boolean; label?: string | null } = {}) {
   const repo = new Repository(openDb(':memory:'));
   const github = new FakeGitHub({ repoRef: 'acme/web' });
   repo.upsertRepo({ repoRef: 'acme/web', workingRoot: '/tmp/wr' });
+  repo.setRepoSource('acme/web', 'clone', null); // a working directory is required to be watched (M12)
   if (options.watch !== false) repo.setRepoWatch('acme/web', true, options.label);
   const logs: string[] = [];
   const resolver: RepoResolver = singleRepoResolver({ github, baseBranch: 'main' });
@@ -115,6 +116,8 @@ describe('IssueIntakePoller — multi-repo isolation', () => {
     ghB.seedIssue('b/two#1', { number: 1, author: 'b' });
     repo.upsertRepo({ repoRef: 'a/one', workingRoot: '/tmp/a' });
     repo.upsertRepo({ repoRef: 'b/two', workingRoot: '/tmp/b' });
+    repo.setRepoSource('a/one', 'clone', null);
+    repo.setRepoSource('b/two', 'clone', null);
     repo.setRepoWatch('a/one', true);
     // b/two enrolled but NOT watched.
 

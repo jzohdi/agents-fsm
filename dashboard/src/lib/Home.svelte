@@ -3,7 +3,7 @@
   // the attention queue, the repositories ledger (with inline enrollment), and a recent-activity
   // feed. Everything derives from `ui.runs`/`ui.repos`, which the SSE stream keeps live — this page
   // is pure derivation, no polling of its own.
-  import { ui, enrollRepo, openRepoBoard, openRun, setRepoWatch } from './store.svelte';
+  import { ui, configureRepoSource, enrollRepo, fetchDirSuggestions, openRepoBoard, openRun, setRepoWatch } from './store.svelte';
   import {
     attentionModel,
     costStatusModel,
@@ -48,6 +48,95 @@
 
   function pad(i: number): string {
     return String(i + 1).padStart(2, '0');
+  }
+
+  // Per-repo working-directory config (Milestone 12). An unconfigured repo's row is always open (it
+  // blocks runs — but the row is a single compact line, so this costs little); a configured one opens
+  // on demand via the Directory pill. `dirInputs` holds each row's draft local path so typing in one
+  // row doesn't leak into another.
+  type LedgerRow = { repoRef: string; configured: boolean; sourceMode: 'clone' | 'local' | null; localRepo: string | null };
+  let openConfig = $state<string | null>(null);
+  let dirInputs = $state<Record<string, string>>({});
+  let savingSource = $state<string | null>(null);
+  // The repo whose local-directory editor is open (clicked "Local directory" but hasn't saved yet).
+  let localEditor = $state<string | null>(null);
+  // Path completions (daemon-backed `GET /fs/dirs` — the browser can't open Finder for an absolute
+  // path, so the input doubles as a click-to-drill folder browser). Scoped to one row at a time.
+  let dirSugs = $state<string[]>([]);
+  let sugFor = $state<string | null>(null);
+  let sugTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function isConfigOpen(row: LedgerRow): boolean {
+    return !row.configured || openConfig === row.repoRef;
+  }
+
+  function toggleConfig(row: LedgerRow): void {
+    openConfig = openConfig === row.repoRef ? null : row.repoRef;
+    localEditor = null;
+    closeSugs();
+  }
+
+  /** The effective draft path for a row: what the operator typed, else the already-bound directory. */
+  function dirValue(row: LedgerRow): string {
+    return dirInputs[row.repoRef] ?? (row.sourceMode === 'local' ? (row.localRepo ?? '') : '');
+  }
+
+  /** Whether to show the path input: the repo is already on local mode, or its editor was opened. */
+  function localOpen(row: LedgerRow): boolean {
+    return row.sourceMode === 'local' || localEditor === row.repoRef;
+  }
+
+  function refreshSugs(repoRef: string, q: string): void {
+    clearTimeout(sugTimer);
+    sugTimer = setTimeout(async () => {
+      const dirs = await fetchDirSuggestions(q);
+      // Only surface if this row's editor is still the active one (a stale response must not pop a
+      // dropdown under another row).
+      if (localEditor === repoRef || sugFor === repoRef) {
+        dirSugs = dirs;
+        sugFor = repoRef;
+      }
+    }, 120);
+  }
+
+  function onDirInput(repoRef: string, value: string): void {
+    dirInputs[repoRef] = value;
+    sugFor = repoRef;
+    refreshSugs(repoRef, value);
+  }
+
+  function onDirFocus(row: LedgerRow): void {
+    localEditor = row.repoRef;
+    sugFor = row.repoRef;
+    refreshSugs(row.repoRef, dirValue(row)); // empty → the daemon starts completions at ~
+  }
+
+  /** Adopt a suggestion, then immediately list its children so the operator drills down click-by-click. */
+  function pickSug(repoRef: string, dir: string): void {
+    dirInputs[repoRef] = dir;
+    refreshSugs(repoRef, `${dir}/`);
+  }
+
+  function closeSugs(): void {
+    clearTimeout(sugTimer);
+    dirSugs = [];
+    sugFor = null;
+  }
+
+  async function saveSource(row: LedgerRow, mode: 'clone' | 'local'): Promise<void> {
+    const dir = dirValue(row).trim();
+    if (mode === 'local' && !dir) return;
+    if (mode === 'clone' && row.sourceMode === 'clone') { openConfig = null; return; } // already bound — nothing to do
+    savingSource = row.repoRef;
+    try {
+      if (await configureRepoSource(row.repoRef, mode, mode === 'local' ? dir : undefined)) {
+        openConfig = null;
+        localEditor = null;
+        closeSugs();
+      }
+    } finally {
+      savingSource = null;
+    }
   }
 </script>
 
@@ -162,13 +251,23 @@
     {/if}
 
     {#each ledger as row, i (row.repoRef)}
-      <div class="af-hrow af-hrepo" class:watching={row.watch}>
+      <div class="af-hrow af-hrepo" class:watching={row.watch} class:unconfigured={row.enrolled && !row.configured}>
         <button type="button" class="af-hrepo-open" onclick={() => openRepoBoard(row.repoRef)}>
           <span class="ix">{pad(i)}</span>
           <span class="name">
             <span class="nm">{row.repoRef}{#if row.active > 0}<span class="livedot" title="Agents working now"></span>{/if}</span>
             <span class="meta2">
               {#if row.baseBranch}base {row.baseBranch}{:else}history only — re-enroll to run{/if}
+              <!-- Working-directory source label (Milestone 12). -->
+              {#if row.enrolled}
+                {#if row.sourceMode === 'local'}
+                  <span class="af-src local" title={row.localRepo ?? ''}>· 📁 {row.localRepo}</span>
+                {:else if row.sourceMode === 'clone'}
+                  <span class="af-src clone">· clones on run</span>
+                {:else}
+                  <span class="af-src warn">· ⚠ needs a working directory</span>
+                {/if}
+              {/if}
               {#if row.needsHuman > 0}<span class="warn">· {row.needsHuman} escalated</span>{/if}
             </span>
           </span>
@@ -180,23 +279,100 @@
           <span class="when">{fmtRelTime(row.lastActivity)}</span>
           <span class="arr">→</span>
         </button>
+        <!-- Configure the working directory (Milestone 12). Hidden while unconfigured — the config row
+             below is force-open then, so a toggle would be a dead control. -->
+        {#if row.enrolled && row.configured}
+          <button
+            type="button"
+            class="af-hcfg"
+            class:on={openConfig === row.repoRef}
+            title="Change where this repo's code lives"
+            onclick={() => toggleConfig(row)}
+          >
+            Directory
+          </button>
+        {/if}
         <!-- Continuous mode toggle (Milestone 11): auto-pick this repo's eligible new issues. Only an
-             enrolled repo can be watched (a history-only row must be re-enrolled first). -->
+             enrolled AND configured repo can be watched (auto-started runs need a working directory). -->
         <button
           type="button"
           class="af-hwatch"
           class:on={row.watch}
-          disabled={!row.enrolled}
+          disabled={!row.enrolled || !row.configured}
           title={!row.enrolled
             ? 'Re-enroll this repo to watch it for new issues'
-            : row.watch
-              ? 'Auto-picking new issues — click to stop watching'
-              : 'Watch for new issues (auto-pick eligible ones)'}
+            : !row.configured
+              ? 'Choose a working directory before watching this repo'
+              : row.watch
+                ? 'Auto-picking new issues — click to stop watching'
+                : 'Watch for new issues (auto-pick eligible ones)'}
           onclick={() => setRepoWatch(row.repoRef, !row.watch)}
         >
           <span class="pip"></span>{row.watch ? 'Watching' : 'Watch'}
         </button>
       </div>
+
+      <!-- Working-directory config row (Milestone 12): one compact line — a small segmented mode
+           control, plus (for local mode) a path input that doubles as a daemon-backed folder browser.
+           Force-open while unconfigured (runs are blocked until a mode is chosen), else on demand. -->
+      {#if row.enrolled && isConfigOpen(row)}
+        <div class="af-hsrccfg">
+          <span class="lbl">source</span>
+          <div class="af-srcseg" role="group" aria-label="Working-directory source for {row.repoRef}">
+            <button
+              type="button"
+              class="af-srcmode"
+              class:active={row.sourceMode === 'clone'}
+              disabled={savingSource === row.repoRef}
+              title="Clone a fresh copy from GitHub for every run — no local checkout needed"
+              onclick={() => saveSource(row, 'clone')}
+            >
+              Clone on run
+            </button>
+            <button
+              type="button"
+              class="af-srcmode"
+              class:active={row.sourceMode === 'local'}
+              class:draft={localEditor === row.repoRef && row.sourceMode !== 'local'}
+              disabled={savingSource === row.repoRef}
+              title="Work from an existing checkout on this machine (isolated per-run git worktrees)"
+              onclick={() => { localEditor = row.repoRef; }}
+            >
+              Local directory
+            </button>
+          </div>
+          {#if localOpen(row)}
+            <div class="af-dirbox">
+              <input
+                type="text"
+                placeholder="/path/to/checkout — type to browse"
+                value={dirValue(row)}
+                onfocus={() => onDirFocus(row)}
+                oninput={(e) => onDirInput(row.repoRef, e.currentTarget.value)}
+                onkeydown={(e) => { if (e.key === 'Enter') saveSource(row, 'local'); if (e.key === 'Escape') closeSugs(); }}
+                onblur={closeSugs}
+              />
+              {#if sugFor === row.repoRef && dirSugs.length > 0}
+                <div class="af-dirsug">
+                  {#each dirSugs as d (d)}
+                    <!-- mousedown, not click: it fires before the input's blur closes the dropdown -->
+                    <button type="button" onmousedown={(e) => { e.preventDefault(); pickSug(row.repoRef, d); }}>{d}/</button>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+            <button
+              type="button"
+              class="af-srcsave"
+              disabled={savingSource === row.repoRef || !dirValue(row).trim()}
+              title="We verify the folder is a checkout of {row.repoRef} before binding it"
+              onclick={() => saveSource(row, 'local')}
+            >
+              {savingSource === row.repoRef ? 'Checking…' : 'Use folder'}
+            </button>
+          {/if}
+        </div>
+      {/if}
     {/each}
   </div>
 </section>

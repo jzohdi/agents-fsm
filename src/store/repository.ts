@@ -132,8 +132,15 @@ export interface Repo {
   /** The label that bypasses the intake eligibility guards (issue #3); `null` → the default `agent help
    *  wanted`. Only meaningful while {@link watch} is on. */
   watchLabel: string | null;
+  /** Working-directory source binding (Milestone 12): `null` = unconfigured (runs blocked until a
+   *  directory is chosen), `'clone'` = clone a fresh per-run tree from the GitHub remote, `'local'` =
+   *  use {@link localRepo} as a validated local checkout via `git worktree`. */
+  sourceMode: RepoSourceMode | null;
   createdAt: string;
 }
+
+/** How a repo's per-run working tree is sourced ({@link Repo.sourceMode}). */
+export type RepoSourceMode = 'clone' | 'local';
 
 export interface UpsertRepoInput {
   repoRef: string;
@@ -141,7 +148,6 @@ export interface UpsertRepoInput {
   /** Defaults to `main` when omitted. */
   baseBranch?: string;
   cloneUrl?: string | null;
-  localRepo?: string | null;
 }
 
 export interface AppendTransitionInput {
@@ -277,6 +283,7 @@ interface RepoRow {
   base_branch: string;
   watch: number;
   watch_label: string | null;
+  source_mode: RepoSourceMode | null;
   created_at: string;
 }
 
@@ -358,6 +365,7 @@ function mapRepo(r: RepoRow): Repo {
     baseBranch: r.base_branch,
     watch: r.watch !== 0,
     watchLabel: r.watch_label,
+    sourceMode: r.source_mode,
     createdAt: r.created_at,
   };
 }
@@ -378,24 +386,38 @@ export class Repository {
   /**
    * Enroll a repo (or update an already-enrolled one), keyed on `repo_ref`. Idempotent on purpose so
    * the daemon can re-enroll its bound repo on every boot and the `POST /repos` command can be retried
-   * safely. The conflict update re-points the adapter config (working root, base, remote) to the
-   * latest values.
+   * safely. The conflict update re-points the adapter config (working root, base, remote) to the latest
+   * values but deliberately does **not** touch `source_mode`/`local_repo` (owned by {@link setRepoSource})
+   * or the watch columns — so a re-enroll can never silently reset a repo's chosen working directory or
+   * its continuous-mode opt-in (Milestone 12, mirroring the watch-column carve-out).
    */
   upsertRepo(input: UpsertRepoInput): Repo {
     this.db
       .prepare(
-        `INSERT INTO repos (repo_ref, clone_url, local_repo, working_root, base_branch)
-         VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO repos (repo_ref, clone_url, working_root, base_branch)
+         VALUES (?, ?, ?, ?)
          ON CONFLICT(repo_ref) DO UPDATE SET
            clone_url = excluded.clone_url,
-           local_repo = excluded.local_repo,
            working_root = excluded.working_root,
            base_branch = excluded.base_branch`,
       )
-      .run(input.repoRef, input.cloneUrl ?? null, input.localRepo ?? null, input.workingRoot, input.baseBranch ?? 'main');
+      .run(input.repoRef, input.cloneUrl ?? null, input.workingRoot, input.baseBranch ?? 'main');
     const repo = this.getRepo(input.repoRef);
     if (!repo) throw new Error('upsertRepo: row vanished immediately after insert');
     return repo;
+  }
+
+  /**
+   * Bind (or clear) a repo's working-directory source (Milestone 12), independent of its adapter config —
+   * so a re-enroll (`upsertRepo`, which never touches these columns) can't reset the operator's choice.
+   * `'clone'` clears `local_repo` (a fresh per-run tree is cloned from the GitHub remote); `'local'` stores
+   * the validated checkout path used for `git worktree`; `null` returns the repo to unconfigured (clearing
+   * the path). No-op on an unenrolled repo (0 rows updated).
+   */
+  setRepoSource(repoRef: string, mode: RepoSourceMode | null, localRepo: string | null): void {
+    this.db
+      .prepare('UPDATE repos SET source_mode = ?, local_repo = ? WHERE repo_ref = ? COLLATE NOCASE')
+      .run(mode, mode === 'local' ? localRepo : null, repoRef);
   }
 
   /** Look up an enrolled repo by its canonical `owner/name` ref (case-insensitive). */
@@ -596,6 +618,15 @@ export class Repository {
    */
   setRunEffortOverride(id: number, effort: string | null): void {
     this.db.prepare(`UPDATE runs SET effort_override = ?, updated_at = ${NOW} WHERE id = ?`).run(effort, id);
+  }
+
+  /**
+   * Re-point a run at another harness (the dashboard's per-run harness selector). Like the model
+   * override, the loop loads the run fresh for each stage dispatch, so a change takes effect on the
+   * run's next stage — an in-flight stage finishes on the executor it started with.
+   */
+  setRunHarness(id: number, harness: string): void {
+    this.db.prepare(`UPDATE runs SET harness = ?, updated_at = ${NOW} WHERE id = ?`).run(harness, id);
   }
 
   /**

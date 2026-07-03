@@ -20,6 +20,7 @@ import { EventLoop } from '../loop/event-loop';
 import { PrFeedbackPoller, type PrFeedbackCheck } from '../loop/pr-feedback-poller';
 import { SchedulerPoller, type SchedulerPass } from '../loop/scheduler-poller';
 import { IssueIntakePoller, type IntakePass } from '../loop/issue-intake-poller';
+import { ReplyPoller, type ReplyCheck } from '../loop/reply-poller';
 import type { AgentRunner } from '../agent/runner';
 import type {
   AgentRunRecord,
@@ -29,10 +30,12 @@ import type {
   LogRecord,
   Repo,
   Repository,
+  RepoSourceMode,
   Run,
   RunStatus,
   Transition,
 } from '../store/repository';
+import type { CheckoutValidation } from '../integration/local-checkout';
 import type { Suggestion } from '../integration/github';
 import type { SuggestionSource } from '../integration/github-account';
 import { catalogHasModel, catalogSupportsEffort, EFFORT_LEVELS, isEffortLevel, modelEfforts, type HarnessCatalog } from '../agent/harness-models';
@@ -130,6 +133,12 @@ export interface OrchestratorOptions {
   catalogFor?: (harness: string) => HarnessCatalog | undefined;
   /** The model a run uses when it has no override — what the dropdown shows as "Default". */
   defaultModel?: string;
+  /**
+   * Validates a "local directory" source pick (Milestone 12): whether `dir` is a checkout of `repoRef`.
+   * Injected so the orchestrator stays transport/filesystem-free and unit-testable with a stub. Omit →
+   * local-directory mode is unavailable (a `local` config request is a `400`); clone-on-run still works.
+   */
+  validateLocalCheckout?: (dir: string, repoRef: string) => Promise<CheckoutValidation>;
 }
 
 /** Statuses a run can no longer advance from — `updateConfig` is safe only when every run is here. */
@@ -150,9 +159,11 @@ export class Orchestrator {
   private defaultHarness: HarnessId;
   private readonly catalogFor?: (harness: string) => HarnessCatalog | undefined;
   private readonly defaultModel?: string;
+  private readonly validateLocalCheckout?: (dir: string, repoRef: string) => Promise<CheckoutValidation>;
   private readonly prFeedbackPoller: PrFeedbackPoller;
   private readonly schedulerPoller: SchedulerPoller;
   private readonly issueIntakePoller: IssueIntakePoller;
+  private readonly replyPoller: ReplyPoller;
   private config: LoadedConfig;
 
   // Single-flight drain pump (plans/milestone-5.md §2.2).
@@ -175,6 +186,7 @@ export class Orchestrator {
     this.defaultHarness = options.defaultHarness ?? DEFAULT_HARNESS;
     this.catalogFor = options.catalogFor;
     this.defaultModel = options.defaultModel;
+    this.validateLocalCheckout = options.validateLocalCheckout;
     this.onError = options.onError ?? ((err) => console.error(`[orchestrator] drain pump error: ${String(err)}`));
     this.loop = new EventLoop(this.repo, this.config.fsm, this.config.version, this.runner, {
       onTransition: (transition, run) => this.broadcaster.publish({ type: 'transition', runId: run.id, transition, run }),
@@ -194,6 +206,9 @@ export class Orchestrator {
     // The Issue Intake Poller (Milestone 11): the Orchestrator is its `RunStarter`, so an auto-picked
     // issue goes through the same `start` (dedup / cost ceiling / enrollment) as a manually-filed run.
     this.issueIntakePoller = new IssueIntakePoller(this.repo, this.resolver, this);
+    // The Reply Poller (Q1 triage human-in-the-loop): the Orchestrator is its `AwaitingResumer`, so the
+    // daemon's background tick and the dashboard's on-demand "Check for a reply" both drive one instance.
+    this.replyPoller = new ReplyPoller(this.repo, this.resolver, this);
   }
 
   /** Reclaim crash-stranded events, then drain anything already queued (e.g. after a daemon restart). */
@@ -255,24 +270,41 @@ export class Orchestrator {
         );
       }
     }
-    // Enrollment check (Milestone 8 Phase A): admit a run only for a repo the daemon can service.
-    // The resolver decides — any repo under the single-repo/mock resolver, an enrolled repo under the
-    // real one. Under the real resolver an un-enrolled repo throws; rather than reject, we **auto-enroll
-    // it with defaults and retry** (the user's choice), so filing a run by pasting an issue ref just
-    // works without a separate enroll step. Auto-enroll needs a default working root; without one (or if
-    // the retry still fails) we surface the resolver's actionable 400 instead of a run that would fail
-    // deep in the loop. Mock/single-repo resolvers never throw, so this path is real-mode only.
-    try {
-      this.resolver.for(repoRef);
-    } catch (notEnrolled) {
-      if (!this.defaultWorkingRoot) {
-        throw new ApiError(400, notEnrolled instanceof Error ? notEnrolled.message : String(notEnrolled));
+    // Enrollment + working-directory gate (Milestone 8 Phase A + Milestone 12): admit a run only for a
+    // repo the daemon can service AND that has an explicit source binding. A repo must declare where its
+    // code lives — clone-on-run or a validated local directory — before any run starts, so a run can
+    // never silently execute in the wrong (or the daemon's own) working tree.
+    const row = this.repo.getRepo(repoRef);
+    if (row) {
+      if (row.sourceMode === null) {
+        throw new ApiError(
+          400,
+          `repo ${repoRef} is attached but has no working directory configured — choose clone-on-run or a ` +
+            `local directory for it in the dashboard (Repositories) before starting runs`,
+        );
       }
       try {
-        this.enrollRepo({ repoRef }); // upserts the registry row + invalidates the resolver cache
-        this.resolver.for(repoRef); // retry — a bad ref that can't be enrolled/resolved still throws
+        this.resolver.for(repoRef); // build/adopt the configured adapter (a bad config still throws)
       } catch (err) {
         throw new ApiError(400, err instanceof Error ? err.message : String(err));
+      }
+    } else {
+      // No registry row. Mock/single-repo resolvers service any ref (no registry) — try that first. Under
+      // the real resolver an unknown repo throws; rather than a dead-end 400, attach it **unconfigured**
+      // so it shows up in the dashboard's Repositories ledger, then bounce the run with an actionable
+      // message asking the operator to pick a working directory. (Attaching needs a default working root.)
+      try {
+        this.resolver.for(repoRef);
+      } catch (notEnrolled) {
+        if (!this.defaultWorkingRoot) {
+          throw new ApiError(400, notEnrolled instanceof Error ? notEnrolled.message : String(notEnrolled));
+        }
+        this.enrollRepo({ repoRef }); // creates an unconfigured registry row (working root = the daemon's --work)
+        throw new ApiError(
+          400,
+          `attached ${repoRef} — now choose a working directory (clone-on-run or a local directory) for it ` +
+            `in the dashboard (Repositories) before starting runs`,
+        );
       }
     }
     const run = this.loop.startRun({ issueRef: parsed.ref, repoRef, harness, model, effort });
@@ -290,12 +322,14 @@ export class Orchestrator {
 
   /**
    * Resume a parked run — dispatching on its status: a `paused` run flips back to `running`; a
-   * `needs_human` run resumes from where it escalated (counter reset). Any other status is a `409`.
-   * An `awaiting_input` run is resumed by the Reply Poller on a human reply, not by this command.
+   * `needs_human` run resumes from where it escalated (counter reset); a `stopped` run re-opens and
+   * continues from the stage it was stopped at (README §3.3 — `stop` is reversible, it keeps all state
+   * and artifacts). Any other status is a `409`. An `awaiting_input` run is resumed by the Reply Poller
+   * on a human reply (or the on-demand {@link checkReply}), not by this command.
    *
-   * Optional `notes` (needs_human only — a paused run re-runs nothing, so there is nothing to guide)
-   * are the operator's guidance for the retried stage; the loop records them on the resume transition
-   * and the Agent Runner delivers them to the stage as its re-entry context.
+   * Optional `notes` (needs_human only — a paused/stopped run re-runs a stage that already has its
+   * context, so there is nothing extra to guide) are the operator's guidance for the retried stage; the
+   * loop records them on the resume transition and the Agent Runner delivers them as re-entry context.
    */
   resume(runId: number, notes?: string): Run {
     const existing = this.requireRun(runId);
@@ -307,6 +341,11 @@ export class Orchestrator {
     }
     if (existing.status === 'needs_human') {
       const run = this.conflictOnThrow(() => this.loop.resumeRun(runId, notes !== undefined ? { notes } : {})); // emits its own transition event
+      this.kick();
+      return run;
+    }
+    if (existing.status === 'stopped') {
+      const run = this.conflictOnThrow(() => this.loop.resumeStoppedRun(runId)); // emits its own transition event
       this.kick();
       return run;
     }
@@ -382,6 +421,31 @@ export class Orchestrator {
   }
 
   /**
+   * One pass of the Reply Poller (Q1 triage human-in-the-loop): re-arm every `awaiting_input` run whose
+   * issue thread has a human reply. The daemon's background tick calls this on the shared poll interval.
+   * Returns how many runs were re-armed. Owned here so the poller has a single instance shared with the
+   * dashboard's on-demand {@link checkReply}.
+   */
+  pollRepliesOnce(): Promise<number> {
+    return this.replyPoller.checkOnce();
+  }
+
+  /**
+   * Check one `awaiting_input` run for a human reply **right now** (the dashboard's "Check for a reply"
+   * button), rather than waiting for the next background tick. Returns the (possibly resumed) run plus
+   * the outcome so the caller can tell the operator what happened. A `resumed` result already re-armed
+   * the run + kicked the pump (via {@link resumeAwaitingInput}); for any other outcome we publish a
+   * `status` event so connected dashboards stay current. 404 for an unknown run.
+   */
+  async checkReply(runId: number): Promise<{ run: Run; result: ReplyCheck }> {
+    this.requireRun(runId); // 404 if missing
+    const result = await this.replyPoller.checkRun(runId);
+    const run = this.requireRun(runId);
+    if (result !== 'resumed') this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
+    return { run, result };
+  }
+
+  /**
    * One pass of the Scheduler Poller (Milestone 9): refresh §3.5 declarations from the issues,
    * escalate dependency cycles, latch verified satisfaction, and flip `running ↔ blocked`. Serves
    * both the daemon's background tick and the dashboard's on-demand `POST /scheduler/check`. A pass
@@ -448,6 +512,36 @@ export class Orchestrator {
     // stale effort on an effort-less model would otherwise linger). The runner reads both fresh next stage.
     if (existing.effortOverride && this.effortError(existing.harness, model, existing.effortOverride)) {
       this.repo.setRunEffortOverride(runId, null);
+    }
+    const run = this.requireRun(runId);
+    this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
+    return run;
+  }
+
+  /**
+   * Re-point a run at another harness — the dashboard's per-run harness selector. Like the model
+   * override, the loop loads the run fresh for each stage dispatch, so the switch takes effect on the
+   * run's **next** stage; an in-flight stage finishes on the executor it started with (pause first to
+   * hold the run before its next dispatch). Harnesses share the working-tree/artifact contract, so the
+   * new one simply picks up the branch where the old one left it. Switching clears the run's model +
+   * effort overrides — they name models from the old harness's catalog — returning the run to the new
+   * harness's defaults until the operator picks again. Refuses (`409`) a terminal run and (`400`) an
+   * unknown harness. Same-harness calls are a no-op (overrides kept).
+   */
+  setHarness(runId: number, harness: string): Run {
+    const existing = this.requireRun(runId); // 404
+    if (TERMINAL_STATUSES.has(existing.status)) {
+      throw new ApiError(409, `cannot set the harness for a "${existing.status}" run — it has no further stages`);
+    }
+    if (!isHarnessId(harness)) throw new ApiError(400, `unknown harness "${harness}"`);
+    if (harness !== existing.harness) {
+      // One atomic write: the run must never be observable pointing at the new harness while still
+      // carrying the old catalog's model/effort overrides.
+      this.repo.transaction(() => {
+        this.repo.setRunHarness(runId, harness);
+        this.repo.setRunModelOverride(runId, null);
+        this.repo.setRunEffortOverride(runId, null);
+      });
     }
     const run = this.requireRun(runId);
     this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
@@ -594,7 +688,7 @@ export class Orchestrator {
    * default (e.g. re-enrolling without `cloneUrl` clears it back to the derived GitHub URL). The
    * dashboard's enroll form posts the complete config, so this matches a form-based UI.
    */
-  enrollRepo(input: { repoRef: string; workingRoot?: string; baseBranch?: string; cloneUrl?: string; localRepo?: string }): Repo {
+  enrollRepo(input: { repoRef: string; workingRoot?: string; baseBranch?: string; cloneUrl?: string }): Repo {
     if (!input.repoRef) throw new ApiError(400, 'repoRef is required');
     let ref: string;
     try {
@@ -609,10 +703,42 @@ export class Orchestrator {
       workingRoot,
       ...(input.baseBranch ? { baseBranch: input.baseBranch } : {}),
       ...(input.cloneUrl ? { cloneUrl: input.cloneUrl } : {}),
-      ...(input.localRepo ? { localRepo: input.localRepo } : {}),
     });
     this.resolver.invalidate(ref); // a re-enroll changed the config → drop any cached adapter
     return repo;
+  }
+
+  /**
+   * Bind an enrolled repo's working-directory source (Milestone 12 — `POST /repos/source`): `clone` clones
+   * a fresh per-run tree from the GitHub remote; `local` uses `localRepo` (an absolute path on the daemon's
+   * machine) via `git worktree`, after {@link validateLocalCheckout} confirms it is a checkout of the linked
+   * repo (a mismatch is a `400` with the reason — the wrong-directory guard). A `404` for an unenrolled repo
+   * (enroll it first) and a `400` for a malformed ref. Invalidates the resolver cache so the new source takes
+   * effect on the next run without a restart.
+   */
+  async configureRepoSource(input: { repoRef: string; mode: RepoSourceMode; localRepo?: string }): Promise<Repo> {
+    if (!input.repoRef) throw new ApiError(400, 'repoRef is required');
+    let ref: string;
+    try {
+      ref = parseRepoRef(input.repoRef);
+    } catch (err) {
+      throw new ApiError(400, err instanceof Error ? err.message : String(err));
+    }
+    if (input.mode !== 'clone' && input.mode !== 'local') throw new ApiError(400, `unknown source mode "${input.mode}" (expected clone | local)`);
+    if (!this.repo.getRepo(ref)) throw new ApiError(404, `repo ${ref} is not enrolled — attach it (POST /repos) before configuring its working directory`);
+
+    if (input.mode === 'local') {
+      const dir = input.localRepo?.trim();
+      if (!dir) throw new ApiError(400, 'localRepo (an absolute path to the checkout) is required for local mode');
+      if (!this.validateLocalCheckout) throw new ApiError(400, 'local-directory mode is not available in this daemon');
+      const check = await this.validateLocalCheckout(dir, ref);
+      if (!check.ok) throw new ApiError(400, check.reason);
+      this.repo.setRepoSource(ref, 'local', dir);
+    } else {
+      this.repo.setRepoSource(ref, 'clone', null);
+    }
+    this.resolver.invalidate(ref); // the source changed → drop any cached adapter so the next run rebuilds it
+    return this.repo.getRepo(ref)!; // the dashboard re-fetches the repo list after configuring (like watch)
   }
 
   /**
@@ -630,7 +756,13 @@ export class Orchestrator {
     } catch (err) {
       throw new ApiError(400, err instanceof Error ? err.message : String(err));
     }
-    if (!this.repo.getRepo(ref)) throw new ApiError(404, `repo ${ref} is not enrolled — enroll it (POST /repos) before watching it`);
+    const existing = this.repo.getRepo(ref);
+    if (!existing) throw new ApiError(404, `repo ${ref} is not enrolled — enroll it (POST /repos) before watching it`);
+    // Continuous mode auto-starts runs, so the repo must have a working directory first — else every
+    // auto-picked issue would bounce at the start gate (Milestone 12). Turning watch *off* is always allowed.
+    if (input.watch && existing.sourceMode === null) {
+      throw new ApiError(400, `repo ${ref} has no working directory configured — choose clone-on-run or a local directory before watching it`);
+    }
     this.repo.setRepoWatch(ref, input.watch, input.label);
     return this.repo.getRepo(ref)!;
   }
@@ -646,15 +778,18 @@ export class Orchestrator {
   }
 
   /**
-   * The default harness's selectable models + the daemon's default model (what a run without an override
-   * uses) — powers the dashboard's per-run model dropdown (`GET /models`). Resolves the catalog for the
-   * default harness; with no catalog configured (or resolver) the model list is empty.
+   * A harness's selectable models + the daemon's default model (what a run without an override uses) —
+   * powers the dashboard's model dropdowns (`GET /models[?harness=]`). With no `harness` it resolves the
+   * *default* harness's catalog (the new-run bar); with one it resolves that harness's (the per-run picker,
+   * which must offer the catalog of the harness the run is actually on). An unknown harness is a `400`;
+   * with no catalog configured (or resolver) the model list is empty.
    */
-  getModels(): { harness: string | null; models: HarnessCatalog['models']; defaultModel: string | null } {
-    const catalog = this.catalogFor?.(this.defaultHarness);
+  getModels(harness?: string): { harness: string | null; models: HarnessCatalog['models']; defaultModel: string | null } {
+    if (harness !== undefined && !isHarnessId(harness)) throw new ApiError(400, `unknown harness "${harness}"`);
+    const catalog = this.catalogFor?.(harness ?? this.defaultHarness);
     // Only report a default model that's actually a selectable model in the shown catalog — so it stays
     // consistent with the catalog even after a runtime harness change (the daemon's configured
-    // `defaultModel` is the Claude `--model`, meaningless once the default harness is another harness).
+    // `defaultModel` is the Claude `--model`, meaningless under another harness's catalog).
     const defaultModel = this.defaultModel && catalog && catalogHasModel(catalog, this.defaultModel) ? this.defaultModel : null;
     return {
       harness: catalog?.harness ?? null,
@@ -764,10 +899,18 @@ export class Orchestrator {
     await this.current;
   }
 
-  /** Start a background drain if none is running; otherwise flag the running one to re-scan (§2.2). */
+  /**
+   * Start a background drain if none is running; otherwise (a) flag the running one to re-scan once it
+   * settles (§2.2) **and** (b) `wake()` its worker pool so the just-enqueued event fills a free
+   * concurrency slot *immediately* instead of waiting for an in-flight stage to finish. The `wake` is
+   * what keeps a run admitted mid-drain — an auto-picked issue, a resume, a new `start` — from starving
+   * behind a long-running stage while the cap still has room; `rerun` remains the backstop for work that
+   * lands in the gap between the pool going idle and the next drain starting.
+   */
   private kick(): void {
     if (this.draining) {
       this.rerun = true;
+      this.loop.wake();
       return;
     }
     this.draining = true;

@@ -231,23 +231,56 @@ export class GitHubCli implements GitHub {
 
   async prepareWorkingTree(input: PrepareWorkingTreeInput): Promise<WorkingTree> {
     const path = join(this.workingRoot, `run-${input.runId}`);
+    // Two source modes (Milestone 12): a configured `localRepo` means the operator's validated checkout
+    // is the source, serviced via `git worktree` (isolated per-run tree, shared object store, pushes
+    // straight to the checkout's GitHub `origin`); otherwise clone a fresh tree from the GitHub remote.
+    return this.localRepo ? this.prepareWorktree(path, input) : this.prepareClone(path, input);
+  }
 
+  /** Clone-on-run source mode: a full `git clone` from the GitHub remote into the per-run tree. */
+  private async prepareClone(path: string, input: PrepareWorkingTreeInput): Promise<WorkingTree> {
     if (!existsSync(join(path, '.git'))) {
-      if (this.localRepo) {
-        // Clone fast/offline from a local checkout, then repoint origin at the GitHub remote so
-        // fetch/push/PR target GitHub — the local path is only an object source, not the remote.
-        await this.git(['clone', this.localRepo, path]);
-        await this.git(['remote', 'set-url', 'origin', this.cloneUrl], path);
-      } else {
-        await this.git(['clone', this.cloneUrl, path]);
-      }
+      await this.git(['clone', this.cloneUrl, path]);
     }
     await this.git(['fetch', 'origin'], path);
+    await this.checkoutRunBranch(path, path, input);
+    return { path, branch: input.branch, base: input.base };
+  }
 
-    if (await this.refExists(path, `refs/heads/${input.branch}`)) {
+  /**
+   * Local-directory source mode: add a `git worktree` off the operator's checkout. The worktree shares
+   * the checkout's object store (no per-run object copy) and its `origin` (so push/PR target GitHub),
+   * and is fully isolated — its own branch and working directory — so concurrent runs never collide.
+   */
+  private async prepareWorktree(path: string, input: PrepareWorkingTreeInput): Promise<WorkingTree> {
+    const source = this.localRepo!;
+    // Freshen the shared checkout so a new worktree branches off up-to-date refs.
+    await this.git(['fetch', 'origin'], source);
+
+    if (existsSync(join(path, '.git'))) {
+      // Reuse a live worktree (idempotent re-preparation on a back-edge; the branch is already checked
+      // out here). A worktree's `.git` is a file, but existsSync is true either way.
+      await this.git(['fetch', 'origin'], path);
+      await this.git(['checkout', input.branch], path);
+      return { path, branch: input.branch, base: input.base };
+    }
+
+    // Fresh worktree. Restore a pushed branch from the remote (crash recovery of a lost tree), else
+    // branch off up-to-date base; `-B` creates-or-resets the branch to that start point as it adds it.
+    const startPoint = (await this.refExists(source, `refs/remotes/origin/${input.branch}`))
+      ? `origin/${input.branch}`
+      : `origin/${input.base}`;
+    await this.git(['worktree', 'add', '-B', input.branch, path, startPoint], source);
+    return { path, branch: input.branch, base: input.base };
+  }
+
+  /** Check out the run's branch in an existing clone: keep a live local branch, restore a pushed one
+   *  from the remote (crash recovery), or create it off up-to-date base. `gitDir` runs the ref lookups. */
+  private async checkoutRunBranch(path: string, gitDir: string, input: PrepareWorkingTreeInput): Promise<void> {
+    if (await this.refExists(gitDir, `refs/heads/${input.branch}`)) {
       // Local branch already here (idempotent re-preparation on a back-edge): keep its work.
       await this.git(['checkout', input.branch], path);
-    } else if (await this.refExists(path, `refs/remotes/origin/${input.branch}`)) {
+    } else if (await this.refExists(gitDir, `refs/remotes/origin/${input.branch}`)) {
       // The branch was pushed but the local checkout is gone (fresh clone after the working
       // tree was lost, e.g. crash recovery). Restore it from the remote so previously pushed
       // commits are preserved — never reset to base (README §2 idempotency).
@@ -256,14 +289,40 @@ export class GitHubCli implements GitHub {
       // Brand-new branch: create it off the up-to-date base.
       await this.git(['checkout', '-B', input.branch, `origin/${input.base}`], path);
     }
-    return { path, branch: input.branch, base: input.base };
   }
 
   async dropWorkingTree(runId: number): Promise<void> {
-    // The next prepareWorkingTree re-clones and either restores the pushed branch or creates it off
-    // fresh base — the same lost-tree path crash recovery proves (see the interface doc). `force`
-    // makes a missing tree a no-op, keeping the wake path idempotent.
-    rmSync(join(this.workingRoot, `run-${runId}`), { recursive: true, force: true });
+    const path = join(this.workingRoot, `run-${runId}`);
+    if (this.localRepo) {
+      // A worktree is registered in the source repo's metadata, so a plain rm would leave a stale
+      // registration that blocks re-adding it. Remove it through git (force past a dirty/missing tree),
+      // then prune stale entries. Best-effort: a missing worktree is a no-op, keeping the wake path
+      // idempotent. The next prepareWorktree re-adds it, restoring a pushed branch or branching off base.
+      await this.execIgnore(['-C', this.localRepo, 'worktree', 'remove', '--force', path]);
+      await this.execIgnore(['-C', this.localRepo, 'worktree', 'prune']);
+      return;
+    }
+    // Clone mode: the next prepareWorkingTree re-clones and either restores the pushed branch or creates
+    // it off fresh base — the same lost-tree path crash recovery proves. `force` makes a missing tree a no-op.
+    rmSync(path, { recursive: true, force: true });
+  }
+
+  async syncBaseBranch(base: string): Promise<void> {
+    if (!this.localRepo) return; // clone mode: no shared checkout to sync
+    await this.git(['fetch', 'origin'], this.localRepo);
+    // Only fast-forward when the operator's checkout is *on* the base branch with a clean tree — never
+    // touch their working copy otherwise (they may be mid-change or on another branch); the fetch above
+    // still refreshed remote-tracking refs so future worktrees branch off up-to-date base.
+    const current = (await this.git(['rev-parse', '--abbrev-ref', 'HEAD'], this.localRepo)).trim();
+    if (current !== base) return;
+    const status = await this.git(['status', '--porcelain'], this.localRepo);
+    if (status.trim().length > 0) return;
+    await this.git(['merge', '--ff-only', `origin/${base}`], this.localRepo);
+  }
+
+  /** Run a `git` command for its side effect, ignoring a non-zero exit (best-effort cleanup). */
+  private async execIgnore(args: string[]): Promise<void> {
+    await this.exec(this.gitCommand, args, {});
   }
 
   async commitAndPush(input: CommitAndPushInput): Promise<CommitRef> {

@@ -19,6 +19,13 @@
       "runtimeArgs": ["tsx", "src/dev-preview.ts"],
       "port": 4322,
       "env": { "PORT": "4322" }
+    },
+    {
+      "name": "dashboard-preview-alt2",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["tsx", "src/dev-preview.ts"],
+      "port": 4327,
+      "env": { "PORT": "4327" }
     }
   ]
 }

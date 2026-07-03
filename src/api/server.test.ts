@@ -4,7 +4,7 @@
  * still on the stub executor + fake GitHub (no network, no cost).
  */
 
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -48,6 +48,10 @@ async function start(opts: { publicDir?: string; handler?: StubHandler } = {}): 
     defaultWorkingRoot: './w',
     catalogFor: catalogForHarness,
     defaultModel: 'opus',
+    // Stub the local-checkout validator so `POST /repos/source` local-mode is exercisable without a real
+    // filesystem: a path containing "wrong" is rejected, everything else accepted (Milestone 12).
+    validateLocalCheckout: async (dir) =>
+      dir.includes('wrong') ? { ok: false, reason: `that directory is a checkout of other/repo, not the linked repo` } : { ok: true },
   });
   const server = createApiServer(orchestrator, opts.publicDir ? { publicDir: opts.publicDir } : {});
   servers.push(server);
@@ -124,6 +128,50 @@ describe('HTTP API', () => {
       body: JSON.stringify({ issueRef: 'o/r#3', harness: 'gemini' }),
     });
     expect(bad.status).toBe(400);
+  });
+
+  it('re-points a run at another harness via POST /runs/:id/harness, clearing its model override', async () => {
+    // Park the run in needs_human at `plan` so it can't drain to terminal before the switch lands.
+    const { base, repo, orchestrator } = await start({
+      handler: (req) => {
+        if (req.stage === 'plan') throw new Error('parked for the harness-switch test');
+        return goldenPathHandler(req);
+      },
+    });
+
+    const run = (await (await fetch(`${base}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ issueRef: 'o/r#1', model: 'sonnet' }),
+    })).json()) as { id: number };
+    await orchestrator.settle();
+    expect(repo.getRun(run.id)!.status).toBe('needs_human'); // parked, not terminal — switchable
+
+    const switched = await fetch(`${base}/runs/${run.id}/harness`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ harness: 'cursor' }),
+    });
+    expect(switched.status).toBe(200);
+    expect((await switched.json()) as object).toMatchObject({ harness: 'cursor', modelOverride: null });
+    expect(repo.getRun(run.id)!.harness).toBe('cursor');
+
+    // Unknown harness → 400; missing body field → 400.
+    expect((await fetch(`${base}/runs/${run.id}/harness`, { method: 'POST', body: JSON.stringify({ harness: 'gemini' }) })).status).toBe(400);
+    expect((await fetch(`${base}/runs/${run.id}/harness`, { method: 'POST', body: '{}' })).status).toBe(400);
+  });
+
+  it('serves a specific harness\'s catalog via GET /models?harness=, 400ing an unknown one', async () => {
+    const { base } = await start();
+
+    const cursor = (await (await fetch(`${base}/models?harness=cursor`)).json()) as { harness: string; models: Array<{ id: string }> };
+    expect(cursor.harness).toBe('cursor');
+    expect(cursor.models.map((m) => m.id)).toContain('gpt-5.4-high');
+
+    const def = (await (await fetch(`${base}/models`)).json()) as { harness: string };
+    expect(def.harness).toBe('claude-code'); // absent → the default harness, unchanged
+
+    expect((await fetch(`${base}/models?harness=gemini`)).status).toBe(400);
   });
 
   it('threads an optional pre-selected model on POST /runs, seeding the override or 400ing a bad one', async () => {
@@ -361,6 +409,35 @@ describe('HTTP API', () => {
     expect((await fetch(`${base}/runs/99999/check-pr-feedback`, { method: 'POST' })).status).toBe(404);
   });
 
+  it('routes POST /runs/:id/check-reply to an on-demand reply check', async () => {
+    let clarified = false;
+    const { base, orchestrator, repo, github } = await start({
+      handler: (req) => {
+        if (req.stage === 'triage') {
+          if (!clarified) { clarified = true; return { output: { decision: 'clarify', questions: ['which db?'] } }; }
+          return { output: { decision: 'proceed' } };
+        }
+        return goldenPathHandler(req);
+      },
+    });
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle();
+    expect(repo.getRun(run.id)!.status).toBe('awaiting_input');
+
+    // No reply yet.
+    const first = (await (await fetch(`${base}/runs/${run.id}/check-reply`, { method: 'POST' })).json()) as { result: string };
+    expect(first.result).toBe('no_reply');
+
+    // The human replies on the issue → the check resumes the run.
+    github.seedIssueComment(1, { author: 'human', body: 'feedback: use sqlite' });
+    const res = await fetch(`${base}/runs/${run.id}/check-reply`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { run: { status: string }; result: string };
+    expect(body.result).toBe('resumed');
+
+    expect((await fetch(`${base}/runs/99999/check-reply`, { method: 'POST' })).status).toBe(404);
+  });
+
   it('routes POST /scheduler/check to an on-demand Scheduler pass (Milestone 9)', async () => {
     const { base, orchestrator, github } = await start();
     github.seedIssue('o/r#1', { number: 1 }); // the open dependency
@@ -434,6 +511,9 @@ describe('HTTP API', () => {
     const repos = (await (await fetch(`${base}/repos`)).json()) as Array<{ repoRef: string }>;
     expect(repos.map((r) => r.repoRef)).toEqual(['acme/web']);
 
+    // An enrolled repo needs a working directory before it can run (M12); bind clone-on-run.
+    await fetch(`${base}/repos/source`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web', mode: 'clone' }) });
+
     // Runs in two repos (the single-repo resolver admits both); ?repo= scopes the list.
     await fetch(`${base}/runs`, { method: 'POST', body: JSON.stringify({ issueRef: 'acme/web#1' }) });
     await fetch(`${base}/runs`, { method: 'POST', body: JSON.stringify({ issueRef: 'acme/api#1' }) });
@@ -443,9 +523,41 @@ describe('HTTP API', () => {
     expect(webRuns.map((r) => r.repoRef)).toEqual(['acme/web']); // case-insensitive filter
   });
 
+  it('binds a repo working directory via POST /repos/source (Milestone 12)', async () => {
+    const { base } = await start();
+    await fetch(`${base}/repos`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web' }) });
+
+    // Clone-on-run.
+    const clone = await fetch(`${base}/repos/source`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web', mode: 'clone' }) });
+    expect(clone.status).toBe(200);
+    expect(await clone.json()).toMatchObject({ repoRef: 'acme/web', sourceMode: 'clone' });
+
+    // A validated local directory.
+    const local = await fetch(`${base}/repos/source`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web', mode: 'local', localRepo: '/home/me/acme' }) });
+    expect(await local.json()).toMatchObject({ sourceMode: 'local', localRepo: '/home/me/acme' });
+
+    // The wrong directory is a 400 with the mismatch reason; an unknown mode is a 400; an unenrolled repo is a 404.
+    const wrong = await fetch(`${base}/repos/source`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web', mode: 'local', localRepo: '/home/me/wrong' }) });
+    expect(wrong.status).toBe(400);
+    expect(((await wrong.json()) as { error: string }).error).toMatch(/checkout of other\/repo/);
+    expect((await fetch(`${base}/repos/source`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web', mode: 'sideways' }) })).status).toBe(400);
+    expect((await fetch(`${base}/repos/source`, { method: 'POST', body: JSON.stringify({ repoRef: 'no/such', mode: 'clone' }) })).status).toBe(404);
+  });
+
+  it('serves directory-path completions for the local-directory picker (GET /fs/dirs)', async () => {
+    const { base } = await start();
+    const root = mkdtempSync(join(tmpdir(), 'af-fsdirs-'));
+    mkdirSync(join(root, 'projects'));
+    const res = await fetch(`${base}/fs/dirs?q=${encodeURIComponent(`${root}/pro`)}`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ dirs: [join(root, 'projects')] });
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it('toggles continuous mode via POST /repos/watch (Milestone 11)', async () => {
     const { base } = await start();
     await fetch(`${base}/repos`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web' }) });
+    await fetch(`${base}/repos/source`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web', mode: 'clone' }) }); // configured → watchable (M12)
 
     const on = await fetch(`${base}/repos/watch`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web', watch: true, label: 'fleet: go' }) });
     expect(on.status).toBe(200);

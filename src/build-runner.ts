@@ -23,6 +23,8 @@ import { catalogForHarness } from './agent/harness-models';
 import { DEFAULT_HARNESS, DEFAULT_HARNESS_SETTING_KEY, HARNESS_IDS, isHarnessId, type HarnessId } from './agent/harness';
 import { DEFAULT_MODEL_MAP } from './agent/subprocess-executor';
 import { EnrolledRepoResolver, singleRepoResolver, type RepoResolver } from './integration/github-resolver';
+import { defaultExec } from './integration/github-cli';
+import { validateLocalCheckout } from './integration/local-checkout';
 import { buildRealGitHub, buildRealRunner } from './real-run';
 import { Orchestrator } from './api/orchestrator';
 import { Broadcaster } from './api/stream';
@@ -83,8 +85,11 @@ export function buildRunner(
       workingRoot: config.workingRoot,
       baseBranch: config.baseBranch,
       cloneUrl: config.cloneUrl ?? null,
-      localRepo: config.localRepo ?? null,
     });
+    // The boot flags ARE the explicit source choice for the CLI/daemon-bound repo (Milestone 12): a
+    // `--local-repo` binds local/worktree mode, otherwise clone-on-run. Set separately from `upsertRepo`
+    // (which no longer owns these columns) so a re-enroll can't reset the operator's chosen directory.
+    repo.setRepoSource(config.repo, config.localRepo ? 'local' : 'clone', config.localRepo ?? null);
   }
   const resolver = new EnrolledRepoResolver(
     (ref) => repo.getRepo(ref),
@@ -194,6 +199,10 @@ export function buildOrchestrator(args: CliArgs): {
     suggestionSource, // powers the new-run autocomplete (GET /suggestions)
     resolver, // per-repo adapter resolution + the start-time enrollment check (Milestone 8)
     defaultWorkingRoot: args.work, // a POST /repos enrollment defaults its working root to the daemon's --work
+    // Validates a "local directory" source pick against the real filesystem + git (Milestone 12): the
+    // directory must be a checkout whose origin resolves to the linked repo. Git-based, so it works in
+    // both real and mock daemons (a local dir is a real dir either way).
+    validateLocalCheckout: (dir, repoRef) => validateLocalCheckout(dir, repoRef, defaultExec),
     // Harness + model selection. `defaultHarness` is what a run without an explicit harness gets, and
     // which harness's catalog `GET /models` shows; `catalogFor` resolves each harness to its selectable
     // models (per-run for `setModel`, the default for `getModels`). Mock mode reuses the real catalogs

@@ -25,6 +25,7 @@ import {
 import { FakeGitHub } from '../integration/github-fake';
 import type { GitHub } from '../integration/github';
 import { catalogForHarness } from '../agent/harness-models';
+import { HarnessRegistry } from '../agent/harness';
 import { EnrolledRepoResolver, singleRepoResolver, type RepoResolver } from '../integration/github-resolver';
 import { ApiError, Orchestrator } from './orchestrator';
 import { Broadcaster, type StreamEvent } from './stream';
@@ -36,8 +37,9 @@ const DEFAULT_CONFIG_PATH = fileURLToPath(new URL('../fsm/default-config.json', 
 function setup(
   opts: {
     handler?: StubHandler;
-    /** Override the stage executor entirely (e.g. a gated one to observe drain concurrency). */
-    executor?: StageExecutor;
+    /** Override the stage executor entirely (e.g. a gated one to observe drain concurrency, or a
+     *  {@link HarnessRegistry} to exercise per-run harness dispatch). */
+    executor?: StageExecutor | HarnessRegistry;
     configPath?: string;
     /** Build a custom resolver (e.g. an EnrolledRepoResolver) to exercise the enrollment check; the
      *  default accepts any repo (single-repo/mock behavior). */
@@ -47,6 +49,9 @@ function setup(
     concurrency?: number;
     /** Global cost ceiling in dollars (Milestone 8 B3). Undefined = off. */
     costCeiling?: number;
+    /** Stub local-checkout validator (Milestone 12). Defaults to always-ok so `configureRepoSource('local')`
+     *  is testable without a real filesystem; pass a rejecting one to exercise the wrong-directory guard. */
+    validateLocalCheckout?: (dir: string, repoRef: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
   } = {},
 ) {
   const loaded = loadDefaultConfig();
@@ -69,6 +74,7 @@ function setup(
     resolver,
     catalogFor: catalogForHarness,
     defaultModel: 'opus',
+    validateLocalCheckout: opts.validateLocalCheckout ?? (async () => ({ ok: true }) as const),
     ...(opts.defaultWorkingRoot ? { defaultWorkingRoot: opts.defaultWorkingRoot } : {}),
     ...(opts.configPath ? { configPath: opts.configPath } : {}),
     ...(opts.concurrency !== undefined ? { concurrency: opts.concurrency } : {}),
@@ -133,26 +139,42 @@ describe('Orchestrator — start + drain', () => {
       makeResolver: (repo, github) => new EnrolledRepoResolver((ref) => repo.getRepo(ref), () => github),
     });
     repo.upsertRepo({ repoRef: 'jzohdi/tmux-speedrun', workingRoot: './w' });
+    repo.setRepoSource('jzohdi/tmux-speedrun', 'clone', null); // a configured working directory (M12)
 
-    // Enrolled repo (any casing/URL form) is admitted…
+    // Enrolled + configured repo (any casing/URL form) is admitted…
     expect(() => orchestrator.start({ issueRef: 'https://github.com/JZohdi/tmux-speedrun/issues/31' })).not.toThrow();
     // …an unenrolled repo is refused, and no run is created for it.
     expect(() => orchestrator.start({ issueRef: 'acme/web#318' })).toThrow(/not enrolled/);
     expect(repo.listRuns().map((r) => r.repoRef.toLowerCase())).toEqual(['jzohdi/tmux-speedrun']);
   });
 
-  it('auto-enrolls an unenrolled repo on first run when a default working root is configured', () => {
-    // The daemon path: `defaultWorkingRoot` is set (from `--work`), so filing a run on a repo the fleet
-    // has never seen enrolls it with defaults and starts the run — no separate enroll step required.
+  it('attaches an unknown repo UNCONFIGURED on first run and refuses to start until a directory is chosen (M12)', async () => {
+    // With a `defaultWorkingRoot` (from `--work`), filing a run on a never-seen repo *attaches* it (so it
+    // shows up in the Repositories ledger) but bounces the run — the operator must pick a working directory
+    // first, rather than a run silently executing with no real source (the tmux-speedrun#35 failure).
     const { orchestrator, repo } = setup({
       defaultWorkingRoot: './work',
       makeResolver: (repo, github) => new EnrolledRepoResolver((ref) => repo.getRepo(ref), () => github),
     });
 
+    expect(() => orchestrator.start({ issueRef: 'acme/web#318' })).toThrow(/choose a working directory/);
+    expect(repo.listRuns()).toHaveLength(0); // no run started
+    expect(orchestrator.listRepos().map((r) => r.repoRef)).toEqual(['acme/web']); // but attached (unconfigured)
+    expect(repo.getRepo('acme/web')).toMatchObject({ workingRoot: './work', sourceMode: null });
+
+    // Once configured, the run starts normally.
+    await orchestrator.configureRepoSource({ repoRef: 'acme/web', mode: 'clone' });
     const run = orchestrator.start({ issueRef: 'acme/web#318' });
     expect(run.status).toBe('running');
-    expect(orchestrator.listRepos().map((r) => r.repoRef)).toEqual(['acme/web']); // auto-enrolled
-    expect(repo.getRepo('acme/web')).toMatchObject({ workingRoot: './work', baseBranch: 'main' });
+  });
+
+  it('refuses to start a run for an attached-but-unconfigured repo (M12)', () => {
+    const { orchestrator, repo } = setup({
+      makeResolver: (repo, github) => new EnrolledRepoResolver((ref) => repo.getRepo(ref), () => github),
+    });
+    repo.upsertRepo({ repoRef: 'acme/web', workingRoot: './w' }); // enrolled, no source chosen
+    expect(() => orchestrator.start({ issueRef: 'acme/web#1' })).toThrow(/no working directory configured/);
+    expect(repo.listRuns()).toHaveLength(0);
   });
 
   it('admits any repo under the single-repo/mock resolver (no enrollment gate)', () => {
@@ -349,6 +371,110 @@ describe('Orchestrator — harness selection', () => {
     expect(() => orchestrator.setModel(cursorRun.id, 'opus')).toThrow(/unknown model "opus" for the cursor harness/);
 
     await orchestrator.settle();
+  });
+
+  it('resolves a specific harness\'s catalog via getModels(harness), 400ing an unknown one', () => {
+    const { orchestrator } = setup();
+
+    // The per-run picker asks for the catalog of the harness the run is on, not the default's.
+    const cursor = orchestrator.getModels('cursor');
+    expect(cursor.harness).toBe('cursor');
+    expect(cursor.models.map((m) => m.id)).toContain('gpt-5.4-high');
+    expect(cursor.defaultModel).toBeNull(); // the Claude `opus` default is not a Cursor model
+
+    expect(orchestrator.getModels().harness).toBe('claude-code'); // absent → the default, unchanged
+
+    try {
+      orchestrator.getModels('gemini');
+      throw new Error('expected an unknown harness to be rejected');
+    } catch (err) {
+      expect((err as ApiError).status).toBe(400);
+    }
+  });
+});
+
+describe('Orchestrator — per-run harness switch', () => {
+  it('re-points the run, clears the old catalog\'s model/effort overrides, and broadcasts', async () => {
+    const { orchestrator, repo, events } = setup();
+    const run = orchestrator.start({ issueRef: 'o/r#1', model: 'sonnet', effort: 'high' });
+
+    const switched = orchestrator.setHarness(run.id, 'cursor');
+    expect(switched.harness).toBe('cursor');
+    // The overrides named claude-code models; they must not survive onto the cursor catalog.
+    expect(repo.getRun(run.id)!.modelOverride).toBeNull();
+    expect(repo.getRun(run.id)!.effortOverride).toBeNull();
+    expect(events.some((e) => e.type === 'status' && e.runId === run.id)).toBe(true);
+
+    await orchestrator.settle();
+  });
+
+  it('keeps the overrides on a same-harness call (a no-op, not a reset)', async () => {
+    const { orchestrator, repo } = setup();
+    const run = orchestrator.start({ issueRef: 'o/r#1', model: 'sonnet' });
+
+    orchestrator.setHarness(run.id, 'claude-code');
+    expect(repo.getRun(run.id)!.modelOverride).toBe('sonnet');
+
+    await orchestrator.settle();
+  });
+
+  it('404s an unknown run, 400s an unknown harness, and 409s a terminal run', async () => {
+    const { orchestrator } = setup();
+    expect(() => orchestrator.setHarness(99999, 'cursor')).toThrow(/not found/);
+
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    try {
+      orchestrator.setHarness(run.id, 'gemini');
+      throw new Error('expected an unknown harness to be rejected');
+    } catch (err) {
+      expect((err as ApiError).status).toBe(400);
+    }
+
+    await orchestrator.settle(); // → done (terminal)
+    try {
+      orchestrator.setHarness(run.id, 'cursor');
+      throw new Error('expected setHarness to throw on a terminal run');
+    } catch (err) {
+      expect((err as ApiError).status).toBe(409);
+    }
+  });
+
+  it('dispatches the next stage on the new harness executor — pause, switch, resume (through the loop)', async () => {
+    // Two recording executors behind a registry: the run starts on claude-code, pauses mid-`plan`,
+    // is re-pointed at cursor, and every stage after the resume must hit the cursor executor only.
+    const stagesOn = (seen: string[]): StubExecutor =>
+      new StubExecutor((req) => {
+        if (req.phase === 'produce') seen.push(req.stage);
+        return goldenPathHandler(req);
+      });
+    const seenClaude: string[] = [];
+    const seenCursor: string[] = [];
+    const holder: { orchestrator?: Orchestrator } = {};
+    const registry = new HarnessRegistry({
+      'claude-code': new StubExecutor((req) => {
+        if (req.phase === 'produce') {
+          seenClaude.push(req.stage);
+          if (req.stage === 'plan') holder.orchestrator!.pause(req.runId); // honored when the stage commits
+        }
+        return goldenPathHandler(req);
+      }),
+      cursor: stagesOn(seenCursor),
+    });
+    const { orchestrator, repo } = setup({ executor: registry });
+    holder.orchestrator = orchestrator;
+
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle();
+    expect(repo.getRun(run.id)!.status).toBe('paused'); // parked after `plan` finished
+
+    orchestrator.setHarness(run.id, 'cursor');
+    orchestrator.resume(run.id);
+    await orchestrator.settle();
+
+    expect(repo.getRun(run.id)!.status).toBe('done');
+    expect(seenClaude).toEqual(['triage', 'plan']); // everything up to the pause, and nothing after
+    expect(seenCursor).toContain('plan_review'); // the very next stage onward ran on cursor
+    expect(seenCursor).toContain('code_review');
   });
 });
 
@@ -555,7 +681,7 @@ describe('Orchestrator — pause / resume', () => {
 });
 
 describe('Orchestrator — stop', () => {
-  it('stops an in-flight run terminally and refuses to resume it', async () => {
+  it('stops an in-flight run terminally; stopping again is refused (but resume re-opens it)', async () => {
     const holder: { orchestrator?: Orchestrator } = {};
     const handler = golden_with_interrupt('plan', (runId) => holder.orchestrator!.stop(runId));
     const { orchestrator, repo, events } = setup({ handler });
@@ -568,8 +694,8 @@ describe('Orchestrator — stop', () => {
     expect(stopped.status).toBe('stopped');
     expect(events.some((e) => e.type === 'status' && e.status === 'stopped')).toBe(true);
 
-    // Terminal: no further events dispatch, and resume/stop are refused.
-    expectApiError(() => orchestrator.resume(run.id), 409);
+    // Terminal: no follow-up event dispatched, and stopping again is a 409. Resuming a stopped run,
+    // by contrast, re-opens it — `stop` is reversible (see the resume-stopped test).
     expectApiError(() => orchestrator.stop(run.id), 409);
   });
 });
@@ -895,13 +1021,66 @@ describe('Orchestrator — dependency scheduling (Milestone 9)', () => {
   });
 });
 
+describe('Orchestrator — repo working-directory source (Milestone 12)', () => {
+  it('binds clone-on-run mode without touching the filesystem', async () => {
+    const { orchestrator, repo } = setup({ defaultWorkingRoot: './work' });
+    orchestrator.enrollRepo({ repoRef: 'acme/web' });
+    const configured = await orchestrator.configureRepoSource({ repoRef: 'acme/web', mode: 'clone' });
+    expect(configured).toMatchObject({ sourceMode: 'clone', localRepo: null });
+    expect(repo.getRepo('acme/web')!.sourceMode).toBe('clone');
+  });
+
+  it('binds a validated local directory (worktree mode), storing the path', async () => {
+    const seen: Array<[string, string]> = [];
+    const { orchestrator, repo } = setup({
+      defaultWorkingRoot: './work',
+      validateLocalCheckout: async (dir, ref) => { seen.push([dir, ref]); return { ok: true }; },
+    });
+    orchestrator.enrollRepo({ repoRef: 'acme/web' });
+    const configured = await orchestrator.configureRepoSource({ repoRef: 'acme/web', mode: 'local', localRepo: '/home/me/acme' });
+    expect(configured).toMatchObject({ sourceMode: 'local', localRepo: '/home/me/acme' });
+    expect(seen).toEqual([['/home/me/acme', 'acme/web']]); // validated against the linked repo
+    expect(repo.getRepo('acme/web')!.localRepo).toBe('/home/me/acme');
+  });
+
+  it('rejects a directory that is a checkout of a different repo (the wrong-directory guard)', async () => {
+    const { orchestrator, repo } = setup({
+      defaultWorkingRoot: './work',
+      validateLocalCheckout: async () => ({ ok: false, reason: 'that directory is a checkout of other/repo, not acme/web' }),
+    });
+    orchestrator.enrollRepo({ repoRef: 'acme/web' });
+    await expect(orchestrator.configureRepoSource({ repoRef: 'acme/web', mode: 'local', localRepo: '/home/me/other' }))
+      .rejects.toThrow(/checkout of other\/repo/);
+    expect(repo.getRepo('acme/web')!.sourceMode).toBeNull(); // unchanged — still unconfigured
+  });
+
+  it('requires a path for local mode (400) and refuses an unenrolled repo (404)', async () => {
+    const { orchestrator } = setup({ defaultWorkingRoot: './work' });
+    await expect(orchestrator.configureRepoSource({ repoRef: 'ghost/repo', mode: 'clone' })).rejects.toThrow(/not enrolled/);
+    orchestrator.enrollRepo({ repoRef: 'acme/web' });
+    await expect(orchestrator.configureRepoSource({ repoRef: 'acme/web', mode: 'local' })).rejects.toThrow(/localRepo .* is required/);
+  });
+
+  it('a re-enroll (POST /repos) never resets a repo\'s chosen working directory', async () => {
+    const { orchestrator, repo } = setup({ defaultWorkingRoot: './work' });
+    orchestrator.enrollRepo({ repoRef: 'acme/web' });
+    await orchestrator.configureRepoSource({ repoRef: 'acme/web', mode: 'local', localRepo: '/home/me/acme' });
+    orchestrator.enrollRepo({ repoRef: 'acme/web', baseBranch: 'develop' }); // re-enroll with a new base
+    expect(repo.getRepo('acme/web')).toMatchObject({ baseBranch: 'develop', sourceMode: 'local', localRepo: '/home/me/acme' });
+  });
+});
+
 describe('Orchestrator — repo watch + issue intake (Milestone 11)', () => {
-  it('setRepoWatch requires an enrolled repo (404) and a valid ref (400)', () => {
-    const { orchestrator } = setup();
+  it('setRepoWatch requires an enrolled repo (404), a valid ref (400), and a configured working directory (400)', () => {
+    const { orchestrator, repo } = setup();
     expect(() => orchestrator.setRepoWatch({ repoRef: 'o/r', watch: true })).toThrow(/not enrolled/);
     expect(() => orchestrator.setRepoWatch({ repoRef: 'not a repo', watch: true })).toThrow(ApiError);
 
     orchestrator.enrollRepo({ repoRef: 'o/r', workingRoot: './w' });
+    // Enrolled but no working directory chosen yet → can't watch it (M12).
+    expect(() => orchestrator.setRepoWatch({ repoRef: 'o/r', watch: true })).toThrow(/no working directory configured/);
+
+    repo.setRepoSource('o/r', 'clone', null);
     const watched = orchestrator.setRepoWatch({ repoRef: 'o/r', watch: true, label: 'fleet: go' });
     expect(watched).toMatchObject({ watch: true, watchLabel: 'fleet: go' });
   });
@@ -909,6 +1088,7 @@ describe('Orchestrator — repo watch + issue intake (Milestone 11)', () => {
   it('a watch pass auto-starts a run for an eligible issue and drains it to done', async () => {
     const { orchestrator, repo, github } = setup();
     orchestrator.enrollRepo({ repoRef: 'o/r', workingRoot: './w' });
+    repo.setRepoSource('o/r', 'clone', null);
     orchestrator.setRepoWatch({ repoRef: 'o/r', watch: true });
     github.seedIssue('o/r#1', { number: 1, author: 'o' }); // owner-filed → eligible
 
@@ -924,6 +1104,7 @@ describe('Orchestrator — repo watch + issue intake (Milestone 11)', () => {
   it('the intake path honors start guards: a non-owner issue is skipped, no run created', async () => {
     const { orchestrator, repo, github } = setup();
     orchestrator.enrollRepo({ repoRef: 'o/r', workingRoot: './w' });
+    repo.setRepoSource('o/r', 'clone', null);
     orchestrator.setRepoWatch({ repoRef: 'o/r', watch: true });
     github.seedIssue('o/r#1', { number: 1, author: 'stranger' });
 
@@ -938,5 +1119,120 @@ describe('Orchestrator — repo watch + issue intake (Milestone 11)', () => {
 
     expect(await orchestrator.pollIssueIntakeOnce()).toMatchObject({ reposScanned: 0, started: 0 });
     expect(repo.listRuns()).toHaveLength(0);
+  });
+});
+
+describe('Orchestrator — resume a stopped run + on-demand reply check', () => {
+  it('resume re-opens a stopped run and drains it from where it left off', async () => {
+    const holder: { orch?: Orchestrator } = {};
+    let stopped = false;
+    const { orchestrator, repo } = setup({
+      handler: (req) => {
+        if (!stopped && req.stage === 'plan' && req.phase === 'produce') {
+          stopped = true;
+          holder.orch!.stop(req.runId); // stop mid-pipeline → terminal at a non-terminal state
+        }
+        return goldenPathHandler(req);
+      },
+    });
+    holder.orch = orchestrator;
+
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle();
+    expect(repo.getRun(run.id)!.status).toBe('stopped');
+
+    const resumed = orchestrator.resume(run.id);
+    expect(resumed.status).toBe('running');
+    await orchestrator.settle();
+    expect(repo.getRun(run.id)!.status).toBe('done'); // picked back up and finished
+  });
+
+  it('resume still refuses a genuinely un-resumable status (e.g. running) with a 409', async () => {
+    const { orchestrator } = setup({ executor: { run: () => new Promise<never>(() => {}) } }); // stage never resolves
+    const run = orchestrator.start({ issueRef: 'o/r#1' }); // stays running
+    expect(() => orchestrator.resume(run.id)).toThrow(/cannot resume a "running" run/);
+  });
+
+  it('checkReply resumes an awaiting_input run when the human replied (on-demand)', async () => {
+    let clarified = false;
+    const { orchestrator, repo, github } = setup({
+      handler: (req) => {
+        if (req.stage === 'triage') {
+          if (!clarified) { clarified = true; return { output: { decision: 'clarify', questions: ['which db?'] } }; }
+          return { output: { decision: 'proceed' } };
+        }
+        return goldenPathHandler(req);
+      },
+    });
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle();
+    expect(repo.getRun(run.id)!.status).toBe('awaiting_input');
+
+    // No reply yet → no_reply, still parked.
+    expect((await orchestrator.checkReply(run.id)).result).toBe('no_reply');
+
+    // The operator replies on the issue; detection is by the bot-comment marker, not author login.
+    github.seedIssueComment(1, { author: 'o', body: 'feedback: use sqlite, proceed' });
+    const checked = await orchestrator.checkReply(run.id);
+    expect(checked.result).toBe('resumed');
+    await orchestrator.settle();
+    expect(repo.getRun(run.id)!.status).toBe('done');
+  });
+
+  it('checkReply reports not_awaiting for a run that is not parked on input, and 404s an unknown run', async () => {
+    const { orchestrator, repo } = setup();
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle();
+    expect(repo.getRun(run.id)!.status).toBe('done');
+    expect((await orchestrator.checkReply(run.id)).result).toBe('not_awaiting');
+    await expect(orchestrator.checkReply(9999)).rejects.toThrow(ApiError);
+  });
+});
+
+describe('Orchestrator — drain pump wake (mid-flight admission)', () => {
+  /** A stage executor whose every stage blocks until released, recording start order — lets a test see a
+   *  second run begin while the first is still in flight. */
+  class GatedExecutor implements StageExecutor {
+    started: string[] = [];
+    private waiters: Array<() => void> = [];
+    async run(req: AgentRunRequest): Promise<AgentRunResult> {
+      this.started.push(`${req.runId}:${req.stage}`);
+      await new Promise<void>((resolve) => this.waiters.push(resolve));
+      const reply = goldenPathHandler(req);
+      return { output: reply.output, usage: { tokens: reply.tokens ?? 1 } };
+    }
+    releaseAll(): void {
+      const waiting = this.waiters;
+      this.waiters = [];
+      for (const r of waiting) r();
+    }
+  }
+
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 3; i++) await new Promise((r) => setTimeout(r, 0));
+  };
+
+  it('a run started while another is mid-stage dispatches immediately when the cap has room', async () => {
+    const executor = new GatedExecutor();
+    // Concurrency 2 so the second run has a free slot; the regression is that it wasn't used until the
+    // first stage finished. (At the default cap of 1 this is correctly serial and not what we test.)
+    const { orchestrator, repo } = setup({ executor, concurrency: 2 });
+
+    const a = orchestrator.start({ issueRef: 'o/r#1' });
+    await flush();
+    expect(executor.started).toEqual([`${a.id}:triage`]); // A in flight, gated
+
+    const b = orchestrator.start({ issueRef: 'o/r#2' }); // admitted mid-drain → kick() wakes the pool
+    await flush();
+    expect(executor.started).toContain(`${b.id}:triage`); // B dispatched WITHOUT A completing
+
+    // Drive both to completion, then confirm a clean drain.
+    for (let i = 0; i < 1000 && (repo.getRun(a.id)!.status !== 'done' || repo.getRun(b.id)!.status !== 'done'); i++) {
+      executor.releaseAll();
+      await flush();
+    }
+    await orchestrator.settle();
+    expect(repo.getRun(a.id)!.status).toBe('done');
+    expect(repo.getRun(b.id)!.status).toBe('done');
   });
 });

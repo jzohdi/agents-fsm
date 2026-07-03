@@ -241,6 +241,15 @@ export interface GitHub {
    */
   dropWorkingTree(runId: number): Promise<void>;
 
+  /**
+   * Freshen the operator's local checkout after a run's PR merges (Milestone 12 — "local directory"
+   * source mode): fetch the remote and fast-forward the `base` branch **only when it is the checked-out
+   * branch and the working tree is clean**, so future `git worktree`s branch off up-to-date base and the
+   * operator's own `main` stays current — never disturbing their in-progress work. A no-op for the
+   * clone-on-run source mode (there is no shared local checkout to sync).
+   */
+  syncBaseBranch(base: string): Promise<void>;
+
   /** Stage all changes in the working tree, commit them, and push the branch. */
   commitAndPush(input: CommitAndPushInput): Promise<CommitRef>;
 

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ui, control, revertRun, overrideCost, setModel, setEffort, checkPrFeedback } from './store.svelte';
+  import { ui, control, revertRun, overrideCost, setModel, setEffort, setHarness, loadCatalog, checkPrFeedback, checkReply } from './store.svelte';
   import ModelPicker from './ModelPicker.svelte';
   import EffortSelect from './EffortSelect.svelte';
   import { telemetryModel, escalationModel, activityLane, costStatusModel, issueUrl, prUrl, branchUrl, isWatchingPrFeedback, fmtRunCost, fmtDuration, fmtTokens, escapeHtml, humanizeState, humanizeHarness, schedulingLabel } from './render';
@@ -35,19 +35,20 @@
   const revertable = $derived(
     ui.config ? Object.entries(ui.config.fsm.states).filter(([, d]) => !d.terminal).map(([name]) => name) : [],
   );
-  // The model catalog (`ui.models`, from GET /models) is the *default* harness's. It only applies to a
-  // run on that same harness — a run on a different harness must not offer that catalog's models (setModel
-  // would 400) nor show its default. Per-harness catalogs for non-default runs are a later enhancement.
-  const catalogMatchesRun = $derived(!!ui.models && ui.models.harness === run?.harness);
-  // The run's effective model for the live badge: its override, else the default (only when the catalog
-  // is this run's harness), else the generic "default".
-  const model = $derived(run?.modelOverride ?? (catalogMatchesRun ? ui.models?.defaultModel : null) ?? 'default');
+  // The catalog for the harness *this run* is on (`GET /models?harness=`, cached per harness in the
+  // store) — so the picker always offers the models of the harness that will actually run the next
+  // stage, whatever the daemon default is. Fetched lazily when a live run is selected.
+  const runCatalog = $derived(run ? (ui.catalogs[run.harness] ?? null) : null);
+  $effect(() => {
+    if (run && !terminal) void loadCatalog(run.harness);
+  });
+  // The run's effective model for the live badge: its override, else its harness's default, else "default".
+  const model = $derived(run?.modelOverride ?? runCatalog?.defaultModel ?? 'default');
   // The effort control appears when the run's effective model (override, else the harness default) supports
   // effort — so a Claude run can bump reasoning per-run, while a Cursor run (no effort) never shows it.
   const runEfforts = $derived.by(() => {
-    if (!catalogMatchesRun) return [] as string[];
-    const id = run?.modelOverride ?? ui.models?.defaultModel;
-    return (id ? ui.models?.models.find((m) => m.id === id)?.efforts : undefined) ?? [];
+    const id = run?.modelOverride ?? runCatalog?.defaultModel;
+    return (id ? runCatalog?.models.find((m) => m.id === id)?.efforts : undefined) ?? [];
   });
 
   let revertTo = $state('');
@@ -126,15 +127,30 @@
       </div>
     </div>
     <div class="af-controls">
-      {#if !terminal && catalogMatchesRun && ui.models!.models.length}
+      {#if !terminal && ui.harnesses.length > 1}
+        <!-- Per-run harness switch: takes effect on the run's NEXT stage (an in-flight stage finishes
+             on its current harness; pause first to hold the run before its next dispatch). Switching
+             clears the model/effort overrides — they belong to the old harness's catalog. -->
+        <div class="af-model">
+          <span class="lbl">harness</span>
+          <select
+            aria-label="run harness"
+            value={run.harness}
+            onchange={(e) => setHarness(run.id, e.currentTarget.value)}
+          >
+            {#each ui.harnesses as h (h)}<option value={h}>{humanizeHarness(h)}</option>{/each}
+          </select>
+        </div>
+      {/if}
+      {#if !terminal && runCatalog && runCatalog.models.length}
         <!-- A plain wrapper (not a <label>): a <label> around the picker's button would forward a second
              synthetic click to it, immediately re-closing the popover. -->
         <div class="af-model">
           <span class="lbl">model</span>
           <ModelPicker
-            models={ui.models!.models}
+            models={runCatalog.models}
             value={run.modelOverride}
-            defaultLabel={ui.models!.defaultModel}
+            defaultLabel={runCatalog.defaultModel}
             onselect={(id) => setModel(run.id, id)}
             ariaLabel="run model"
           />
@@ -149,6 +165,10 @@
       {#if run.status === 'paused' || run.status === 'needs_human'}
         <button type="button" onclick={() => control('resume')}>Resume</button>
       {/if}
+      {#if run.status === 'stopped'}
+        <!-- stop is reversible: re-open the stopped run and continue from where it left off -->
+        <button type="button" onclick={() => control('resume')}>Resume</button>
+      {/if}
       {#if !terminal}
         <form class="af-revert" onsubmit={submitRevert}>
           <select bind:value={revertTo} aria-label="revert to state">
@@ -158,7 +178,7 @@
           <button type="submit">Revert</button>
         </form>
         <button type="button" class="stop" onclick={() => control('stop')}>Stop</button>
-      {:else if !watchingPrFeedback}
+      {:else if run.status === 'done' && !watchingPrFeedback}
         <span class="terminal-note">terminal — no further control</span>
       {/if}
       {#if showCostOverride}
@@ -177,6 +197,13 @@
         <div class="af-prwatch">
           <span class="af-tag"><span class="pip"></span>watching {run.prNumber ? `PR #${run.prNumber}` : 'the PR'} for feedback</span>
           <button type="button" onclick={() => checkPrFeedback(run.id)}>Check now</button>
+        </div>
+      {/if}
+      {#if run.status === 'awaiting_input'}
+        <!-- Triage asked a question on the issue; reply there, then this button (or the poller) resumes it. -->
+        <div class="af-prwatch">
+          <span class="af-tag"><span class="pip"></span>waiting for your reply on the issue</span>
+          <button type="button" onclick={() => checkReply(run.id)}>Check now</button>
         </div>
       {/if}
     </div>

@@ -27,6 +27,11 @@ Your user message is a single JSON object. The fields you may see:
   output.** When `operatorNotes` conflicts with anything else, the human's guidance wins.
 - `producedEnvelope` / `reviewNotes` — (self-review / fix phases) the output under review and the
   review's findings.
+- `reviewRound` — (self-review / fix phases) `{ round, cap, previousNotes? }`: which round of the
+  bounded review → fix loop this is, out of how many, and — from round 2 on — the previous round's
+  findings. Reviewers: verify each of `previousNotes`' issues was resolved before looking for new
+  ones, and do not re-litigate points you previously accepted. Hitting `cap` with blocking issues
+  escalates the whole run to a human.
 - `retry` — present only when your previous attempt produced output that failed validation;
   `retry.previousError` says what was wrong. Correct it and emit valid output this time.
 

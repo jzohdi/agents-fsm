@@ -17,7 +17,6 @@ import type { Server } from 'node:http';
 import { createApiServer, DEFAULT_PUBLIC_DIR } from './api/server';
 import { stateLabelMirror } from './api/state-label-mirror';
 import { buildOrchestrator } from './build-runner';
-import { ReplyPoller } from './loop/reply-poller';
 import type { CliArgs } from './cli-args';
 
 export async function serve(args: CliArgs): Promise<void> {
@@ -25,7 +24,7 @@ export async function serve(args: CliArgs): Promise<void> {
   // already enrolled (none, on a fresh DB); you add repos from the dashboard, and filing a run on a new
   // repo auto-enrolls it (Orchestrator.start). `--repo` still works as a convenience: it bootstrap-
   // enrolls that one repo. The autocomplete is user-scoped (the logged-in `gh` account), not repo-bound.
-  const { orchestrator, repo, resolver, broadcaster } = buildOrchestrator(args);
+  const { orchestrator, resolver, broadcaster } = buildOrchestrator(args);
   // Mirror each run's FSM state onto its PR as an `af:<state>` label (README §3.5 — a derived view,
   // best-effort by contract; a failure logs and the next transition retries naturally).
   broadcaster.subscribe(stateLabelMirror(resolver));
@@ -53,9 +52,12 @@ export async function serve(args: CliArgs): Promise<void> {
     console.warn('  ⚠ dashboard not built — run `npm run build:dashboard` (or `npm run dev:dashboard` for HMR). The API works regardless.');
   }
 
-  // Background reply polling: re-arm `awaiting_input` runs when a human replies on the issue (each via
-  // its own repo's adapter — the resolver, not a single bound adapter, so multi-repo runs poll correctly).
-  const stopPolling = startReplyPolling(orchestrator, repo, resolver, args);
+  // Background reply polling: re-arm `awaiting_input` runs when a human replies on the issue. The
+  // Orchestrator owns the poller (shared with the dashboard's on-demand "Check for a reply"); this ticks
+  // it. It reads each run's thread via that run's repo adapter (the resolver), so multi-repo runs poll
+  // correctly, and identifies the human's reply by a comment marker — not author login, which the daemon
+  // shares with the operator (it comments via the same `gh` account).
+  const stopPolling = startReplyPolling(orchestrator, args);
   // Background PR-feedback polling: re-open a finished run when a human leaves a `feedback:` comment on
   // its still-open PR, and stop watching once the PR merges/closes (see the PR Feedback Poller). The
   // Orchestrator owns the poller instance (shared with the dashboard's on-demand "Check now").
@@ -106,15 +108,11 @@ function listen(server: Server, port: number): Promise<void> {
  */
 function startReplyPolling(
   orchestrator: ReturnType<typeof buildOrchestrator>['orchestrator'],
-  repo: ReturnType<typeof buildOrchestrator>['repo'],
-  resolver: ReturnType<typeof buildOrchestrator>['resolver'],
   args: CliArgs,
 ): () => void {
   if (args.pollTimeoutMinutes <= 0) return () => {};
-  // The Orchestrator satisfies the poller's `AwaitingResumer` (it re-arms the run and kicks the pump).
-  const poller = new ReplyPoller(repo, resolver, orchestrator);
   const timer = setInterval(() => {
-    void poller.checkOnce().catch((err) => console.error(`[reply-poller] ${String(err)}`));
+    void orchestrator.pollRepliesOnce().catch((err) => console.error(`[reply-poller] ${String(err)}`));
   }, args.pollIntervalSeconds * 1000);
   timer.unref?.();
   return () => clearInterval(timer);

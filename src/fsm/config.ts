@@ -220,7 +220,14 @@ export type AgentsConfig = Record<string, StageAgentConfig>;
 
 /** Producing stages run the full sequence; pure review stages override to `[produce]`. */
 export const DEFAULT_PHASES: readonly AgentPhase[] = ['produce', 'self_review', 'simplify'];
-export const DEFAULT_REVIEW_CAP = 2;
+/**
+ * Default cap on the internal self-review → fix loop. Some back-and-forth is *normal* — a review
+ * that finds real issues, a fix, a re-check — so the cap exists to stop thrash, not to forbid
+ * iteration: 2 rounds proved to trip on healthy convergence (one fix round left no round to verify
+ * it). 5 gives the loop room while the run budget (README §2, `maxAgentRuns`) stays the hard cost
+ * backstop across all stages. Per-stage `reviewCap` in the agent config overrides it.
+ */
+export const DEFAULT_REVIEW_CAP = 5;
 
 const phaseSchema = z.enum(['produce', 'self_review', 'simplify']);
 

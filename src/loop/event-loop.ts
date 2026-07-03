@@ -88,6 +88,15 @@ export interface EventLoopOptions {
 }
 
 export class EventLoop {
+  /**
+   * The active {@link drain} pool's `pump` while a drain is running, else `null`. {@link wake} calls it
+   * so work enqueued *mid-drain* fills any free pool slot **immediately**, instead of waiting for an
+   * in-flight worker to complete (which is the only other thing that re-pumps). Without this, a run
+   * newly admitted while a long stage is in flight — an auto-picked issue, a resumed run, a fresh
+   * `start` — starves behind that stage even though the concurrency cap has room.
+   */
+  private activePump: (() => void) | null = null;
+
   constructor(
     private readonly repo: Repository,
     private fsm: FsmConfig,
@@ -195,6 +204,42 @@ export class EventLoop {
     if (!run) throw new Error(`resumePausedRun: run ${runId} not found`);
     if (run.status !== 'paused') throw new Error(`resumePausedRun: run ${runId} is "${run.status}", not paused`);
     this.repo.setRunStatus(runId, 'running');
+    return this.requireRun(runId);
+  }
+
+  /**
+   * Re-open a `stopped` run and continue it **from where it left off** — the operator's "pick it back
+   * up" (README §3.3 Layer 6: `stop` is not delete; all state/artifacts are kept, so a stop is
+   * reversible). Records a loop-owned self-transition at the run's current state, resets the round
+   * counters (a fresh budget, like {@link resumeRun}), sets status `running`, and enqueues one advance
+   * event so the loop re-dispatches the stage it was stopped at. Unlike `stop`, this is not an FSM
+   * edge — a control action, so no `src/fsm` change. Refuses a run that isn't `stopped`, or one parked
+   * at a terminal state (a `done`→`stopped` edge can't happen, but guard anyway; use `revert` to pick a
+   * stage). `stopRun` discarded the pending event, so the fresh advance is the only one. Caller kicks.
+   */
+  resumeStoppedRun(runId: number): Run {
+    const run = this.repo.getRun(runId);
+    if (!run) throw new Error(`resumeStoppedRun: run ${runId} not found`);
+    if (run.status !== 'stopped') throw new Error(`resumeStoppedRun: run ${runId} is "${run.status}", not stopped`);
+    const state = this.fsm.states[run.currentState];
+    if (!state || state.terminal) {
+      throw new Error(`resumeStoppedRun: run ${runId} is at terminal state "${run.currentState}"; use revert to choose a stage to resume from`);
+    }
+    const transition = this.repo.transaction(() => {
+      this.repo.discardPendingEvents(runId); // defensive: stop already cleared it; ensure exactly one fresh advance
+      const t = this.repo.commitTransition({
+        runId,
+        fromState: run.currentState,
+        toState: run.currentState, // self-edge: continue where it left off
+        trigger: RESUME_TRIGGER,
+        isReset: true, // a fresh budget of rounds for the resumed cycle
+        status: 'running',
+        eventId: null, // a control transition, not driven by an event
+      });
+      this.repo.enqueueEvent({ runId, type: EVENT_ADVANCE });
+      return t;
+    });
+    this.emit(transition, runId);
     return this.requireRun(runId);
   }
 
@@ -477,13 +522,31 @@ export class EventLoop {
             },
           );
         }
-        // Idle once no worker is running and the pump found nothing more to claim.
-        if (inFlight === 0) resolve();
+        // Idle once no worker is running and the pump found nothing more to claim. Clear the wake hook
+        // in the same tick so a `wake()` racing the resolve can't re-enter a finished pool (the caller's
+        // `rerun` flag starts a fresh drain for any work that lands in that gap).
+        if (inFlight === 0) {
+          this.activePump = null;
+          resolve();
+        }
       };
+      // Publish the pump so `wake()` can nudge it while the drain runs (see the field doc). Assigned
+      // before the first `pump()` so a claim inside it already sees the live hook.
+      this.activePump = pump;
       pump();
     });
 
     if (stopped) throw firstError;
+  }
+
+  /**
+   * Nudge an in-progress {@link drain} to claim newly-enqueued events into any free pool slots **now**,
+   * rather than only when an in-flight worker finishes. A no-op when no drain is running (the caller is
+   * expected to start one). Idempotent and safe to call after any `enqueueEvent`; the pump claims only
+   * what the cap and the dependency/cost gates allow, so an extra call never over-dispatches.
+   */
+  wake(): void {
+    this.activePump?.();
   }
 
   /**

@@ -172,10 +172,15 @@ function resolved(issue: number, repo: string, title: string, tokens: number, co
 /** Seed the repository with the preview run set. Returns the run ids created. */
 export function seedRuns(repo: Repository, version: string): number[] {
   // Enroll every seeded repo first (as `POST /repos` would have), so `GET /repos` matches the runs
-  // and the home page's ledger shows enrolled repos rather than "history only" leftovers.
-  for (const repoRef of new Set(SPECS.map((s) => s.repo))) {
+  // and the home page's ledger shows enrolled repos rather than "history only" leftovers. Give them a
+  // mix of working-directory sources (Milestone 12) so the ledger showcases all three states:
+  // clone-on-run, a bound local directory, and one still unconfigured.
+  [...new Set(SPECS.map((s) => s.repo))].forEach((repoRef, i) => {
     repo.upsertRepo({ repoRef, workingRoot: `/tmp/agent-fleet-preview/${repoRef}`, baseBranch: 'main' });
-  }
+    if (i % 3 === 0) repo.setRepoSource(repoRef, 'clone', null);
+    else if (i % 3 === 1) repo.setRepoSource(repoRef, 'local', `/Users/dev/code/${repoRef.split('/')[1]}`);
+    // i % 3 === 2 → left unconfigured (needs a working directory)
+  });
   const ids: number[] = [];
   for (const s of SPECS) {
     const run = repo.createRun({

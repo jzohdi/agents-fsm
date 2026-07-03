@@ -140,6 +140,14 @@ export const MIGRATIONS: Migration[] = [
       addColumnIfMissing(db, 'repos', 'watch_label', 'TEXT');
     },
   },
+  {
+    version: 11,
+    name: 'add repos.source_mode',
+    // Per-repo working-directory source binding (Milestone 12): NULL = unconfigured, 'clone' | 'local'.
+    // Additive nullable column, so a pre-existing DB backfills to NULL (unconfigured — runs blocked until
+    // a working directory is chosen) and a fresh DB already has it from schema.sql. Mirrors schema.sql.
+    apply: (db) => addColumnIfMissing(db, 'repos', 'source_mode', 'TEXT'),
+  },
 ];
 
 // Guard the invariants the runner relies on: versions a gap-free, strictly increasing 1..N sequence

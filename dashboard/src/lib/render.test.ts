@@ -257,12 +257,27 @@ describe('fleetStatsModel (home masthead + stat band)', () => {
 
 describe('repoLedgerModel (home repositories ledger)', () => {
   const repo = (over: Partial<Repo> = {}): Repo => ({
-    repoRef: 'acme/web', cloneUrl: null, localRepo: null, workingRoot: '/tmp', baseBranch: 'main', watch: false, watchLabel: null, ...over,
+    repoRef: 'acme/web', cloneUrl: null, localRepo: null, workingRoot: '/tmp', baseBranch: 'main', watch: false, watchLabel: null, sourceMode: 'clone', ...over,
   });
 
   it('carries the enrolled repo\'s watch flag onto the ledger row (Milestone 11)', () => {
     const rows = repoLedgerModel([repo({ repoRef: 'acme/web', watch: true })], []);
     expect(rows[0]).toMatchObject({ enrolled: true, watch: true });
+  });
+
+  it('maps the working-directory source onto the row: clone, local, and unconfigured (Milestone 12)', () => {
+    const rows = repoLedgerModel(
+      [
+        repo({ repoRef: 'acme/clone', sourceMode: 'clone' }),
+        repo({ repoRef: 'acme/local', sourceMode: 'local', localRepo: '/home/me/acme' }),
+        repo({ repoRef: 'acme/new', sourceMode: null }),
+      ],
+      [],
+    );
+    const byRef = Object.fromEntries(rows.map((r) => [r.repoRef, r]));
+    expect(byRef['acme/clone']).toMatchObject({ sourceMode: 'clone', configured: true });
+    expect(byRef['acme/local']).toMatchObject({ sourceMode: 'local', localRepo: '/home/me/acme', configured: true });
+    expect(byRef['acme/new']).toMatchObject({ sourceMode: null, configured: false });
   });
 
   it('merges enrolled repos with run aggregates and sorts by most recent activity', () => {

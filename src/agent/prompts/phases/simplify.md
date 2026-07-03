@@ -1,7 +1,9 @@
 ## This phase: fix and simplify
 
-You are given the produced work (`producedEnvelope`) and the review's findings (`reviewNotes`). Do
-two things, in order:
+You are given the produced work (`producedEnvelope`) and the review's findings (`reviewNotes`);
+`reviewRound` says how many rounds remain before the run escalates to a human, so resolve each
+finding **fully** — a partial fix burns a round only to have the re-review report the same issue.
+Do two things, in order:
 
 1. **Apply the fixes.** Address every blocking issue the review raised, editing files in the working
    tree as needed.

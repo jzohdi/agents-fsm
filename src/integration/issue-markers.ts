@@ -21,6 +21,20 @@
  * Every field is optional; an absent block means "no dependencies, default priority" (§3.5).
  */
 
+/**
+ * An invisible HTML marker the fleet appends to **every issue comment it posts** (triage sign-off,
+ * clarify question, split note). The Reply Poller uses it to tell the fleet's own comments from a
+ * human reply by **content, not author login** — which is essential because the daemon comments via
+ * the operator's own `gh` account, so the "bot" and the human share a GitHub login and an author-based
+ * check would wrongly reject the human's reply. Invisible in GitHub's rendered markdown.
+ */
+export const BOT_COMMENT_MARKER = '<!-- agent-fleet:bot -->';
+
+/** Whether `body` is one of the fleet's own posted comments (i.e. carries {@link BOT_COMMENT_MARKER}). */
+export function isBotComment(body: string): boolean {
+  return body.includes(BOT_COMMENT_MARKER);
+}
+
 /** Parsed scheduling declarations, canonicalized: `dependsOn` sorted ascending, de-duplicated. */
 export interface SchedulingDecl {
   /** Issue numbers (same repo — §3.5 markers carry bare numbers) that must be closed first. */

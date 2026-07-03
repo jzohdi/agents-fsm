@@ -252,6 +252,8 @@ input, textarea, button, select { font: inherit; }
 .af-model { display: flex; align-items: center; border-left: 1px solid var(--rule); }
 .af-model:first-child { border-left: 0; }
 .af-model .lbl { padding: 9px 0 9px 14px; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink4); }
+.af-model select { border: 0; background: transparent; padding: 9px 8px; font-family: var(--mono); font-size: 12px; color: var(--ink); cursor: pointer; }
+.af-model select:focus { outline: none; background: var(--paper2); }
 
 /* --- searchable model picker (ModelPicker.svelte): shared by the new-run bar + the run controls --- */
 .af-mp { position: relative; display: inline-flex; }
@@ -564,6 +566,67 @@ input, textarea, button, select { font: inherit; }
 .af-hrepo .fig b.warn { color: var(--rose); }
 .af-hrepo .fig i { font-style: normal; font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink4); }
 .af-hrepo .when { flex: 0 0 76px; text-align: right; }
+
+/* Working-directory source (Milestone 12): label in the repo's meta line + config affordances. */
+.af-hrepo.unconfigured { box-shadow: inset 3px 0 0 var(--rose); }
+.af-hrepo .af-src { font-family: var(--mono); font-size: 11px; }
+.af-hrepo .af-src.warn { color: var(--rose); font-weight: 600; }
+.af-hrepo .af-src.clone { color: var(--ink4); }
+.af-hrepo .af-src.local { color: var(--ink3); display: inline-block; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+/* "Set directory" pill — same shape as the watch pill; accented while its panel is open. */
+.af-hcfg {
+  flex: 0 0 auto; align-self: center; margin-left: 14px; border: 1px solid var(--rule); background: none;
+  color: var(--ink3); cursor: pointer; font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+  letter-spacing: 0.08em; text-transform: uppercase; padding: 6px 12px; border-radius: 2px; transition: 0.14s;
+}
+.af-hcfg:hover { color: var(--accent); border-color: var(--accent-line); }
+.af-hcfg.on { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+/* Config row: one compact line — a small segmented mode control + (local mode) a path input that
+   doubles as a folder browser. Buttons are pills sized like the watch toggle, never stretched, so a
+   choice reads as a control rather than a banner; only the *bound* mode carries the accent. */
+.af-hsrccfg {
+  display: flex; align-items: center; gap: 12px; padding: 9px 2px 12px 30px;
+  border-bottom: 1px solid var(--rule); background: var(--paper2);
+}
+.af-hsrccfg .lbl { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink4); flex: 0 0 auto; }
+.af-srcseg { display: inline-flex; flex: 0 0 auto; }
+.af-srcmode {
+  border: 1px solid var(--rule); background: var(--paper); color: var(--ink3); cursor: pointer;
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+  padding: 6px 12px; transition: 0.14s; white-space: nowrap;
+}
+.af-srcseg .af-srcmode + .af-srcmode { border-left: 0; }
+.af-srcseg .af-srcmode:first-child { border-radius: 2px 0 0 2px; }
+.af-srcseg .af-srcmode:last-child { border-radius: 0 2px 2px 0; }
+.af-srcmode:hover:not(:disabled) { color: var(--accent); }
+.af-srcmode.active { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+.af-srcmode.draft { color: var(--accent); }
+.af-srcmode:disabled { opacity: 0.45; cursor: not-allowed; }
+/* Path input + its completion dropdown (daemon-backed — see GET /fs/dirs). */
+.af-dirbox { position: relative; flex: 1 1 auto; min-width: 0; max-width: 460px; }
+.af-dirbox input {
+  width: 100%; box-sizing: border-box; font-family: var(--mono); font-size: 12px;
+  padding: 6px 10px; border: 1px solid var(--rule); border-radius: 2px; background: var(--paper); color: var(--ink);
+}
+.af-dirbox input:focus { outline: none; border-color: var(--accent-line); }
+.af-dirsug {
+  position: absolute; top: calc(100% + 2px); left: 0; right: 0; z-index: 30;
+  background: var(--paper); border: 1px solid var(--rule); border-radius: 2px;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.1); max-height: 216px; overflow-y: auto;
+}
+.af-dirsug button {
+  display: block; width: 100%; text-align: left; font-family: var(--mono); font-size: 11.5px;
+  padding: 6px 10px; border: 0; background: none; color: var(--ink2); cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.af-dirsug button:hover { background: var(--accent-soft); color: var(--accent); }
+.af-srcsave {
+  flex: 0 0 auto; border: 1px solid var(--rule); background: var(--paper); color: var(--ink2); cursor: pointer;
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+  padding: 6px 12px; border-radius: 2px; transition: 0.14s; white-space: nowrap;
+}
+.af-srcsave:hover:not(:disabled) { color: var(--accent); border-color: var(--accent-line); }
+.af-srcsave:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* recent activity */
 .af-hrecent { animation: af-hreveal 0.5s 0.34s cubic-bezier(0.2, 0.7, 0.2, 1) both; }

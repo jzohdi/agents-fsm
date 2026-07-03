@@ -15,8 +15,11 @@
  *   POST /runs/:id/stop         POST /runs/:id/revert
  *   POST /runs/:id/archive      POST /runs/:id/unarchive
  *   POST /runs/:id/cost-override POST /runs/:id/model
- *   POST /runs/:id/check-pr-feedback
+ *   POST /runs/:id/harness
+ *   POST /runs/:id/check-pr-feedback   POST /runs/:id/check-reply
  *   GET  /repos                 POST /repos                 POST /repos/watch
+ *   POST /repos/source          (Milestone 12: bind clone-on-run / a local directory)
+ *   GET  /fs/dirs[?q=]          (Milestone 12: path completions for the local-directory picker)
  *   GET  /config                PUT /config
  *   GET  /cost                  GET /models
  *   GET  /suggestions[?q=]      POST /scheduler/check
@@ -28,6 +31,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { fileURLToPath } from 'node:url';
 
 import { ApiError, type Orchestrator } from './orchestrator';
+import { suggestDirs } from './dir-suggest';
 import { serveStatic } from './static';
 import type { RunStatus } from '../store/repository';
 import type { StreamEvent } from './stream';
@@ -70,8 +74,11 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
   // --- fleet cost status: the global ceiling (or null) + current active spend (Milestone 8 B3) ---
   if (method === 'GET' && path === '/cost') return sendJson(res, 200, orch.costStatus());
 
-  // --- harness model catalog: selectable models + the daemon default (the model dropdown) ---
-  if (method === 'GET' && path === '/models') return sendJson(res, 200, orch.getModels());
+  // --- harness model catalog: selectable models + the daemon default (the model dropdowns). An
+  // optional `?harness=` resolves that harness's catalog (the per-run picker); absent → the default's. ---
+  if (method === 'GET' && path === '/models') {
+    return sendJson(res, 200, orch.getModels(url.searchParams.get('harness') ?? undefined));
+  }
 
   // --- settings: the default harness + the operator's sticky pre-run model/effort selection ---
   if (method === 'GET' && path === '/settings') return sendJson(res, 200, orch.getSettings());
@@ -114,6 +121,27 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
     return sendJson(res, 200, orch.setRepoWatch({ repoRef: str(body, 'repoRef'), watch, label: label as string | null | undefined }));
   }
 
+  // --- directory-path completions for the local-checkout picker (Milestone 12 UI). The browser can't
+  // read absolute paths from a native folder dialog, so the daemon (which runs on the operator's
+  // machine) supplies shell-style tab-completions instead. Read-only, names-only. ---
+  if (method === 'GET' && path === '/fs/dirs') {
+    return sendJson(res, 200, { dirs: suggestDirs(url.searchParams.get('q') ?? '') });
+  }
+
+  // --- repo working-directory source (Milestone 12): bind an enrolled repo to clone-on-run or a validated
+  // local directory. Body-carried repoRef (contains a `/`); `mode` ∈ clone|local; `localRepo` (absolute
+  // path) required for local mode. A wrong directory is a 400 with the mismatch reason. ---
+  if (method === 'POST' && path === '/repos/source') {
+    const body = await readJson(req);
+    const mode = str(body, 'mode');
+    if (mode !== 'clone' && mode !== 'local') return sendError(res, new ApiError(400, '"mode" must be "clone" or "local"'));
+    return sendJson(res, 200, await orch.configureRepoSource({
+      repoRef: str(body, 'repoRef'),
+      mode,
+      localRepo: optStr(body, 'localRepo'),
+    }));
+  }
+
   // --- repos (Milestone 8 Phase A: enroll a repo the fleet can run / list enrolled repos) ---
   if (path === '/repos') {
     if (method === 'GET') return sendJson(res, 200, orch.listRepos());
@@ -124,7 +152,6 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
         workingRoot: optStr(body, 'workingRoot'),
         baseBranch: optStr(body, 'baseBranch'),
         cloneUrl: optStr(body, 'cloneUrl'),
-        localRepo: optStr(body, 'localRepo'),
       }));
     }
     return sendError(res, new ApiError(405, `method ${method} not allowed on /repos`));
@@ -157,7 +184,7 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
   const runMatch = /^\/runs\/(\d+)$/.exec(path);
   if (runMatch && method === 'GET') return sendJson(res, 200, orch.getRunDetail(Number(runMatch[1])));
 
-  const actionMatch = /^\/runs\/(\d+)\/(pause|resume|stop|revert|archive|unarchive|cost-override|model|effort)$/.exec(path);
+  const actionMatch = /^\/runs\/(\d+)\/(pause|resume|stop|revert|archive|unarchive|cost-override|model|effort|harness)$/.exec(path);
   if (actionMatch && method === 'POST') {
     const id = Number(actionMatch[1]);
     switch (actionMatch[2]) {
@@ -205,6 +232,10 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
         }
         return sendJson(res, 200, orch.setEffort(id, raw));
       }
+      case 'harness': {
+        // `harness`: re-point the run at another harness from its next stage on (clears model/effort overrides).
+        return sendJson(res, 200, orch.setHarness(id, str(await readJson(req), 'harness')));
+      }
     }
   }
 
@@ -212,6 +243,12 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
   const feedbackMatch = /^\/runs\/(\d+)\/check-pr-feedback$/.exec(path);
   if (feedbackMatch && method === 'POST') {
     return sendJson(res, 200, await orch.checkPrFeedback(Number(feedbackMatch[1])));
+  }
+
+  // --- on-demand reply check: poll one `awaiting_input` run's issue thread now for a human reply ---
+  const replyMatch = /^\/runs\/(\d+)\/check-reply$/.exec(path);
+  if (replyMatch && method === 'POST') {
+    return sendJson(res, 200, await orch.checkReply(Number(replyMatch[1])));
   }
 
   // --- config ---

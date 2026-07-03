@@ -13,7 +13,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -325,7 +325,7 @@ describe('GitHubCli — local git (real temp repo)', () => {
     expect(git(tree.path, ['log', '--oneline'])).toContain('pushed work');
   });
 
-  it('clones the working tree from a local checkout but pushes to the GitHub remote', async () => {
+  it('adds a git worktree off a local checkout and pushes to the GitHub remote (Milestone 12 local mode)', async () => {
     const remote = makeRemote();
     // A local checkout of the same repo (origin = the bare remote), as the operator would have.
     const localRoot = mkdtempSync(join(tmpdir(), 'agent-fleet-local-'));
@@ -336,17 +336,85 @@ describe('GitHubCli — local git (real temp repo)', () => {
     const gh = new GitHubCli({ repo: 'o/r', workingRoot, cloneUrl: remote, localRepo });
 
     const tree = await gh.prepareWorkingTree({ runId: 9, branch: 'agent/run-9', base: 'main' });
-    // origin must point at the GitHub remote (the bare repo), not the local checkout we cloned from.
+    // A worktree, not a clone: `.git` is a file pointing back to the shared checkout, and the checkout
+    // registers the worktree.
+    expect(statSync(join(tree.path, '.git')).isFile()).toBe(true);
+    expect(git(localRepo, ['worktree', 'list'])).toContain(tree.path);
+    // origin is inherited from the checkout — the GitHub remote — so push/PR target GitHub.
     expect(git(tree.path, ['remote', 'get-url', 'origin']).trim()).toBe(remote);
     git(tree.path, ['config', 'user.email', 't@t']);
     git(tree.path, ['config', 'user.name', 'T']);
 
     writeFileSync(join(tree.path, 'local-sourced.txt'), 'hi\n');
-    await gh.commitAndPush({ workingDir: tree.path, branch: 'agent/run-9', message: 'from local clone' });
+    await gh.commitAndPush({ workingDir: tree.path, branch: 'agent/run-9', message: 'from worktree' });
 
-    // The branch reached the GitHub remote, not the local checkout.
+    // The branch reached the GitHub remote.
     expect(execFileSync('git', ['ls-remote', '--heads', remote, 'agent/run-9'], { encoding: 'utf8' })).toContain('agent/run-9');
-    expect(execFileSync('git', ['ls-remote', '--heads', localRepo, 'agent/run-9'], { encoding: 'utf8' })).toBe('');
+
+    // dropWorkingTree removes the worktree registration (a plain rm would leave it stale).
+    await gh.dropWorkingTree(9);
+    expect(git(localRepo, ['worktree', 'list'])).not.toContain(tree.path);
+  });
+
+  it('restores a pushed branch into a fresh worktree after the tree was lost (local-mode crash recovery)', async () => {
+    const remote = makeRemote();
+    const localRoot = mkdtempSync(join(tmpdir(), 'agent-fleet-local-'));
+    const localRepo = join(localRoot, 'checkout');
+    git(localRoot, ['clone', remote, localRepo]);
+    const workingRoot = mkdtempSync(join(tmpdir(), 'agent-fleet-work-'));
+    const gh = new GitHubCli({ repo: 'o/r', workingRoot, cloneUrl: remote, localRepo });
+
+    const tree = await gh.prepareWorkingTree({ runId: 11, branch: 'agent/run-11', base: 'main' });
+    git(tree.path, ['config', 'user.email', 't@t']);
+    git(tree.path, ['config', 'user.name', 'T']);
+    writeFileSync(join(tree.path, 'pushed.txt'), 'work\n');
+    await gh.commitAndPush({ workingDir: tree.path, branch: 'agent/run-11', message: 'pushed work' });
+
+    await gh.dropWorkingTree(11); // lose the worktree
+    const restored = await gh.prepareWorkingTree({ runId: 11, branch: 'agent/run-11', base: 'main' });
+    expect(restored.path).toBe(tree.path);
+    expect(git(tree.path, ['log', '--oneline'])).toContain('pushed work'); // restored, not reset to base
+  });
+
+  it('syncBaseBranch fast-forwards a clean on-base checkout, and leaves a dirty/off-base one alone', async () => {
+    const remote = makeRemote();
+    const localRoot = mkdtempSync(join(tmpdir(), 'agent-fleet-local-'));
+    const localRepo = join(localRoot, 'checkout');
+    git(localRoot, ['clone', remote, localRepo]);
+    git(localRepo, ['config', 'user.email', 't@t']);
+    git(localRepo, ['config', 'user.name', 'T']);
+    const workingRoot = mkdtempSync(join(tmpdir(), 'agent-fleet-work-'));
+    const gh = new GitHubCli({ repo: 'o/r', workingRoot, cloneUrl: remote, localRepo });
+
+    // Advance the remote's main by one commit (through a separate worktree that pushes).
+    const wt = await gh.prepareWorkingTree({ runId: 20, branch: 'main-advance', base: 'main' });
+    git(wt.path, ['config', 'user.email', 't@t']);
+    git(wt.path, ['config', 'user.name', 'T']);
+    writeFileSync(join(wt.path, 'landed.txt'), 'landed\n');
+    git(wt.path, ['add', '-A']);
+    git(wt.path, ['commit', '-m', 'landed on main']);
+    git(wt.path, ['push', 'origin', 'HEAD:main']);
+
+    // Clean + on main → fast-forwarded to the new tip.
+    await gh.syncBaseBranch('main');
+    expect(git(localRepo, ['log', '--oneline'])).toContain('landed on main');
+
+    // Dirty tree → left untouched (a second landed commit is fetched but not merged).
+    const before = git(localRepo, ['rev-parse', 'HEAD']).trim();
+    writeFileSync(join(localRepo, 'scratch.txt'), 'wip\n'); // dirty
+    writeFileSync(join(wt.path, 'landed2.txt'), 'more\n');
+    git(wt.path, ['add', '-A']);
+    git(wt.path, ['commit', '-m', 'second landing']);
+    git(wt.path, ['push', 'origin', 'HEAD:main']);
+    await gh.syncBaseBranch('main');
+    expect(git(localRepo, ['rev-parse', 'HEAD']).trim()).toBe(before); // working copy not moved
+  });
+
+  it('syncBaseBranch is a no-op for clone-on-run mode (no local checkout)', async () => {
+    const remote = makeRemote();
+    const workingRoot = mkdtempSync(join(tmpdir(), 'agent-fleet-work-'));
+    const gh = new GitHubCli({ repo: 'o/r', workingRoot, cloneUrl: remote }); // no localRepo
+    await expect(gh.syncBaseBranch('main')).resolves.toBeUndefined();
   });
 
   it('commitAndPush is a no-op when there is nothing to commit', async () => {
