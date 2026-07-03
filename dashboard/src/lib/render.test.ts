@@ -257,7 +257,7 @@ describe('fleetStatsModel (home masthead + stat band)', () => {
 
 describe('repoLedgerModel (home repositories ledger)', () => {
   const repo = (over: Partial<Repo> = {}): Repo => ({
-    repoRef: 'acme/web', cloneUrl: null, localRepo: null, workingRoot: '/tmp', baseBranch: 'main', watch: false, watchLabel: null, sourceMode: 'clone', ...over,
+    repoRef: 'acme/web', cloneUrl: null, localRepo: null, workingRoot: '/tmp', baseBranch: 'main', watch: false, watchLabel: null, sourceMode: 'clone', conflictPolicy: 'manual', ...over,
   });
 
   it('carries the enrolled repo\'s watch flag onto the ledger row (Milestone 11)', () => {

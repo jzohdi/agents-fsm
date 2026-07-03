@@ -13,6 +13,7 @@
 
 import {
   GitHubNotFoundError,
+  type BaseSync,
   type Comment,
   type CommitAndPushInput,
   type CommitRef,
@@ -207,6 +208,11 @@ export class FakeGitHub implements GitHub {
     this.requirePr(prNumber).state = state;
   }
 
+  /** Force a PR's computed mergeability, e.g. to simulate base moving under a finished run's PR. */
+  setPrMergeable(prNumber: number, mergeable: NonNullable<PullRequest['mergeable']>): void {
+    this.requirePr(prNumber).mergeable = mergeable;
+  }
+
   /**
    * Seed a PR with an explicit number + state (test / preview affordance; parallels {@link seedIssue}).
    * Used when a PR must already exist without going through `openPr` — e.g. the dashboard preview, whose
@@ -383,6 +389,39 @@ export class FakeGitHub implements GitHub {
     list.push({ sha, message: input.message });
     this.commits.set(input.workingDir, list);
     return { sha };
+  }
+
+  // --- between-stage base sync (merge-conflict handling) -----------------------
+
+  /** Queued results for the next `syncBranchWithBase` calls (FIFO); empty → `up_to_date`. A test seeds
+   *  one `conflict` to simulate base moving under a run at exactly one stage boundary. */
+  private readonly baseSyncQueue: BaseSync[] = [];
+  /** Every base-sync request, for asserting the between-stage sync actually fired (and where). */
+  readonly baseSyncCalls: Array<{ runId: number; base: string }> = [];
+  /** What `finishBaseMerge` reports; a test sets `{ ok: false, unresolved }` to simulate a resolver
+   *  that left conflict markers behind (the mechanical verification failing). */
+  finishBaseMergeResult: { ok: true } | { ok: false; unresolved: string[] } = { ok: true };
+  /** Recorded `finishBaseMerge` / `abortBaseMerge` calls (assert resolve-vs-abort ordering). */
+  readonly finishedMerges: Array<{ runId: number; branch: string }> = [];
+  readonly abortedMerges: number[] = [];
+
+  /** Seed the outcome of the next base sync (FIFO with {@link baseSyncQueue}). */
+  queueBaseSync(sync: BaseSync): void {
+    this.baseSyncQueue.push(sync);
+  }
+
+  async syncBranchWithBase(runId: number, base: string): Promise<BaseSync> {
+    this.baseSyncCalls.push({ runId, base });
+    return this.baseSyncQueue.shift() ?? { result: 'up_to_date', conflictFiles: [] };
+  }
+
+  async finishBaseMerge(runId: number, branch: string): Promise<{ ok: true } | { ok: false; unresolved: string[] }> {
+    this.finishedMerges.push({ runId, branch });
+    return this.finishBaseMergeResult;
+  }
+
+  async abortBaseMerge(runId: number): Promise<void> {
+    this.abortedMerges.push(runId);
   }
 
   /** Records each shutdown savepoint request so a test can assert graceful shutdown committed WIP. */

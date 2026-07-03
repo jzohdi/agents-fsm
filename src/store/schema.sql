@@ -165,7 +165,13 @@ CREATE TABLE IF NOT EXISTS repos (
   -- error); 'clone' = clone a fresh per-run tree from the GitHub remote; 'local' = use `local_repo` as a
   -- validated local checkout via `git worktree` (isolated per-run tree, shared object store). Appended last
   -- so a fresh schema matches a DB retrofitted by the additive migration (db drift guard).
-  source_mode  TEXT                                -- NULL = unconfigured | 'clone' | 'local' (with local_repo set)
+  source_mode  TEXT,                               -- NULL = unconfigured | 'clone' | 'local' (with local_repo set)
+  -- Merge-conflict policy: what a run does when merging the latest base into its branch conflicts
+  -- (the between-stage base sync). 'manual' = park the run needs_human for the operator; 'auto' = let a
+  -- harness invocation resolve the conflicts (mechanically verified) before escalating. No CHECK — the
+  -- valid set is app-validated (like runs.harness) so a fresh DB stays identical to a migrated one.
+  -- Appended last so a fresh schema matches a DB retrofitted by the additive migration (db drift guard).
+  conflict_policy TEXT NOT NULL DEFAULT 'manual'   -- 'manual' | 'auto'
 );
 
 -- A tiny key/value store for daemon-level settings that must survive restarts (multi-harness support).

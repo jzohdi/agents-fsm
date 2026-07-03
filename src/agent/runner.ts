@@ -21,10 +21,10 @@ import { randomBytes } from 'node:crypto';
 
 import { recipeFor, type AgentsConfig, type StageIo } from '../fsm/config';
 import { ADDRESSING_PR_FEEDBACK_FLAG, RESUME_TRIGGER, REVERT_TRIGGER } from '../loop/event-loop';
-import type { GitHub, Issue, IssueComment, PullRequest } from '../integration/github';
+import type { BaseSync, GitHub, Issue, IssueComment, PullRequest } from '../integration/github';
 import { BOT_COMMENT_MARKER, defaultScheduling, parseMarker, upsertMarker, type SchedulingDecl } from '../integration/issue-markers';
 import { isRepoResolver, singleRepoResolver, type RepoContext, type RepoResolver } from '../integration/github-resolver';
-import type { AgentPhase, Repository, Run, Transition } from '../store/repository';
+import type { AgentPhase, ConflictPolicy, Repository, Run, Transition } from '../store/repository';
 import type { AgentActivity, AgentRunResult, StageExecutor } from './executor';
 import { isHarnessResolver, singleHarness, type HarnessResolver } from './harness';
 import {
@@ -69,6 +69,21 @@ export const OVERRIDE_ROLE = 'frontier';
 export function phaseModel(logical: string, override: string | null): string {
   return override && logical === OVERRIDE_ROLE ? override : logical;
 }
+
+/**
+ * Escalation trigger for a base-merge conflict the run could not (or, under `manual` policy, was not
+ * allowed to) resolve — a first-class cause label in the transition log, like `git_error`.
+ */
+export const MERGE_CONFLICT_TRIGGER = 'merge_conflict';
+
+/**
+ * Pseudo-stage label for the conflict-resolver harness invocation (telemetry `agent_runs.stage` and
+ * the prompt-composition key). Not an FSM state: resolution happens *within* a stage's dispatch, as
+ * part of the between-stage base sync — the FSM never sees it (README §3.3: the engine is sacred).
+ * `agent_runs.phase` stays `'produce'` (its CHECK constraint is closed; the stage label carries the
+ * meaning).
+ */
+export const RESOLVE_CONFLICTS_STAGE = 'resolve_conflicts';
 
 /** Default base branch a run's working branch is cut from and diffed against. */
 export const DEFAULT_BASE_BRANCH = 'main';
@@ -257,6 +272,13 @@ export class AgentRunner {
       return gitError(run, 'prepare', err);
     }
 
+    // 1.5 Between-stage base sync: fold the latest base into the branch so the run never drifts into
+    //     an unmergeable PR. A conflict either auto-resolves (repo policy `auto`, a verified resolver
+    //     invocation) or parks the run for the operator (`manual`). Skipped for triage above — the
+    //     branch has no commits of its own yet, so there is nothing to conflict.
+    const syncOutcome = await this.syncWithBase(run, prep);
+    if (syncOutcome) return syncOutcome;
+
     // 2. Run the phase recipe. Executor throws propagate (the loop escalates `executor_error`);
     //    only malformed *output* is retried-then-escalated here.
     const phaseOutcome = await this.runPhases(run, recipe, prep);
@@ -443,6 +465,139 @@ export class AgentRunner {
       input.prFeedback = prComments.map((c) => ({ author: c.author, body: c.body, createdAt: c.createdAt }));
     }
     return { issue, workingDir: tree.path, branch, input };
+  }
+
+  // --- between-stage base sync (merge-conflict handling) -----------------------
+
+  /** The repo's merge-conflict policy, read fresh from the registry at stage time (a dashboard change
+   *  applies from the very next stage). Runs without a registry row (one-shot CLI, mocks) get the
+   *  conservative default: `manual`. */
+  private conflictPolicy(run: Run): ConflictPolicy {
+    return this.repo.getRepo(run.repoRef)?.conflictPolicy ?? 'manual';
+  }
+
+  /**
+   * Fold the latest base into the run's branch before the stage runs, so long-lived runs never drift
+   * into an unmergeable PR. Returns `undefined` to proceed (up to date, merged clean, or conflicts
+   * resolved-and-verified) or an escalation outcome. Invariant: **the tree is never left mid-merge** —
+   * every failure path aborts the merge before escalating/rethrowing, so a resume or the next stage
+   * always finds a checkout-able tree.
+   */
+  private async syncWithBase(run: Run, prep: StagePrep): Promise<StageOutcome | undefined> {
+    const { github, baseBranch } = this.repoContext(run);
+    let sync: BaseSync;
+    try {
+      sync = await github.syncBranchWithBase(run.id, baseBranch);
+    } catch (err) {
+      return gitError(run, 'sync_base', err);
+    }
+    if (sync.result === 'merged') {
+      this.repo.recordLog({
+        runId: run.id,
+        message: `merged the latest ${baseBranch} into ${prep.branch} cleanly (between-stage base sync)`,
+        data: { kind: 'base_sync', stage: run.currentState, result: 'merged' },
+      });
+    }
+    if (sync.result !== 'conflict') return undefined;
+
+    const policy = this.conflictPolicy(run);
+    const reason = { kind: 'merge_conflict', stage: run.currentState, base: baseBranch, files: sync.conflictFiles, policy };
+    if (policy !== 'auto') {
+      // Manual policy: the operator resolves (merge base into the branch themselves, push, resume).
+      await github.abortBaseMerge(run.id);
+      return { kind: 'escalate', trigger: MERGE_CONFLICT_TRIGGER, reason };
+    }
+
+    // Auto policy: one resolver invocation over the in-progress merge, then *mechanical* verification —
+    // the agent edits the conflicted files; finishBaseMerge trusts only the git state.
+    try {
+      await this.invokeConflictResolver(run, prep, baseBranch, sync.conflictFiles);
+    } catch (err) {
+      await github.abortBaseMerge(run.id); // restore the tree, then let the loop escalate executor_error
+      throw err;
+    }
+    let finish: { ok: true } | { ok: false; unresolved: string[] };
+    try {
+      finish = await github.finishBaseMerge(run.id, prep.branch!); // prepareStage always sets branch
+    } catch (err) {
+      await github.abortBaseMerge(run.id);
+      return gitError(run, 'sync_base', err);
+    }
+    if (finish.ok) {
+      this.repo.recordLog({
+        runId: run.id,
+        message: `resolved ${sync.conflictFiles.length} merge-conflicted file(s) with ${baseBranch} and pushed (auto policy)`,
+        data: { kind: 'base_sync', stage: run.currentState, result: 'resolved', files: sync.conflictFiles },
+      });
+      return undefined;
+    }
+    await github.abortBaseMerge(run.id);
+    return { kind: 'escalate', trigger: MERGE_CONFLICT_TRIGGER, reason: { ...reason, resolutionAttempted: true, unresolved: finish.unresolved } };
+  }
+
+  /**
+   * One conflict-resolver harness invocation over the working tree's in-progress merge. Telemetry is
+   * recorded under the {@link RESOLVE_CONFLICTS_STAGE} pseudo-stage (phase `produce` — the column's
+   * CHECK set is closed; the stage label carries the meaning). The agent's *text output is ignored*:
+   * whether the conflicts are actually gone is judged mechanically by `finishBaseMerge`, so a resolver
+   * that lies (or rambles) can never sneak markers into a commit.
+   */
+  private async invokeConflictResolver(run: Run, prep: StagePrep, base: string, files: string[]): Promise<void> {
+    // Same model/effort override precedence as any produce phase — the resolver reconciles *intent*
+    // between the branch and base, frontier-grade work (cf. the simplify-model lesson above).
+    const model = phaseModel(DEFAULT_MODELS.produce, run.modelOverride);
+    const effort = run.effortOverride && DEFAULT_MODELS.produce === OVERRIDE_ROLE ? run.effortOverride : undefined;
+    const input = {
+      issueRef: run.issueRef,
+      repoRef: run.repoRef,
+      stage: RESOLVE_CONFLICTS_STAGE,
+      phase: 'produce',
+      issue: prep.issue,
+      conflict: { base, branch: prep.branch, files },
+    };
+
+    const startedAt = Date.now();
+    let result: AgentRunResult;
+    try {
+      const executor = this.harnesses.for(run.harness);
+      result = await executor.run({
+        runId: run.id,
+        stage: RESOLVE_CONFLICTS_STAGE,
+        phase: 'produce',
+        model,
+        ...(effort ? { effort } : {}),
+        system: this.systemPrompt(RESOLVE_CONFLICTS_STAGE, 'produce'),
+        input,
+        onActivity: (activity) => this.handleActivity(run.id, RESOLVE_CONFLICTS_STAGE, 'produce', activity),
+        ...(prep.workingDir ? { workingDir: prep.workingDir } : {}),
+      });
+    } catch (err) {
+      // Same telemetry contract as invokePhase: record the failed invocation, then propagate.
+      this.repo.recordAgentRun({
+        runId: run.id,
+        stage: RESOLVE_CONFLICTS_STAGE,
+        phase: 'produce',
+        model,
+        input,
+        output: { error: String(err) },
+        tokens: 0,
+        durationMs: Date.now() - startedAt,
+        success: false,
+      });
+      throw err;
+    }
+    this.repo.recordAgentRun({
+      runId: run.id,
+      stage: RESOLVE_CONFLICTS_STAGE,
+      phase: 'produce',
+      model,
+      input,
+      output: result.output,
+      tokens: result.usage.tokens,
+      durationMs: Date.now() - startedAt,
+      success: true,
+    });
+    this.repo.addRunUsage(run.id, { tokens: result.usage.tokens, cost: result.usage.cost, agentRuns: 1 });
   }
 
   // --- phase recipe (produce → bounded self-review → simplify) ----------------
@@ -760,7 +915,7 @@ function malformed(phase: AgentPhase, error: string, raw: unknown): StageOutcome
   return { kind: 'escalate', trigger: 'malformed_output', reason: { kind: 'malformed_output', phase, error, raw } };
 }
 
-function gitError(run: Run, op: 'prepare' | 'effects', err: unknown): StageOutcome {
+function gitError(run: Run, op: 'prepare' | 'effects' | 'sync_base', err: unknown): StageOutcome {
   // A git/GitHub failure (rejected push, auth, conflict) — escalate with a labeled reason rather
   // than crash, so the run parks in needs_human with the cause in the log (plans/milestone-4.md §3.10).
   return { kind: 'escalate', trigger: 'git_error', reason: { kind: 'git_error', op, stage: run.currentState, detail: String(err) } };

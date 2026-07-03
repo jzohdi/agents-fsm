@@ -23,6 +23,7 @@ import { join, resolve } from 'node:path';
 
 import {
   GitHubNotFoundError,
+  type BaseSync,
   type Comment,
   type CommitAndPushInput,
   type CommitRef,
@@ -47,6 +48,10 @@ export interface ExecResult {
   stdout: string;
   stderr: string;
 }
+
+/** Per-invocation committer identity for commits the *daemon* authors (savepoints, base-merge
+ *  commits) — honest attribution, and immune to a tree with no user.name/email configured. */
+const DAEMON_IDENTITY = ['-c', 'user.name=agent-fleet', '-c', 'user.email=agent-fleet@localhost'] as const;
 
 /** Injectable child-process runner: run `file args` in `cwd`, resolve with captured output. `timeoutMs`
  *  (0/undefined = unbounded) kills a hung child — used for the best-effort autocomplete `gh` calls, not
@@ -364,8 +369,53 @@ export class GitHubCli implements GitHub {
     await this.git(['add', '-A'], path);
     // Commit locally only — see the interface doc. The commit is authored by the daemon (it, not the
     // agent, created it), which also keeps it from failing in a tree with no user.name/email configured.
-    await this.git(['-c', 'user.name=agent-fleet', '-c', 'user.email=agent-fleet@localhost', 'commit', '-m', message], path);
+    await this.git([...DAEMON_IDENTITY, 'commit', '-m', message], path);
     return true;
+  }
+
+  async syncBranchWithBase(runId: number, base: string): Promise<BaseSync> {
+    const path = this.runTreePath(runId);
+    await this.git(['fetch', 'origin'], path);
+    // Nothing to merge when the branch already contains base's tip — the overwhelmingly common case,
+    // kept cheap (no merge attempt, no commit) so the between-stage sync adds no churn.
+    const behind = (await this.git(['rev-list', '--count', `HEAD..origin/${base}`], path)).trim();
+    if (behind === '0') return { result: 'up_to_date', conflictFiles: [] };
+
+    const merge = await this.exec(this.gitCommand, ['-C', path, ...DAEMON_IDENTITY, 'merge', '--no-edit', `origin/${base}`], {});
+    if (merge.code === 0) return { result: 'merged', conflictFiles: [] };
+
+    const conflictFiles = (await this.git(['diff', '--name-only', '--diff-filter=U'], path)).trim().split('\n').filter(Boolean);
+    if (conflictFiles.length === 0) {
+      // The merge failed for some *other* reason (e.g. untracked files in the way): clean up the
+      // half-merge and surface the real error rather than reporting a bogus empty conflict.
+      await this.abortBaseMerge(runId);
+      throw new GitCommandError(this.gitCommand, ['merge', '--no-edit', `origin/${base}`], merge);
+    }
+    return { result: 'conflict', conflictFiles };
+  }
+
+  async finishBaseMerge(runId: number, branch: string): Promise<{ ok: true } | { ok: false; unresolved: string[] }> {
+    const path = this.runTreePath(runId);
+    // Mechanical verification (never trust a resolver's self-report): any tracked file still starting a
+    // line with a conflict marker is unresolved. Only the `<<<<<<< `/`>>>>>>> ` forms are checked — the
+    // bare `=======` divider legitimately appears in prose (setext headings) and would false-positive.
+    const markers = await this.exec(this.gitCommand, ['-C', path, 'grep', '-l', '-E', '^(<{7} |>{7} )'], {});
+    if (markers.code === 0) {
+      const unresolved = markers.stdout.trim().split('\n').filter(Boolean);
+      return { ok: false, unresolved };
+    }
+    // `git add -A` marks every conflict resolved with the working-tree content (including deletions the
+    // resolver chose); `commit --no-edit` concludes the merge with git's prepared MERGE_MSG. Pushing
+    // immediately is the point: it is what clears the PR's conflicting status on GitHub.
+    await this.git(['add', '-A'], path);
+    await this.git([...DAEMON_IDENTITY, 'commit', '--no-edit'], path);
+    await this.git(['push', 'origin', branch], path);
+    return { ok: true };
+  }
+
+  async abortBaseMerge(runId: number): Promise<void> {
+    // Best-effort by contract: no merge in progress → git errors → ignored (idempotent).
+    await this.execIgnore(['-C', this.runTreePath(runId), 'merge', '--abort']);
   }
 
   async readDiff(input: ReadDiffInput): Promise<string> {
@@ -397,7 +447,7 @@ export class GitHubCli implements GitHub {
   private async viewPr(prNumber: number): Promise<PullRequest> {
     const json = await this.gh([
       'pr', 'view', String(prNumber), '--repo', this.repo,
-      '--json', 'number,headRefName,baseRefName,title,body,state,url',
+      '--json', 'number,headRefName,baseRefName,title,body,state,url,mergeable',
     ]);
     return mapPr(JSON.parse(json) as RawPr);
   }
@@ -405,7 +455,7 @@ export class GitHubCli implements GitHub {
   private async viewPrByBranch(branch: string): Promise<PullRequest> {
     const json = await this.gh([
       'pr', 'view', branch, '--repo', this.repo,
-      '--json', 'number,headRefName,baseRefName,title,body,state,url',
+      '--json', 'number,headRefName,baseRefName,title,body,state,url,mergeable',
     ]);
     return mapPr(JSON.parse(json) as RawPr);
   }
@@ -444,9 +494,12 @@ interface RawPr {
   body: string;
   state: string;
   url: string;
+  /** gh reports MERGEABLE | CONFLICTING | UNKNOWN (GitHub computes it asynchronously). */
+  mergeable?: string;
 }
 
 function mapPr(raw: RawPr): PullRequest {
+  const mergeable = (raw.mergeable ?? '').toLowerCase();
   return {
     number: raw.number,
     branch: raw.headRefName,
@@ -455,6 +508,9 @@ function mapPr(raw: RawPr): PullRequest {
     body: raw.body ?? '',
     state: raw.state.toLowerCase() === 'merged' ? 'merged' : raw.state.toLowerCase() === 'closed' ? 'closed' : 'open',
     url: raw.url,
+    // Anything unexpected reads as `unknown` — the safe direction: "no signal" never triggers
+    // conflict handling, while a real CONFLICTING always does.
+    mergeable: mergeable === 'mergeable' ? 'mergeable' : mergeable === 'conflicting' ? 'conflicting' : 'unknown',
   };
 }
 

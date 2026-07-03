@@ -3,7 +3,7 @@
   // the attention queue, the repositories ledger (with inline enrollment), and a recent-activity
   // feed. Everything derives from `ui.runs`/`ui.repos`, which the SSE stream keeps live — this page
   // is pure derivation, no polling of its own.
-  import { ui, configureRepoSource, enrollRepo, fetchDirSuggestions, openRepoBoard, openRun, setRepoWatch } from './store.svelte';
+  import { ui, configureRepoSource, enrollRepo, fetchDirSuggestions, openRepoBoard, openRun, setRepoConflictPolicy, setRepoWatch } from './store.svelte';
   import {
     attentionModel,
     costStatusModel,
@@ -309,6 +309,23 @@
           onclick={() => setRepoWatch(row.repoRef, !row.watch)}
         >
           <span class="pip"></span>{row.watch ? 'Watching' : 'Watch'}
+        </button>
+        <!-- Merge-conflict policy toggle: when a run's branch conflicts with base (the between-stage
+             sync, or a finished run's PR turning CONFLICTING), 'auto' lets a resolver agent handle it;
+             'manual' parks the run for you. -->
+        <button
+          type="button"
+          class="af-hwatch af-hconflict"
+          class:on={row.conflictPolicy === 'auto'}
+          disabled={!row.enrolled}
+          title={!row.enrolled
+            ? 'Re-enroll this repo to configure conflict handling'
+            : row.conflictPolicy === 'auto'
+              ? 'Merge conflicts are auto-resolved by an agent (verified) — click to handle them yourself'
+              : 'Merge conflicts wait for you — click to let an agent auto-resolve them'}
+          onclick={() => setRepoConflictPolicy(row.repoRef, row.conflictPolicy === 'auto' ? 'manual' : 'auto')}
+        >
+          <span class="pip"></span>{row.conflictPolicy === 'auto' ? 'Auto-merge' : 'Conflicts: manual'}
         </button>
       </div>
 

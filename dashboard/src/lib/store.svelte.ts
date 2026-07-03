@@ -160,6 +160,26 @@ export async function setRepoWatch(repoRef: string, watch: boolean): Promise<voi
   }
 }
 
+/**
+ * Set an enrolled repo's merge-conflict policy (`POST /repos/conflict-policy`): `manual` parks a
+ * conflicted run for the operator; `auto` lets a verified resolver agent handle it. Refreshes the
+ * ledger so the control reflects state.
+ */
+export async function setRepoConflictPolicy(repoRef: string, policy: 'manual' | 'auto'): Promise<void> {
+  try {
+    await request<Repo>('POST', '/repos/conflict-policy', { repoRef, policy });
+    banner(
+      policy === 'auto'
+        ? `${repoRef}: merge conflicts will be auto-resolved by an agent.`
+        : `${repoRef}: merge conflicts will wait for you to resolve.`,
+      'ok',
+    );
+    await loadRepos();
+  } catch (err) {
+    banner(`Could not update conflict policy: ${(err as Error).message}`, 'err');
+  }
+}
+
 /** Archive a resolved (done/stopped) run server-side so it drops out of the Resolved lane. */
 export async function archiveRun(id: number): Promise<void> {
   try {

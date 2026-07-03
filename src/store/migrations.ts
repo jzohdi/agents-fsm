@@ -148,6 +148,15 @@ export const MIGRATIONS: Migration[] = [
     // a working directory is chosen) and a fresh DB already has it from schema.sql. Mirrors schema.sql.
     apply: (db) => addColumnIfMissing(db, 'repos', 'source_mode', 'TEXT'),
   },
+  {
+    version: 12,
+    name: 'add repos.conflict_policy',
+    // Per-repo merge-conflict policy for the between-stage base sync: 'manual' (park needs_human) |
+    // 'auto' (harness resolves, mechanically verified). Additive column with a constant default, so a
+    // pre-existing DB backfills to 'manual' (the conservative behavior — no agent spend without opt-in)
+    // and a fresh DB already has it from schema.sql. Mirrors schema.sql.
+    apply: (db) => addColumnIfMissing(db, 'repos', 'conflict_policy', "TEXT NOT NULL DEFAULT 'manual'"),
+  },
 ];
 
 // Guard the invariants the runner relies on: versions a gap-free, strictly increasing 1..N sequence

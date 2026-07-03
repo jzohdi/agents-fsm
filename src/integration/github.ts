@@ -83,6 +83,23 @@ export interface PullRequest {
   /** `merged` is the hard "dependency satisfied" signal the Scheduler keys off (README §3.5). */
   state: 'open' | 'closed' | 'merged';
   url: string;
+  /** GitHub's computed mergeability against base: `conflicting` is what the PR Feedback Poller keys off
+   *  to surface/auto-resolve merge conflicts on a finished run's PR. `unknown` = GitHub is still
+   *  computing (transient) — treat as "no signal", never as a conflict. Absent on adapters/paths that
+   *  don't fetch it. */
+  mergeable?: 'mergeable' | 'conflicting' | 'unknown';
+}
+
+/** The outcome of merging the latest `origin/<base>` into a run's branch in its working tree. */
+export interface BaseSync {
+  /** `up_to_date` = branch already contains base; `merged` = a merge commit was created cleanly;
+   *  `conflict` = the merge stopped on conflicts — **left in progress** (markers in the tree) so a
+   *  resolver can finish it via {@link GitHub.finishBaseMerge} or discard it via
+   *  {@link GitHub.abortBaseMerge}. Callers must do one or the other before anything else touches
+   *  the tree — a half-merged tree wedges the next checkout. */
+  result: 'up_to_date' | 'merged' | 'conflict';
+  /** The unmerged paths when `result` is `conflict`; empty otherwise. */
+  conflictFiles: string[];
 }
 
 /** A review/PR comment the orchestrator posted. */
@@ -252,6 +269,28 @@ export interface GitHub {
 
   /** Stage all changes in the working tree, commit them, and push the branch. */
   commitAndPush(input: CommitAndPushInput): Promise<CommitRef>;
+
+  /**
+   * Merge the latest `origin/<base>` into the run's branch in its working tree (the between-stage base
+   * sync). Fetches first, so "up to date" means against the remote's current base, not a stale ref.
+   * On `conflict` the merge is deliberately **left in progress** (conflict markers in the tree, the
+   * unmerged paths reported) so a resolver agent can edit the files; the caller must then either
+   * {@link finishBaseMerge} or {@link abortBaseMerge} — never leave the tree mid-merge.
+   */
+  syncBranchWithBase(runId: number, base: string): Promise<BaseSync>;
+
+  /**
+   * Conclude an in-progress base merge after conflicts were (supposedly) resolved: **mechanically
+   * verify** no file still carries conflict markers — the resolver's self-report is never trusted —
+   * then stage everything, create the merge commit, and push the branch (so the PR's conflict status
+   * clears). Returns the offending files instead when verification fails, leaving the merge in
+   * progress for {@link abortBaseMerge}.
+   */
+  finishBaseMerge(runId: number, branch: string): Promise<{ ok: true } | { ok: false; unresolved: string[] }>;
+
+  /** Discard an in-progress base merge (`git merge --abort`), restoring the pre-sync tree. Idempotent:
+   *  a no-op when no merge is in progress, so callers can always abort defensively before escalating. */
+  abortBaseMerge(runId: number): Promise<void>;
 
   /**
    * Commit (never push) any uncommitted changes in the run's working tree — the daemon's graceful

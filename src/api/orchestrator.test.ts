@@ -1315,3 +1315,27 @@ describe('Orchestrator — graceful shutdown', () => {
     expect(repo.getRun(run.id)!.status).toBe('done'); // untouched
   });
 });
+
+describe('Orchestrator — repo merge-conflict policy', () => {
+  it('setRepoConflictPolicy validates the ref, the enrollment, and the policy value', () => {
+    const { orchestrator } = setup();
+    expect(() => orchestrator.setRepoConflictPolicy({ repoRef: 'o/r', policy: 'auto' })).toThrow(/not enrolled/);
+    expect(() => orchestrator.setRepoConflictPolicy({ repoRef: 'not a repo', policy: 'auto' })).toThrow(ApiError);
+
+    orchestrator.enrollRepo({ repoRef: 'o/r', workingRoot: './w' });
+    expect(() => orchestrator.setRepoConflictPolicy({ repoRef: 'o/r', policy: 'yolo' })).toThrow(/must be "manual" or "auto"/);
+
+    // Default is the conservative manual; the setter flips it and the updated repo comes back.
+    expect(orchestrator.listRepos()[0]).toMatchObject({ conflictPolicy: 'manual' });
+    expect(orchestrator.setRepoConflictPolicy({ repoRef: 'o/r', policy: 'auto' })).toMatchObject({ conflictPolicy: 'auto' });
+    expect(orchestrator.setRepoConflictPolicy({ repoRef: 'o/r', policy: 'manual' })).toMatchObject({ conflictPolicy: 'manual' });
+  });
+
+  it('the policy survives a re-enroll (upsert never resets operator choices)', () => {
+    const { orchestrator } = setup();
+    orchestrator.enrollRepo({ repoRef: 'o/r', workingRoot: './w' });
+    orchestrator.setRepoConflictPolicy({ repoRef: 'o/r', policy: 'auto' });
+    orchestrator.enrollRepo({ repoRef: 'o/r', workingRoot: './w' }); // re-enroll
+    expect(orchestrator.listRepos()[0]).toMatchObject({ conflictPolicy: 'auto' });
+  });
+});

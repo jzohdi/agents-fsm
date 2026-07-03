@@ -13,7 +13,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 
@@ -421,6 +421,67 @@ describe('GitHubCli — local git (real temp repo)', () => {
     const again = await gh.prepareWorkingTree({ runId: 13, branch: 'agent/run-13', base: 'main' });
     expect(again.path).toBe(tree.path);
     expect(statSync(join(again.path, '.git')).isFile()).toBe(true); // a live worktree again
+  });
+
+  it('syncBranchWithBase: up to date → no-op; base advanced compatibly → clean merge commit', async () => {
+    const remote = makeRemote();
+    const seed = join(remote, '..', 'seed'); // makeRemote's seed clone, still wired to origin
+    const workingRoot = mkdtempSync(join(tmpdir(), 'agent-fleet-work-'));
+    const gh = new GitHubCli({ repo: 'o/r', workingRoot, cloneUrl: remote });
+    const tree = await gh.prepareWorkingTree({ runId: 31, branch: 'agent/run-31', base: 'main' });
+
+    // Branch already contains base's tip → nothing to merge, nothing committed.
+    expect(await gh.syncBranchWithBase(31, 'main')).toEqual({ result: 'up_to_date', conflictFiles: [] });
+
+    // Base advances with a non-overlapping change → merged cleanly (a merge commit lands on the branch).
+    writeFileSync(join(seed, 'new-on-main.txt'), 'landed later\n');
+    git(seed, ['add', '-A']);
+    git(seed, ['commit', '-m', 'main moved on']);
+    git(seed, ['push', '--quiet', 'origin', 'main']);
+    expect(await gh.syncBranchWithBase(31, 'main')).toEqual({ result: 'merged', conflictFiles: [] });
+    expect(readFileSync(join(tree.path, 'new-on-main.txt'), 'utf8')).toBe('landed later\n'); // base's change is in the tree
+  });
+
+  it('a conflicting base merge is left in progress, is abortable, and finishBaseMerge verifies mechanically', async () => {
+    const remote = makeRemote();
+    const seed = join(remote, '..', 'seed');
+    const workingRoot = mkdtempSync(join(tmpdir(), 'agent-fleet-work-'));
+    const gh = new GitHubCli({ repo: 'o/r', workingRoot, cloneUrl: remote });
+    const tree = await gh.prepareWorkingTree({ runId: 33, branch: 'agent/run-33', base: 'main' });
+    git(tree.path, ['config', 'user.email', 't@t']);
+    git(tree.path, ['config', 'user.name', 'T']);
+
+    // Both sides edit the same line of README.md → a real conflict.
+    writeFileSync(join(tree.path, 'README.md'), 'branch version\n');
+    await gh.commitAndPush({ workingDir: tree.path, branch: 'agent/run-33', message: 'branch work' });
+    writeFileSync(join(seed, 'README.md'), 'main version\n');
+    git(seed, ['add', '-A']);
+    git(seed, ['commit', '-m', 'conflicting main change']);
+    git(seed, ['push', '--quiet', 'origin', 'main']);
+
+    const sync = await gh.syncBranchWithBase(33, 'main');
+    expect(sync).toEqual({ result: 'conflict', conflictFiles: ['README.md'] });
+    expect(readFileSync(join(tree.path, 'README.md'), 'utf8')).toContain('<<<<<<<'); // merge left in progress
+
+    // finishBaseMerge refuses while conflict markers remain — the resolver's word is never enough.
+    expect(await gh.finishBaseMerge(33, 'agent/run-33')).toEqual({ ok: false, unresolved: ['README.md'] });
+
+    // Aborting restores the pre-sync tree (idempotent — a second abort is a no-op).
+    await gh.abortBaseMerge(33);
+    await gh.abortBaseMerge(33);
+    expect(readFileSync(join(tree.path, 'README.md'), 'utf8')).toBe('branch version\n');
+    expect(git(tree.path, ['status', '--porcelain']).trim()).toBe('');
+
+    // Same conflict, this time "resolved" (both intents reconciled) → finish commits the merge and pushes.
+    expect((await gh.syncBranchWithBase(33, 'main')).result).toBe('conflict');
+    writeFileSync(join(tree.path, 'README.md'), 'branch version + main version\n');
+    expect(await gh.finishBaseMerge(33, 'agent/run-33')).toEqual({ ok: true });
+    expect(git(tree.path, ['status', '--porcelain']).trim()).toBe(''); // merge concluded
+    expect(git(tree.path, ['log', '--merges', '--oneline'])).not.toBe(''); // as a real merge commit
+    // …and the push cleared the way for GitHub to recompute the PR as mergeable.
+    const remoteTip = execFileSync('git', ['ls-remote', '--heads', remote, 'agent/run-33'], { encoding: 'utf8' });
+    expect(remoteTip.trim()).not.toBe('');
+    expect(remoteTip).toContain(git(tree.path, ['rev-parse', 'HEAD']).trim());
   });
 
   it('savepointWorkingTree commits dirty work locally (never pushes); clean or missing trees are no-ops', async () => {

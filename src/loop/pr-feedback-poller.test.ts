@@ -253,3 +253,53 @@ describe('PrFeedbackPoller — multi-repo (Milestone 8 Phase A)', () => {
     expect(repo.getRun(apiRun.id)!.status).toBe('done');
   });
 });
+
+describe('PrFeedbackPoller — merge-conflict detection on finished runs', () => {
+  /** Enroll o/r with the given conflict policy (the poller reads it fresh per check). */
+  function enroll(repo: Repository, policy: 'manual' | 'auto') {
+    repo.upsertRepo({ repoRef: 'o/r', workingRoot: '/tmp/agent-fleet-test' });
+    repo.setRepoConflictPolicy('o/r', policy);
+  }
+
+  it('reopens a done run whose open PR turned CONFLICTING when the repo policy is auto', async () => {
+    const { repo, github, loop, run } = await runToDone();
+    enroll(repo, 'auto');
+    github.setPrMergeable(repo.getRun(run.id)!.prNumber!, 'conflicting');
+
+    const poller = new PrFeedbackPoller(repo, github, loop, { sleep: noopSleep });
+    expect(await poller.checkRun(run.id)).toBe('reopened');
+    const reopened = repo.getRun(run.id)!;
+    expect(reopened.status).toBe('running'); // back in the pipeline; re-entry's base sync resolves it
+    expect(reopened.flags[ADDRESSING_PR_FEEDBACK_FLAG]).toBe(true); // stages iterate on the existing PR
+    // The re-open reason names the conflict, so the re-entered stage knows why it is re-running.
+    expect(repo.listTransitions(run.id).at(-1)!.reason).toMatchObject({ kind: 'merge_conflict' });
+  });
+
+  it('leaves a conflicting PR alone under manual policy (the human drives resolution)', async () => {
+    const { repo, github, loop, run } = await runToDone();
+    enroll(repo, 'manual');
+    github.setPrMergeable(repo.getRun(run.id)!.prNumber!, 'conflicting');
+
+    const poller = new PrFeedbackPoller(repo, github, loop, { sleep: noopSleep });
+    expect(await poller.checkRun(run.id)).toBe('watching');
+    expect(repo.getRun(run.id)!.status).toBe('done'); // untouched
+  });
+
+  it('never self-reopens a needs_human run for conflicts — it is parked for a person', async () => {
+    const { repo, github, loop, run } = await runToNeedsHumanWithPr();
+    enroll(repo, 'auto');
+    github.setPrMergeable(repo.getRun(run.id)!.prNumber!, 'conflicting');
+
+    const poller = new PrFeedbackPoller(repo, github, loop, { sleep: noopSleep });
+    expect(await poller.checkRun(run.id)).toBe('watching');
+    expect(repo.getRun(run.id)!.status).toBe('needs_human'); // untouched
+  });
+
+  it('treats mergeable/unknown as "no signal" (GitHub may still be computing)', async () => {
+    const { repo, github, loop, run } = await runToDone();
+    enroll(repo, 'auto');
+    github.setPrMergeable(repo.getRun(run.id)!.prNumber!, 'unknown');
+    const poller = new PrFeedbackPoller(repo, github, loop, { sleep: noopSleep });
+    expect(await poller.checkRun(run.id)).toBe('watching');
+  });
+});

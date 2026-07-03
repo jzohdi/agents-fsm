@@ -122,6 +122,14 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
     return sendJson(res, 200, orch.setRepoWatch({ repoRef: str(body, 'repoRef'), watch, label: label as string | null | undefined }));
   }
 
+  // --- repo merge-conflict policy: what a run does when merging the latest base into its branch
+  // conflicts — 'manual' parks it needs_human; 'auto' lets a verified resolver invocation handle it.
+  // Body-carried repoRef (contains a `/`), like /repos/watch. ---
+  if (method === 'POST' && path === '/repos/conflict-policy') {
+    const body = await readJson(req);
+    return sendJson(res, 200, orch.setRepoConflictPolicy({ repoRef: str(body, 'repoRef'), policy: str(body, 'policy') }));
+  }
+
   // --- directory-path completions for the local-checkout picker (Milestone 12 UI). The browser can't
   // read absolute paths from a native folder dialog, so the daemon (which runs on the operator's
   // machine) supplies shell-style tab-completions instead. Read-only, names-only. ---

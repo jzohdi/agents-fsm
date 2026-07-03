@@ -170,4 +170,7 @@ export interface Repo {
   /** Working-directory source (Milestone 12): `null` = unconfigured (runs blocked until chosen),
    *  `'clone'` = clone a fresh per-run tree from GitHub, `'local'` = use {@link localRepo} via git worktree. */
   sourceMode: 'clone' | 'local' | null;
+  /** Merge-conflict policy: `'manual'` parks a conflicted run needs_human for the operator; `'auto'`
+   *  lets a verified resolver agent handle it (between-stage base sync + PR conflict re-open). */
+  conflictPolicy: 'manual' | 'auto';
 }

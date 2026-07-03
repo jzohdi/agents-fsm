@@ -790,6 +790,28 @@ export class Orchestrator {
    * reset to the default. A `404` for a repo that was never enrolled (enroll it first); a malformed ref
    * is a `400`. Watch state is independent of the adapter config, so a later re-enroll won't reset it.
    */
+  /**
+   * Set an enrolled repo's merge-conflict policy (`POST /repos/conflict-policy`): `manual` parks a
+   * conflicted run `needs_human` for the operator; `auto` lets a verified resolver invocation handle it
+   * (the between-stage base sync + the PR Feedback Poller's conflict re-open). Takes effect from each
+   * run's next stage — the runner reads the policy fresh at dispatch.
+   */
+  setRepoConflictPolicy(input: { repoRef: string; policy: string }): Repo {
+    if (!input.repoRef) throw new ApiError(400, 'repoRef is required');
+    if (input.policy !== 'manual' && input.policy !== 'auto') {
+      throw new ApiError(400, `policy must be "manual" or "auto" (got ${JSON.stringify(input.policy)})`);
+    }
+    let ref: string;
+    try {
+      ref = parseRepoRef(input.repoRef);
+    } catch (err) {
+      throw new ApiError(400, err instanceof Error ? err.message : String(err));
+    }
+    if (!this.repo.getRepo(ref)) throw new ApiError(404, `repo ${ref} is not enrolled — enroll it (POST /repos) first`);
+    this.repo.setRepoConflictPolicy(ref, input.policy);
+    return this.repo.getRepo(ref)!;
+  }
+
   setRepoWatch(input: { repoRef: string; watch: boolean; label?: string | null }): Repo {
     if (!input.repoRef) throw new ApiError(400, 'repoRef is required');
     let ref: string;

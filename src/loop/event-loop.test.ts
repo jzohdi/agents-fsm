@@ -1265,3 +1265,83 @@ describe('graceful shutdown (interruption ≠ escalation)', () => {
     expect(repo.getRun(run.id)!.currentState).toBe('done'); // the pending follow-up dispatched on restart
   });
 });
+
+describe('between-stage base sync (merge-conflict handling)', () => {
+  const CONFLICT = { result: 'conflict' as const, conflictFiles: ['src/app.ts'] };
+
+  /** goldenPathHandler, plus a reply for the conflict-resolver pseudo-stage (its text is ignored). */
+  const handlerWithResolver: StubHandler = (req) =>
+    req.stage === 'resolve_conflicts' ? { output: 'reconciled both sides', tokens: 42 } : goldenPathHandler(req);
+
+  /** Enroll the test repo and set its conflict policy (the runner reads it fresh at each stage). */
+  function enroll(repo: Repository, policy: 'manual' | 'auto') {
+    repo.upsertRepo({ repoRef: 'o/r', workingRoot: '/tmp/agent-fleet-test' });
+    repo.setRepoConflictPolicy('o/r', policy);
+  }
+
+  it('syncs the branch with base before every non-triage stage; a clean run never merges or aborts', async () => {
+    const { repo, loop, github } = setup(goldenPathHandler);
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.runUntilIdle();
+
+    expect(repo.getRun(run.id)!.currentState).toBe('done');
+    // Golden path dispatches 7 working-tree stages after triage: plan … code_review.
+    expect(github.baseSyncCalls.filter((c) => c.runId === run.id)).toHaveLength(7);
+    expect(github.baseSyncCalls[0]).toEqual({ runId: run.id, base: 'main' });
+    expect(github.abortedMerges).toHaveLength(0);
+    expect(github.finishedMerges).toHaveLength(0);
+  });
+
+  it('default (manual) policy: a conflict parks the run merge_conflict with the merge aborted and no agent spend', async () => {
+    const { repo, loop, github } = setup(goldenPathHandler); // repo not enrolled → policy defaults to manual
+    github.queueBaseSync(CONFLICT); // the first sync (plan) hits it
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.runUntilIdle();
+
+    const parked = repo.getRun(run.id)!;
+    expect(parked.status).toBe('needs_human');
+    const last = repo.listTransitions(run.id).at(-1)!;
+    expect(last.trigger).toBe('merge_conflict');
+    expect(last.fromState).toBe('plan');
+    expect(last.reason).toMatchObject({ kind: 'merge_conflict', base: 'main', files: ['src/app.ts'], policy: 'manual' });
+    expect(github.abortedMerges).toEqual([run.id]); // the tree was restored, never left mid-merge
+    expect(repo.listAgentRuns(run.id).some((a) => a.stage === 'resolve_conflicts')).toBe(false); // no resolver ran
+
+    // The operator resolves out-of-band and resumes: the next sync is clean and the run completes.
+    loop.resumeRun(run.id);
+    await loop.runUntilIdle();
+    expect(repo.getRun(run.id)!.currentState).toBe('done');
+  });
+
+  it('auto policy: a resolver invocation runs over the merge, verification passes, and the run proceeds', async () => {
+    const { repo, loop, github } = setup(handlerWithResolver);
+    enroll(repo, 'auto');
+    github.queueBaseSync({ result: 'conflict', conflictFiles: ['src/app.ts', 'README.md'] });
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.runUntilIdle();
+
+    expect(repo.getRun(run.id)!.currentState).toBe('done'); // never parked
+    expect(github.finishedMerges).toEqual([{ runId: run.id, branch: repo.getRun(run.id)!.branch }]);
+    expect(github.abortedMerges).toHaveLength(0);
+    // Exactly one resolver invocation, recorded under the pseudo-stage with its usage counted.
+    const resolver = repo.listAgentRuns(run.id).filter((a) => a.stage === 'resolve_conflicts');
+    expect(resolver).toHaveLength(1);
+    expect(resolver[0]!.phase).toBe('produce');
+    expect(resolver[0]!.tokens).toBe(42);
+  });
+
+  it('auto policy: markers left behind → merge rolled back + merge_conflict escalation carrying the evidence', async () => {
+    const { repo, loop, github } = setup(handlerWithResolver);
+    enroll(repo, 'auto');
+    github.queueBaseSync(CONFLICT);
+    github.finishBaseMergeResult = { ok: false, unresolved: ['src/app.ts'] }; // mechanical verification fails
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.runUntilIdle();
+
+    expect(repo.getRun(run.id)!.status).toBe('needs_human');
+    const last = repo.listTransitions(run.id).at(-1)!;
+    expect(last.trigger).toBe('merge_conflict');
+    expect(last.reason).toMatchObject({ policy: 'auto', resolutionAttempted: true, unresolved: ['src/app.ts'] });
+    expect(github.abortedMerges).toEqual([run.id]); // rolled back — the tree is clean for the operator
+  });
+});

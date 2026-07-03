@@ -383,6 +383,9 @@ export interface RepoLedgerRow {
   localRepo: string | null;
   /** Whether the repo has a working directory bound — an enrolled repo with a non-null {@link sourceMode}. */
   configured: boolean;
+  /** Merge-conflict policy: `'auto'` = a resolver agent handles conflicts; `'manual'` = the run parks
+   *  needs_human for the operator. Only meaningful for an enrolled repo. */
+  conflictPolicy: 'manual' | 'auto';
   baseBranch: string;
   runs: number;
   active: number;
@@ -405,13 +408,15 @@ export function repoLedgerModel(repos: Repo[] | undefined, runs: Run[] | undefin
   const rows = new Map<string, RepoLedgerRow>();
   const blank = (repoRef: string): RepoLedgerRow => ({
     repoRef, enrolled: false, watch: false, sourceMode: null, localRepo: null, configured: false,
-    baseBranch: '', runs: 0, active: 0, awaiting: 0, needsHuman: 0,
+    conflictPolicy: 'manual', baseBranch: '', runs: 0, active: 0, awaiting: 0, needsHuman: 0,
     resolved: 0, tokens: 0, cost: 0, costLabel: '$0.00', lastActivity: null,
   });
   for (const repo of repos ?? []) {
     rows.set(repo.repoRef, {
       ...blank(repo.repoRef), enrolled: true, watch: repo.watch, baseBranch: repo.baseBranch,
       sourceMode: repo.sourceMode, localRepo: repo.localRepo, configured: repo.sourceMode !== null,
+      // Older daemons don't send the field; default to the server's own default (manual).
+      conflictPolicy: repo.conflictPolicy ?? 'manual',
     });
   }
   for (const r of runs ?? []) {
@@ -634,6 +639,8 @@ const ESCALATION_GUIDANCE: Record<string, string> = {
   missing_reason: 'A back-edge was requested without the required reason. Revert with a reason so the stage knows why it is re-running.',
   internal_review_cap: 'Self-review never converged within its round limit. Resume for a fresh round budget, or revert to the producing stage with notes.',
   git_error: 'A git/GitHub operation failed (auth, a rejected push, or a conflict). Fix the cause, then resume.',
+  merge_conflict:
+    'Merging the latest base into the run branch conflicted. Resolve it yourself (merge base into the branch, push), then resume — or switch the repo to auto-resolve.',
   executor_error: 'The agent harness errored after its own retries. Check the harness and credentials, then resume.',
   budget_exceeded: 'The run hit its token / cost / time budget. Raise the budget and resume, or stop the run.',
   config_version_mismatch: 'The run was started under a different FSM config version. Resume to retry under the current rules.',
@@ -684,6 +691,18 @@ const ESCALATION_DETAIL: Record<string, (r: Record<string, unknown>) => Escalati
     headline: `A git/GitHub operation failed${typeof r.op === 'string' ? ` while running "${r.op}"` : ''}.`,
     bullets: asText(r.detail),
   }),
+  merge_conflict: (r) => {
+    const files = Array.isArray(r.files) ? r.files.filter((f): f is string => typeof f === 'string') : [];
+    const attempted = r.resolutionAttempted === true;
+    const unresolved = Array.isArray(r.unresolved) ? r.unresolved.filter((f): f is string => typeof f === 'string') : [];
+    return {
+      headline:
+        `The branch conflicts with ${typeof r.base === 'string' ? `the latest ${r.base}` : 'its base branch'}` +
+        (attempted ? ' — an agent tried to resolve it but conflict markers remained (the merge was rolled back).' : '.') +
+        (files.length ? ' Conflicted files:' : ''),
+      bullets: [...files, ...(attempted && unresolved.length ? unresolved.map((f) => `still unresolved: ${f}`) : [])],
+    };
+  },
   executor_error: (r) => ({
     headline: 'The agent harness failed even after its own retries.',
     bullets: asText(r.error),

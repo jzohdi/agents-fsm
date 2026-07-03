@@ -136,11 +136,18 @@ export interface Repo {
    *  directory is chosen), `'clone'` = clone a fresh per-run tree from the GitHub remote, `'local'` =
    *  use {@link localRepo} as a validated local checkout via `git worktree`. */
   sourceMode: RepoSourceMode | null;
+  /** What a run does when merging the latest base into its branch conflicts (the between-stage base
+   *  sync): `'manual'` = park the run `needs_human` for the operator; `'auto'` = a harness invocation
+   *  resolves the conflicts (mechanically verified) before any escalation. Default `'manual'`. */
+  conflictPolicy: ConflictPolicy;
   createdAt: string;
 }
 
 /** How a repo's per-run working tree is sourced ({@link Repo.sourceMode}). */
 export type RepoSourceMode = 'clone' | 'local';
+
+/** Merge-conflict handling for a repo's runs ({@link Repo.conflictPolicy}). */
+export type ConflictPolicy = 'manual' | 'auto';
 
 export interface UpsertRepoInput {
   repoRef: string;
@@ -284,6 +291,7 @@ interface RepoRow {
   watch: number;
   watch_label: string | null;
   source_mode: RepoSourceMode | null;
+  conflict_policy: ConflictPolicy;
   created_at: string;
 }
 
@@ -366,6 +374,7 @@ function mapRepo(r: RepoRow): Repo {
     watch: r.watch !== 0,
     watchLabel: r.watch_label,
     sourceMode: r.source_mode,
+    conflictPolicy: r.conflict_policy,
     createdAt: r.created_at,
   };
 }
@@ -440,6 +449,12 @@ export class Repository {
    * `label` is omitted the override label is left as-is; pass `null` to reset it to the default, or a
    * string to set a custom one. No-op on an unenrolled repo (0 rows updated).
    */
+  /** Set a repo's merge-conflict policy ({@link Repo.conflictPolicy}). Persisted independently of
+   *  enrollment, like watch/source: a re-enroll (`upsertRepo`) never resets the operator's choice. */
+  setRepoConflictPolicy(repoRef: string, policy: ConflictPolicy): void {
+    this.db.prepare('UPDATE repos SET conflict_policy = ? WHERE repo_ref = ? COLLATE NOCASE').run(policy, repoRef);
+  }
+
   setRepoWatch(repoRef: string, watch: boolean, label?: string | null): void {
     if (label === undefined) {
       this.db.prepare('UPDATE repos SET watch = ? WHERE repo_ref = ? COLLATE NOCASE').run(watch ? 1 : 0, repoRef);

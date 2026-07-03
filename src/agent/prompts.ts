@@ -23,7 +23,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 
-import type { SystemPromptFn } from './runner';
+import { RESOLVE_CONFLICTS_STAGE, type SystemPromptFn } from './runner';
 
 /** The bundled prompts directory (resolved next to this module, so it works under tsx and vitest). */
 const DEFAULT_PROMPTS_DIR = fileURLToPath(new URL('./prompts/', import.meta.url));
@@ -49,9 +49,14 @@ export function createSystemPromptFn(options: SystemPromptOptions = {}): SystemP
   const triageContract = read(dir, 'triage-contract.md');
   const selfReview = read(dir, join('phases', 'self_review.md'));
   const simplify = read(dir, join('phases', 'simplify.md'));
+  const resolveConflicts = read(dir, join('phases', 'resolve_conflicts.md'));
   const stages = loadStages(join(dir, 'stages'));
 
   return (stage, phase) => {
+    // The conflict resolver is a stage-agnostic phase (the between-stage base sync), not an FSM stage:
+    // no stage role file, and deliberately NO output contract — its success is judged mechanically from
+    // the git state (runner `finishBaseMerge`), so the envelope contract would only mislead it.
+    if (stage === RESOLVE_CONFLICTS_STAGE) return [base, resolveConflicts].join(SECTION_SEPARATOR);
     const role = stages.get(stage);
     if (role === undefined) {
       throw new Error(`No stage prompt for "${stage}" (expected ${join(dir, 'stages', `${stage}.md`)})`);

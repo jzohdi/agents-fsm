@@ -200,6 +200,24 @@ export class PrFeedbackPoller {
       return 'stopped';
     }
 
+    // Merge-conflict detection (rides the same getPr): base moved under a finished run's open PR and
+    // GitHub now reports it CONFLICTING. Under the repo's `auto` policy, re-open the run — the
+    // between-stage base sync at re-entry (runner syncWithBase) merges base and auto-resolves, and the
+    // pipeline re-finishes with a mergeable PR. Only `done` runs re-open themselves: a `needs_human`
+    // run is parked *for a person* and must not spring back to life on its own. Under `manual` policy
+    // this does nothing — the human sees the conflict on GitHub and drives resolution. No dedupe
+    // bookkeeping needed: re-opening makes the run non-finished, so it leaves this poller's watch set
+    // until it finishes again (with a freshly-pushed merge commit, i.e. no longer conflicting).
+    if (pr.mergeable === 'conflicting' && run.status === 'done' && this.repo.getRepo(run.repoRef)?.conflictPolicy === 'auto') {
+      this.repo.recordLog({
+        runId: run.id,
+        message: `PR #${prNumber} conflicts with ${baseBranch} — re-opening to merge the latest base and resolve (auto policy)`,
+        data: { kind: 'pr_conflict_detected', prNumber },
+      });
+      this.reopener.reopenForPrFeedback(run.id, { kind: 'merge_conflict', prNumber, base: baseBranch });
+      return 'reopened';
+    }
+
     const comments = await github.listPrComments(prNumber);
     // Feedback newer than the run's finished-state transition is unaddressed reviewer feedback; anything
     // older (a pipeline review comment, pre-completion discussion) is not. The run's most recent

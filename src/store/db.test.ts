@@ -132,6 +132,24 @@ describe('migrate', () => {
     db.close();
   });
 
+  it('retrofits a database created before repos.conflict_policy existed, defaulting to manual', () => {
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, flags TEXT NOT NULL DEFAULT '{}', archived_at TEXT)`);
+
+    runMigrations(db); // migration 3 creates the registry; migration 12 adds the policy column
+
+    expect(columnExists(db, 'repos', 'conflict_policy')).toBe(true);
+    expect(appliedMigrations(db)).toEqual(ALL_MIGRATION_NAMES);
+    // The backfilled default is the conservative policy: existing repos keep waiting for a human.
+    db.prepare("INSERT INTO repos (repo_ref, working_root) VALUES ('acme/web', './w')").run();
+    expect(db.prepare("SELECT conflict_policy FROM repos WHERE repo_ref = 'acme/web'").get()).toEqual({ conflict_policy: 'manual' });
+    // Drift guard: the retrofitted registry stays schema-identical to a fresh DB's.
+    const fresh = openDb();
+    expect(columns(db, 'repos')).toEqual(columns(fresh, 'repos'));
+    fresh.close();
+    db.close();
+  });
+
   it('retrofits a database created before runs.model_override existed', () => {
     const db = new Database(':memory:');
     db.exec(`CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, flags TEXT NOT NULL DEFAULT '{}', archived_at TEXT)`);
