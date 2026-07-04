@@ -55,6 +55,17 @@ describe('IssueIntakePoller — watched-repo scanning', () => {
     expect(pass).toEqual({ reposScanned: 0, started: 0, skipped: 0 });
     expect(repo.listRuns()).toHaveLength(0);
   });
+
+  it('does not let a repo-bound fake adapter leak issues from another repo into intake decisions', async () => {
+    const { repo, github, poller } = setup();
+    github.seedIssue('other/repo#1', { number: 1, author: 'other' });
+    github.seedIssue('acme/web#2', { number: 2, author: 'acme' });
+
+    const pass = await poller.checkOnce();
+
+    expect(pass).toEqual({ reposScanned: 1, started: 1, skipped: 0 });
+    expect(repo.listRuns().map((r) => r.issueRef)).toEqual(['acme/web#2']);
+  });
 });
 
 describe('IssueIntakePoller — sequential cap across passes', () => {

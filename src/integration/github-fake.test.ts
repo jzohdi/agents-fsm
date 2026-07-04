@@ -17,6 +17,17 @@ describe('FakeGitHub — issues', () => {
     expect(await gh.readIssue('o/r#42')).toEqual({ ref: 'o/r#42', number: 42, title: 'Add auth', body: 'do it', state: 'open' });
   });
 
+  it('lists open issues only for the fake adapter repo', async () => {
+    const gh = new FakeGitHub({ repoRef: 'acme/web' })
+      .seedIssue('acme/web#1', { number: 1, author: 'acme' })
+      .seedIssue('other/repo#2', { number: 2, author: 'other' })
+      .seedIssue('acme/web#3', { number: 3, state: 'closed' });
+
+    expect(await gh.listOpenIssues()).toEqual([
+      { ref: 'acme/web#1', number: 1, title: 'Issue 1', body: '', author: 'acme', assignees: [], labels: [] },
+    ]);
+  });
+
   it('rejects an unknown issue with GitHubNotFoundError', async () => {
     const gh = new FakeGitHub();
     await expect(gh.readIssue('o/r#1')).rejects.toBeInstanceOf(GitHubNotFoundError);
