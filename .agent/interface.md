@@ -91,6 +91,8 @@ Decision invariants:
   are not inspected in that pass.
 - Owner comparison is case-insensitive.
 - Override-label comparison is case-insensitive and bypasses all guards.
+- Override is determined from the issue's current labels only; the policy does not inspect label-event
+  actor or timestamp metadata.
 - `[WIP]` matching is case-insensitive and requires the literal bracketed marker in either title or
   body. Plain `wip` without brackets is not a match.
 - Guard order for non-overridden candidates is owner, assigned, WIP. The returned reason identifies the
