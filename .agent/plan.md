@@ -15,6 +15,18 @@ Issue Intake Poller should automatically start a run only for eligible issues:
 Manual run creation must keep using the existing explicit `POST /runs` / dashboard start path and must
 not be gated by these automatic-intake guards.
 
+## PR Feedback Re-plan
+
+This run is revising an existing PR after reviewer feedback that the branch did not clearly gate
+automatic pickup by the six issue-eligibility requirements. The implementation stage should treat the
+following as the acceptance checklist for resolving that feedback, not as optional polish:
+
+- automatic intake must evaluate owner, assignee, `[WIP]`, and override-label state before calling
+  `RunStarter.start`;
+- non-owner, assigned, and `[WIP]` issues must produce skip decisions and operator-visible log text;
+- the configured override label, defaulting to `agent help wanted`, must bypass every guard;
+- manual start paths must remain outside this policy.
+
 ## Current State
 
 - Continuous mode already has a pure decision core in `src/loop/issue-intake.ts` and an impure polling
@@ -36,6 +48,8 @@ Keep the policy in a small, deterministic function and keep side effects in the 
 
 1. Implement or preserve `decideIntake(openIssues, runStatusByRef, policy)` in
    `src/loop/issue-intake.ts`.
+   - This is the required gate for issue #3; do not rely on GitHub search filters, labels alone, or
+     tests that only cover sequential pickup.
    - Sort new candidates by issue number so automatic pickup is deterministic and oldest-first.
    - Deduplicate issues that already have any run row; non-`stopped` runs count against the in-flight
      cap, while `stopped` frees the slot but does not allow the same open issue to be re-picked.
@@ -51,6 +65,8 @@ Keep the policy in a small, deterministic function and keep side effects in the 
    - Resolve the owner from the canonical repo ref's first path segment, and resolve the override label
      as `repo.watchLabel ?? DEFAULT_WATCH_LABEL`.
    - Build the latest status map from existing runs for that repo and pass it to `decideIntake`.
+   - Only call `RunStarter.start` for `plan.start`; guarded issues must never reach the existing run
+     admission path unless they have the override label.
    - Start at most one selected issue through the existing `RunStarter.start({ issueRef })` path so
      manual run admission, duplicate-run checks, enrollment checks, and cost ceiling behavior remain
      unchanged.
