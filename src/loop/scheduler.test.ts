@@ -90,7 +90,7 @@ describe('compareRuns — the total dispatch order (priority desc → order_key 
     });
     fc.assert(
       fc.property(arbKey, arbKey, (a, b) => {
-        expect(Math.sign(compareRuns(a, b))).toBe(-Math.sign(compareRuns(b, a)));
+        expect(Math.sign(compareRuns(a, b))).toEqual(-Math.sign(compareRuns(b, a)));
       }),
     );
   });
