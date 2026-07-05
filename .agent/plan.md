@@ -1,151 +1,180 @@
-# Plan - Gate automatic issue pickup for watched repositories
+# Plan — Authenticate the HTTP/SSE API (token auth) — jzohdi/agents-fsm#25
 
-Issue: `jzohdi/agents-fsm#3`
+## Goal (restated)
 
-## Goal
+Add an optional shared-secret **bearer-token** auth layer to the daemon's HTTP + SSE API so it can
+later be safely exposed beyond loopback. This is the foundational piece of the remote-access epic
+(#16); networking/TLS and the hardening review are **separate issues, out of scope here**.
 
-Continuous watch mode must stop treating every open issue in a watched repository as safe work. The
-Issue Intake Poller should automatically start a run only for eligible issues:
+Behaviour contract:
+- **No token configured ⇒ auth disabled** — behaviour is byte-for-byte unchanged (localhost, open
+  API). This preserves every existing test and dev flow.
+- **Token configured ⇒ every API route (incl. SSE `GET /stream`) requires a valid credential**,
+  returning a distinct `401` for missing/invalid. `GET /health` stays open (liveness probes). The
+  static dashboard assets stay open (the SPA must load in order to prompt for and attach a token).
+- Constant-time token comparison; token comes **only from the environment** (`FLEET_API_TOKEN`),
+  never SQLite (README §9.1 secrets-in-env rule).
+- The dashboard accepts a token (stored in `localStorage`), attaches it to every fetch and to the SSE
+  URL, and surfaces a clear `401` state.
 
-- filed by the repository owner,
-- unassigned,
-- not marked with the literal `[WIP]` marker in the title or body,
-- or explicitly opted in with an override label.
+## How the code works today (grounding)
 
-Manual run creation must keep using the existing explicit `POST /runs` / dashboard start path and must
-not be gated by these automatic-intake guards.
+- `src/api/server.ts` — Node built-in `http`, no framework. `createApiServer(orchestrator, options)`
+  returns a `Server`; `handle()` does linear route matching. SSE `GET /stream` is handled first
+  (`streamSse`), then `GET /health`, then the JSON routes, and finally a catch-all
+  `if (method === 'GET') return serveStatic(...)` serves the SPA bundle (incl. SPA-fallback for
+  extension-less routes like `/pipelines`, `/editor`). Errors flow through `sendError`, which maps
+  `ApiError.status` (verified: `ApiError` accepts any status, so `401` passes through cleanly) and
+  otherwise `500`.
+- `src/serve.ts` — builds the orchestrator via `buildOrchestrator(args)`, then
+  `createApiServer(orchestrator)` and `listen(server, args.port)`. `listen()` binds `127.0.0.1`
+  **and keeps doing so** (off-loopback binding is the separate networking issue). Prints a boot
+  banner + route list.
+- `src/build-runner.ts` — has the `resolveConcurrency` / `resolveCostCeiling` / `resolveDefaultHarness`
+  pattern (flag → env → default). New token resolution follows the same shape.
+- `src/cli-args.ts` — `parseArgs`-based; add a flag here.
+- `dashboard/src/lib/api.ts` — `request(method, path, body)` thin fetch wrapper; throws `Error` from
+  the `{ error }` body.
+- `dashboard/src/lib/store.svelte.ts` — `connectStream()` opens `new EventSource('/stream')`; all data
+  actions call `request(...)`. `ui` is the single reactive `$state` object.
+- `dashboard/src/App.svelte` — `onMount` loads config/runs/etc then `connectStream()`; renders the
+  topbar with a live-connection chip.
+- `src/api/server.test.ts` — drives the real server over an ephemeral port with `fetch` on the stub
+  executor. `start()` helper builds the server via `createApiServer(orchestrator, opts.publicDir ? …)`.
+- Pattern precedent: pure, unit-tested helper modules (`static.ts`'s `resolveStaticPath`, `render.ts`,
+  `model-picker.ts`) — the auth logic will follow this so the constant-time comparison is testable in
+  isolation.
 
-## PR Feedback Re-plan
+## Approach & architecture
 
-This run is revising an existing PR after reviewer feedback that the branch did not clearly gate
-automatic pickup by the six issue-eligibility requirements. The implementation stage should treat the
-following as the acceptance checklist for resolving that feedback, not as optional polish:
+### 1. New pure auth module — `src/api/auth.ts` (+ `src/api/auth.test.ts`)
 
-- automatic intake must evaluate owner, assignee, `[WIP]`, and override-label state before calling
-  `RunStarter.start`;
-- non-owner, assigned, and `[WIP]` issues must produce skip decisions and operator-visible log text;
-- the configured override label, defaulting to `agent help wanted`, must bypass every guard;
-- manual start paths must remain outside this policy.
+Small, dependency-light, unit-testable functions (no `http`/`process` coupling):
 
-## Current State
+- `tokenMatches(provided: string | undefined, expected: string): boolean` — **constant-time**.
+  Implementation: SHA-256 both values (`node:crypto` `createHash`) to fixed 32-byte digests, then
+  `timingSafeEqual`. Hashing to a fixed length sidesteps `timingSafeEqual`'s equal-length requirement
+  and avoids leaking the token length. Returns `false` for an absent/empty `provided`.
+- `extractToken(headers, url): string | undefined` — reads `Authorization: Bearer <token>` first;
+  falls back to the `?token=` query param (needed for SSE — browser `EventSource` can't set headers;
+  harmless to also accept on other routes). (Cookie support is explicitly *not* added — the query
+  param is the KISS path the issue permits.)
+- `requiresAuth(path: string): boolean` — the auth boundary. Returns `true` for the API surface,
+  `false` for `/health` and static/SPA paths so the dashboard can bootstrap. Implemented as an
+  explicit allowlist of API path prefixes (`/runs`, `/repos`, `/config`, `/cost`, `/models`,
+  `/settings`, `/suggestions`, `/scheduler`, `/fs`, `/stream`) — `path === p || path.startsWith(p + '/')`.
+  `/health` is deliberately excluded (stays open). Everything else falls to static.
+  - *Why an allowlist and not "gate everything except static":* the routing is linear and static is
+    the catch-all fall-through, so there's no clean "is this static?" predicate without replaying the
+    route table. An explicit prefix list is simplest and directly unit-testable. Risk (a future API
+    route added without updating the list would be unauthed) is mitigated by a test asserting each
+    known API prefix requires auth.
 
-- Continuous mode already has a pure decision core in `src/loop/issue-intake.ts` and an impure polling
-  driver in `src/loop/issue-intake-poller.ts`.
-- Watched repositories are stored on `repos.watch`; the repo row also has `watch_label`, exposed as
-  `Repo.watchLabel` in `src/store/repository.ts`.
-- The API route `POST /repos/watch` already accepts an optional `label` field, so per-repo override
-  label configuration can stay backend/API-scoped. The dashboard watch button can remain an on/off
-  control for this issue.
-- The GitHub adapter surface already separates run issue reads from watch-list reads:
-  `GitHub.listOpenIssues()` returns author, assignees, and labels on `RepoIssue`, while
-  `readIssue()` remains the lean run input path.
-- The real CLI adapter can fetch the needed fields with `gh issue list --json
-  number,title,body,author,assignees,labels`; the fake adapter can seed the same fields for tests.
+### 2. Wire the token into the server — `src/api/server.ts`
 
-## Approach
+- Extend `ApiServerOptions` with `apiToken?: string`.
+- In `handle()`, immediately after computing `method`/`path`/`url` and **before** any route dispatch
+  or body reads: if `apiToken` is a non-empty string **and** `requiresAuth(path)` **and**
+  `!tokenMatches(extractToken(req.headers, url), apiToken)` → `throw new ApiError(401, 'authentication required')`
+  (message `'invalid token'` when a token was supplied — both `401`, message-only difference). Throwing
+  lets the existing `.catch(sendError)` produce the JSON `{ error }` body with status `401`.
+  - Gating before body parsing means unauthenticated POSTs are rejected without consuming/parsing the
+    body.
+  - The SSE branch runs after this gate, so `GET /stream` is covered by the same check.
+- Absent/empty `apiToken` ⇒ the whole block is skipped ⇒ current behaviour preserved.
 
-Keep the policy in a small, deterministic function and keep side effects in the poller:
+### 3. Resolve + thread the token — `src/build-runner.ts`, `src/cli-args.ts`, `src/serve.ts`
 
-1. Implement or preserve `decideIntake(openIssues, runStatusByRef, policy)` in
-   `src/loop/issue-intake.ts`.
-   - This is the required gate for issue #3; do not rely on GitHub search filters, labels alone, or
-     tests that only cover sequential pickup.
-   - Sort new candidates by issue number so automatic pickup is deterministic and oldest-first.
-   - Deduplicate issues that already have any run row; non-`stopped` runs count against the in-flight
-     cap, while `stopped` frees the slot but does not allow the same open issue to be re-picked.
-   - Apply the guards only to automatic candidates with no existing run.
-   - Treat the override label as a bypass for all guards, matched case-insensitively.
-   - Use `agent help wanted` as `DEFAULT_WATCH_LABEL`.
-   - Return skipped issues with human-readable reasons that include the concrete guard and the label
-     hint operators can use to override.
+- `cli-args.ts`: add `apiToken?: string` to `CliArgs` and an `'api-token': { type: 'string' }` option;
+  map `values['api-token']`.
+- `build-runner.ts`: add `resolveApiToken(args): string | undefined` mirroring `resolveCostCeiling` —
+  precedence `--api-token` flag → `FLEET_API_TOKEN` env → `undefined` (auth off). Empty string treated
+  as unset.
+- `serve.ts`: `const apiToken = resolveApiToken(args); const server = createApiServer(orchestrator,
+  { apiToken });`. Add one boot-banner line indicating whether auth is **on** or **off** (never print
+  the token). Keep the `listen()` loopback bind and its comment (off-loopback is the networking issue);
+  optionally soften the comment to note auth now exists but binding is still loopback pending #16.
 
-2. Wire the poller in `src/loop/issue-intake-poller.ts`.
-   - Scan only `repo.watch === true` repositories and continue skipping repos with no configured
-     working-directory source.
-   - Resolve the owner from the canonical repo ref's first path segment, and resolve the override label
-     as `repo.watchLabel ?? DEFAULT_WATCH_LABEL`.
-   - Build the latest status map from existing runs for that repo and pass it to `decideIntake`.
-   - Only call `RunStarter.start` for `plan.start`; guarded issues must never reach the existing run
-     admission path unless they have the override label.
-   - Start at most one selected issue through the existing `RunStarter.start({ issueRef })` path so
-     manual run admission, duplicate-run checks, enrollment checks, and cost ceiling behavior remain
-     unchanged.
-   - Log skipped issues as `[issue-intake] skipping <ref>: <reason>`, de-duplicated across ticks while
-     the skip remains current, and record an activity log on runs that were auto-picked.
+### 4. Dashboard client — `dashboard/`
 
-3. Ensure the store and API keep the override label configurable per repository.
-   - Keep `repos.watch_label` in `src/store/schema.sql` and the additive migration in
-     `src/store/migrations.ts`.
-   - Keep `Repo.watchLabel` mapping and `Repository.setRepoWatch(repoRef, watch, label?)`, where
-     omitted means "leave existing label unchanged" and `null` means "reset to the default label".
-   - Keep `Orchestrator.setRepoWatch` validating enrolled/configured repos before turning watch on.
-   - Keep `POST /repos/watch` accepting `{ repoRef, watch, label? }` and validating that `label` is a
-     string, `null`, or omitted.
+- New tiny token module (e.g. `dashboard/src/lib/auth.ts`): `getToken()`/`setToken()`/`clearToken()`
+  backed by `localStorage['fleet_api_token']`, plus a pure `withToken(path)` helper that appends
+  `?token=` for the SSE URL (unit-testable). Keeping the URL/header building pure lets a small vitest
+  cover it (mirrors `model-picker.test.ts`).
+- `api.ts` `request()`: attach `Authorization: Bearer <token>` header when a token is stored. On a
+  `401` response, flag an auth-required state (throw a recognizable error / set a store flag) so the UI
+  can prompt.
+- `store.svelte.ts`: add `ui.authRequired` (boolean). In the `request` 401 path (or a wrapper), set it.
+  `connectStream()` builds the `EventSource` URL via `withToken('/stream')` so the stream carries the
+  token. Note: `EventSource` can't read the HTTP status, so an SSE `401` only surfaces as `onerror`
+  (→ `conn: 'off'`); the fetch routes (loadConfig/loadRuns on mount) surface the `401` first and drive
+  the prompt, so this is acceptable — documented in code.
+- `App.svelte` (or a small `TokenPrompt.svelte`): when `ui.authRequired`, show a minimal overlay/banner
+  to enter a token; on submit → `setToken()`, clear the flag, re-run the mount loads
+  (`loadConfig`/`loadRuns`/…) and reconnect the stream. Also allow clearing the token.
+- Dev proxy (`dashboard/vite.config.ts`): no change required — Vite's proxy forwards query params and
+  the `Authorization` header by default; `/stream` is already proxied.
 
-4. Keep manual run creation unchanged.
-   - Do not add these guards to `Orchestrator.start`, `POST /runs`, the new-run dashboard bar, or
-     `GitHub.readIssue`.
-   - The guards live only in the watch/intake path.
+### 5. Docs
 
-5. Update operator documentation if needed.
-   - `README.md` should explain the automatic-intake guards, the default override label, the `label`
-     field on `POST /repos/watch`, and that skipped issues are logged with reasons.
+- `.env.example`: add `FLEET_API_TOKEN=` with a comment (absent ⇒ auth disabled / localhost-only;
+  set ⇒ all API + SSE routes require `Authorization: Bearer` or `?token=`).
+- `README.md` §9 (the `serve` daemon paragraph ~line 544 and §9.1 secrets ~line 708): document the
+  token env var, that it's env-only (never SQLite), how clients authenticate (Bearer header; `?token=`
+  for the SSE/`EventSource`), that `/health` stays open, that static assets stay open for SPA
+  bootstrap, and that the loopback bind is unchanged pending the networking issue (#16).
 
-## Files and Areas
+## Files to change
 
-- `src/loop/issue-intake.ts` - pure eligibility and in-flight decision logic.
-- `src/loop/issue-intake-poller.ts` - watched repo scan, owner/label policy resolution, skip logging,
-  and run start call.
-- `src/integration/github.ts` - `RepoIssue` shape and `GitHub.listOpenIssues()` contract.
-- `src/integration/github-cli.ts` - real `gh issue list` field mapping.
-- `src/integration/github-fake.ts` - fake issue seeding and list projection for tests.
-- `src/store/schema.sql`, `src/store/migrations.ts`, `src/store/repository.ts` - per-repo watch label
-  persistence and mapping.
-- `src/api/orchestrator.ts`, `src/api/server.ts` - `POST /repos/watch` validation and label plumbing.
-- Tests in `src/loop/issue-intake.test.ts`, `src/loop/issue-intake-poller.test.ts`,
-  `src/store/repository.test.ts`, `src/api/orchestrator.test.ts`, `src/api/server.test.ts`, and adapter
-  tests where applicable.
-- `README.md` - operator-facing continuous mode notes.
+- `src/api/auth.ts` — **new** (pure auth helpers).
+- `src/api/auth.test.ts` — **new** (constant-time compare, extract, requiresAuth).
+- `src/api/server.ts` — `ApiServerOptions.apiToken`, auth gate in `handle()`.
+- `src/api/server.test.ts` — auth-off passthrough, auth-on reject/accept for a normal route + `/stream`,
+  `/health` open.
+- `src/cli-args.ts` — `--api-token` flag + `CliArgs.apiToken`.
+- `src/build-runner.ts` — `resolveApiToken`.
+- `src/serve.ts` — resolve token, pass to `createApiServer`, boot-log auth on/off.
+- `dashboard/src/lib/auth.ts` — **new** (token storage + URL helper).
+- `dashboard/src/lib/auth.test.ts` — **new** (pure URL/header helper) *(optional but preferred)*.
+- `dashboard/src/lib/api.ts` — attach header, detect 401.
+- `dashboard/src/lib/store.svelte.ts` — `ui.authRequired`, tokenized stream URL, re-auth flow.
+- `dashboard/src/App.svelte` (+ optional `TokenPrompt.svelte`) — token prompt / 401 state.
+- `.env.example`, `README.md` — docs.
 
-No frontend changes are required for the acceptance criteria: the existing dashboard watch toggle can
-continue toggling watch state, while custom override labels are configured through the API. If a later
-product request asks for label editing in the dashboard, that should be a separate frontend change.
+## Risks & edge cases
 
-## Risks and Edge Cases
+- **Must not break the auth-off default.** Every existing `server.test.ts` call sends no token; with
+  `apiToken` unset the gate is skipped, so all stay `200`. This is the primary regression guard.
+- **Constant-time / length leak.** Use SHA-256 digests + `timingSafeEqual`; never a plain `===` or a
+  raw `timingSafeEqual` on unequal-length buffers (throws / leaks length).
+- **SSE 401 in the browser.** `EventSource` can't surface the status; rely on the fetch routes to drive
+  the prompt. Documented, not worked around (WebSocket/cookie upgrades are out of scope).
+- **`?token=` in URLs** can appear in logs/referrers — accepted for the `EventSource` limitation the
+  issue calls out; the Bearer header remains primary for normal fetches.
+- **Static assets stay open by design** — gating them would prevent the SPA from loading to enter the
+  token. Matches the issue wording ("all API routes"), and the assets aren't secret.
+- **New API routes** added later must be added to the `requiresAuth` allowlist — covered by a test that
+  asserts the known API prefixes require auth (and `/health` does not).
+- **Keep the tree clean:** no lockfile churn (no new deps — `node:crypto` is built in), no build output.
 
-- Owner comparison should be case-insensitive because GitHub owner/repo refs are effectively
-  case-insensitive.
-- `[WIP]` matching should be case-insensitive but require the literal bracketed marker; do not reject
-  unrelated text like "wip" without brackets.
-- The override label should bypass all guards, including non-owner authors, assigned issues, and WIP
-  issues.
-- Skip logging must not spam every poll tick, but it should log again if an issue stops being skipped
-  and later becomes skipped again.
-- A repo with a large open backlog may be page-limited by the GitHub CLI adapter; keep the page bound
-  explicit and deterministic, and let later ticks handle more issues as the slot clears.
-- Do not store secrets or GitHub tokens in repo settings; the new setting is only a label string.
-- Avoid SQL teardown in tests. Use in-memory stores and seeded fakes rather than destructive database
-  cleanup.
+## Testing
 
-## Testing Plan
+- **Unit (`src/api/auth.test.ts`):** `tokenMatches` accepts the exact token, rejects wrong/empty/undefined,
+  and rejects a token that is a prefix/superset (fixed-length digest); `extractToken` reads Bearer and
+  `?token=`; `requiresAuth` is true for each API prefix and false for `/health` and static paths.
+- **Integration (`src/api/server.test.ts`):**
+  - *auth-off passthrough* — server without a token: a normal route + `/stream` succeed (existing
+    behaviour).
+  - *auth-on reject/accept (normal route)* — `GET /runs` with no token → `401`, wrong token → `401`,
+    correct `Authorization: Bearer` → `200`.
+  - *auth-on reject/accept (`/stream`)* — `GET /stream` with no token → `401`; with `?token=<correct>`
+    → `200` + `text/event-stream`.
+  - *`/health` open* — `200` even with auth on and no token.
+- **Dashboard unit** *(optional)* — the pure `withToken`/header helper attaches the token.
+- **End-to-end (verify):** run a token-protected daemon (`FLEET_API_TOKEN=…`), confirm the dashboard
+  prompts, authenticates, loads data, and the live stream connects; `npm test` + lint green.
 
-- Unit-test `decideIntake` for eligible admission, deterministic oldest-first selection, one issue per
-  pass, in-flight cap behavior, deduplication against existing runs, owner-only guard, assigned guard,
-  `[WIP]` title/body guard, and override-label bypass including custom/case-insensitive labels.
-- Poller tests with the real in-memory repository plus `FakeGitHub` should verify watched-only scans,
-  automatic start through `RunStarter`, sequential behavior across passes, skip logging de-duplication,
-  relogging after a skip disappears and recurs, and multi-repo adapter isolation.
-- Store/API tests should verify `watchLabel` round-trips, re-enrolling a repo does not reset watch
-  settings, `POST /repos/watch` accepts a custom label, rejects invalid payloads, and still requires a
-  configured working directory before enabling watch.
-- Adapter tests should verify `GitHubCli.listOpenIssues()` maps `author`, `assignees`, and `labels`,
-  and `FakeGitHub.listOpenIssues()` returns the same fields while excluding closed issues.
-- Run `npm test`, `npm run typecheck`, and `npm run lint` after implementation. If dashboard code is
-  touched unexpectedly, also run `npm run check:dashboard`.
+## Scope flags
 
-## Scope Flags
-
-- `needs_backend: true` - all required behavior is in intake policy, poller, GitHub adapter mapping,
-  repository/API settings, tests, and docs.
-- `needs_frontend: false` - custom label configuration is available through the existing backend API;
-  no UI behavior is required to satisfy the issue.
+- `needs_backend: true` — server auth gate, serve/build-runner/cli-args wiring, new auth module + tests.
+- `needs_frontend: true` — dashboard token storage, header/stream wiring, 401 prompt UI.
