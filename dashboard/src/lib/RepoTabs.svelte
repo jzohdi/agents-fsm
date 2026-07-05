@@ -35,8 +35,11 @@
       </button>
     {/if}
     {#each summaries as s (s.repoRef)}
-      <button type="button" class="af-repotab" class:on={ui.repoFilter === s.repoRef} onclick={() => setRepoFilter(s.repoRef)}>
-        <span class="nm">{s.repoRef}</span>
+      <!-- The owner prefix is de-emphasized (and dropped entirely on phones — the title keeps the
+           full ref): the repo name is what the operator scans for. -->
+      {@const slash = s.repoRef.indexOf('/')}
+      <button type="button" class="af-repotab" class:on={ui.repoFilter === s.repoRef} title={s.repoRef} onclick={() => setRepoFilter(s.repoRef)}>
+        <span class="nm">{#if slash > 0}<span class="own">{s.repoRef.slice(0, slash + 1)}</span>{s.repoRef.slice(slash + 1)}{:else}{s.repoRef}{/if}</span>
         <span class="ct">{s.active}</span>
         {#if s.needsHuman > 0}<span class="warn">{s.needsHuman}⚠</span>{/if}
       </button>

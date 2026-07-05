@@ -12,9 +12,9 @@ import type { AgentsConfig } from '../fsm/config';
 import { FakeGitHub } from '../integration/github-fake';
 import { openDb } from '../store/db';
 import { Repository, type Run, type Transition } from '../store/repository';
-import { StubExecutor, type AgentRunRequest, type StageExecutor, type StubHandler } from './executor';
+import { StubExecutor, goldenPathHandler, type AgentRunRequest, type StageExecutor, type StubHandler } from './executor';
 import { HarnessRegistry } from './harness';
-import { AgentRunner, phaseModel, reentryContext, type AgentRunnerOptions } from './runner';
+import { AgentRunner, chatCommitMessage, chatResponseText, phaseModel, reentryContext, type AgentRunnerOptions } from './runner';
 import { ADDRESSING_PR_FEEDBACK_FLAG } from '../loop/event-loop';
 
 describe('phaseModel', () => {
@@ -742,5 +742,159 @@ describe('AgentRunner — re-entry context delivery', () => {
 
     expect(seen.length).toBeGreaterThan(0);
     for (const input of seen) expect('reentry' in input).toBe(false);
+  });
+});
+
+describe('AgentRunner.resolveConflicts (standalone dedicated resolver)', () => {
+  it('up to date → resolved with no agent call and no push', async () => {
+    const { runner, run, github } = setup(goldenPathHandler);
+    const before = github.commitCount();
+    const outcome = await runner.resolveConflicts(run); // fake default sync = up_to_date
+    expect(outcome).toEqual({ kind: 'resolved' });
+    expect(github.commitCount()).toBe(before); // nothing pushed
+  });
+
+  it('a clean base merge is pushed (no later stage will), then resolved', async () => {
+    const { runner, run, github } = setup(goldenPathHandler);
+    github.queueBaseSync({ result: 'merged', conflictFiles: [] });
+    const before = github.commitCount();
+    const outcome = await runner.resolveConflicts(run);
+    expect(outcome).toEqual({ kind: 'resolved' });
+    expect(github.commitCount()).toBe(before + 1); // commitAndPush pushed the clean merge
+  });
+
+  it('pre-approves the resolver’s edit tools (Edit/Write, no Bash) so a headless run never stalls on a prompt', async () => {
+    let resolverReq: AgentRunRequest | undefined;
+    const { runner, run, github } = setup((req) => {
+      if (req.stage === 'resolve_conflicts') resolverReq = req;
+      return goldenPathHandler(req);
+    });
+    github.queueBaseSync({ result: 'conflict', conflictFiles: ['x.ts'] });
+    await runner.resolveConflicts(run);
+
+    expect(resolverReq?.allowedTools).toContain('Edit');
+    expect(resolverReq?.allowedTools).toContain('Write');
+    expect(resolverReq?.allowedTools).not.toContain('Bash'); // must not disturb the in-progress merge
+  });
+
+  it('a conflict runs the resolver + finish; a verification miss escalates with the evidence (tree aborted)', async () => {
+    const { runner, run, github } = setup(goldenPathHandler);
+    github.queueBaseSync({ result: 'conflict', conflictFiles: ['x.ts'] });
+    github.finishBaseMergeResult = { ok: false, unresolved: ['x.ts'] };
+    const outcome = await runner.resolveConflicts(run);
+    expect(outcome).toMatchObject({ kind: 'escalate', reason: { kind: 'merge_conflict', resolutionAttempted: true, unresolved: ['x.ts'] } });
+    expect(github.abortedMerges).toEqual([run.id]);
+  });
+});
+
+describe('AgentRunner — run chat (the operator side channel)', () => {
+  const chatReply = (text: string): StubHandler => () => ({ output: { response: text }, tokens: 7, cost: 0.02 });
+
+  function chatExchange(repo: Repository, run: Run, prompt: string, mode: 'read' | 'write') {
+    const exchange = repo.createChatExchange({ runId: run.id, prompt, mode });
+    // The orchestrator's pump claims before running; mirror that so the runner sees a `running` row.
+    repo.setRunStatus(run.id, mode === 'write' ? 'paused' : run.status);
+    return repo.claimNextChatExchange() ?? exchange;
+  }
+
+  it('read mode: answers with the read-only tool grant, in the run tree, without committing', async () => {
+    const requests: AgentRunRequest[] = [];
+    const { repo, runner, run, github } = setup((req) => {
+      requests.push(req);
+      return { output: { response: 'The PR adds a retry loop.' }, tokens: 7, cost: 0.02 };
+    });
+    const exchange = chatExchange(repo, run, 'what does the PR change?', 'read');
+
+    const result = await runner.runChat(run, exchange);
+
+    expect(result).toEqual({ response: 'The PR adds a retry loop.', tokens: 7 });
+    const req = requests[0]!;
+    expect(req.stage).toBe('chat');
+    expect(req.phase).toBe('produce');
+    expect(req.allowedTools).toEqual(['Read', 'Grep', 'Glob', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)', 'Bash(git status:*)']);
+    expect(req.workingDir).toBeTruthy(); // never the daemon's own cwd (the M12 rule)
+    expect((req.input as { chat: { mode: string; prompt: string } }).chat).toMatchObject({ mode: 'read', prompt: 'what does the PR change?' });
+    // No write happened: nothing was committed to the fake.
+    expect(await github.readDiff({ workingDir: req.workingDir!, base: 'main', branch: repo.getRun(run.id)!.branch! })).toBe('');
+  });
+
+  it('write mode: grants edit tools, then commits and pushes the tree with the prompt as message', async () => {
+    const requests: AgentRunRequest[] = [];
+    const { repo, runner, run, github } = setup((req) => {
+      requests.push(req);
+      return { output: { response: 'Fixed the build.' }, tokens: 9 };
+    });
+    const exchange = chatExchange(repo, run, 'fix the failing build', 'write');
+
+    const result = await runner.runChat(repo.getRun(run.id)!, exchange);
+
+    expect(result.response).toBe('Fixed the build.');
+    expect(result.commitSha).toMatch(/^fakesha/);
+    expect(requests[0]!.allowedTools).toEqual(['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash']);
+    // The commit landed in the run's tree under the chat message.
+    const diff = await github.readDiff({ workingDir: requests[0]!.workingDir!, base: 'main', branch: repo.getRun(run.id)!.branch! });
+    expect(diff).toContain('[agent] chat: fix the failing build');
+  });
+
+  it('records chat telemetry and charges tokens/cost but never the run budget (agentRuns)', async () => {
+    const { repo, runner, run } = setup(chatReply('ok'));
+    const exchange = chatExchange(repo, run, 'q', 'read');
+
+    await runner.runChat(run, exchange);
+
+    const records = repo.listAgentRuns(run.id);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ stage: 'chat', phase: 'produce', tokens: 7, success: true });
+    const after = repo.getRun(run.id)!;
+    expect(after.tokensUsed).toBe(7);
+    expect(after.costUsed).toBeCloseTo(0.02);
+    expect(after.agentRunsCount).toBe(0); // chat spend must not eat the pipeline's stage budget
+  });
+
+  it('hands the run model override + prior completed exchanges to the invocation', async () => {
+    const requests: AgentRunRequest[] = [];
+    const { repo, runner, run } = setup((req) => {
+      requests.push(req);
+      return { output: { response: 'again: 42' } };
+    });
+    repo.setRunModelOverride(run.id, 'sonnet');
+    // A finished earlier exchange becomes conversation history; queued/cancelled ones never do.
+    const prior = repo.createChatExchange({ runId: run.id, prompt: 'what is 6×7?', mode: 'read' });
+    repo.claimNextChatExchange();
+    repo.completeChatExchange(prior.id, { response: '42' });
+    repo.cancelChatExchange(repo.createChatExchange({ runId: run.id, prompt: 'never ran', mode: 'read' }).id);
+    const exchange = chatExchange(repo, run, 'say it again', 'read');
+
+    await runner.runChat(repo.getRun(run.id)!, exchange);
+
+    expect(requests[0]!.model).toBe('sonnet');
+    const chat = (requests[0]!.input as { chat: { history: unknown[] } }).chat;
+    expect(chat.history).toEqual([{ mode: 'read', prompt: 'what is 6×7?', response: '42' }]);
+  });
+
+  it('records a failed invocation and rethrows so the pump can fail the exchange', async () => {
+    const { repo, runner, run } = setup(() => {
+      throw new Error('harness exploded');
+    });
+    const exchange = chatExchange(repo, run, 'q', 'read');
+
+    await expect(runner.runChat(run, exchange)).rejects.toThrow('harness exploded');
+    const records = repo.listAgentRuns(run.id);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ stage: 'chat', success: false });
+  });
+});
+
+describe('chatResponseText + chatCommitMessage (pure)', () => {
+  it('prefers the contract shape, falls back to plain text, and shows anything else as JSON', () => {
+    expect(chatResponseText({ response: '  All green. ' })).toBe('All green.');
+    expect(chatResponseText('plain words')).toBe('plain words');
+    expect(chatResponseText({ acceptable: true })).toBe('{\n  "acceptable": true\n}');
+  });
+
+  it('bounds the commit subject to the prompt’s first line', () => {
+    expect(chatCommitMessage('fix the build\nand more detail')).toBe('[agent] chat: fix the build');
+    const long = 'x'.repeat(100);
+    expect(chatCommitMessage(long)).toBe(`[agent] chat: ${'x'.repeat(71)}…`);
   });
 });

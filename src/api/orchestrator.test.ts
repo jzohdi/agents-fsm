@@ -1339,3 +1339,204 @@ describe('Orchestrator — repo merge-conflict policy', () => {
     expect(orchestrator.listRepos()[0]).toMatchObject({ conflictPolicy: 'auto' });
   });
 });
+
+describe('Orchestrator — resolve-conflicts escape hatch', () => {
+  async function doneRunWithPr(orchestrator: Orchestrator, repo: Repository) {
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle();
+    expect(repo.getRun(run.id)!.status).toBe('done');
+    expect(repo.getRun(run.id)!.prNumber).not.toBeNull();
+    return run;
+  }
+
+  it('kicks the dedicated resolver and drains the run back to done (regardless of policy)', async () => {
+    const { orchestrator, repo, github } = setup(); // repo unenrolled → default manual policy; the button overrides
+    const run = await doneRunWithPr(orchestrator, repo);
+    github.queueBaseSync({ result: 'conflict', conflictFiles: ['a.ts'] });
+
+    const returned = orchestrator.resolveConflicts(run.id);
+    expect(returned.currentState).toBe('resolve_conflicts'); // entered the dedicated stage immediately
+    await orchestrator.settle();
+
+    expect(repo.getRun(run.id)!.currentState).toBe('done');
+    expect(github.finishedMerges).toEqual([{ runId: run.id, branch: repo.getRun(run.id)!.branch }]); // resolved + pushed
+  });
+
+  it('404s an unknown run and 409s a run that is not finished / has no PR', async () => {
+    const { orchestrator } = setup();
+    expect(() => orchestrator.resolveConflicts(9999)).toThrow(ApiError);
+    const running = orchestrator.start({ issueRef: 'o/r#2' }); // running, no PR yet
+    expect(() => orchestrator.resolveConflicts(running.id)).toThrow(/not a finished|no PR/);
+  });
+});
+
+describe('Orchestrator — run chat (the operator side channel)', () => {
+  const flushChat = async (): Promise<void> => {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+  };
+
+  /** Golden-path stages + a canned chat reply, so chat tests read the response they expect. */
+  const withChat = (inner: StubHandler): StubHandler => (req) =>
+    req.stage === 'chat' ? { output: { response: 'ok — handled' }, tokens: 3 } : inner(req);
+
+  /** Stages gate (releasable) so a test can hold the pipeline mid-stage; chat prompts can gate too. */
+  class ChatGatedExecutor implements StageExecutor {
+    startedStages: string[] = [];
+    releaseChat: (() => void) | undefined;
+    gateStages = true;
+    private stageWaiters: Array<() => void> = [];
+    async run(req: AgentRunRequest): Promise<AgentRunResult> {
+      if (req.stage === 'chat') {
+        await new Promise<void>((resolve) => {
+          this.releaseChat = resolve;
+        });
+        return { output: { response: 'patched the build' }, usage: { tokens: 2 } };
+      }
+      this.startedStages.push(req.stage);
+      if (this.gateStages) {
+        await new Promise<void>((resolve) => {
+          this.stageWaiters.push(resolve);
+        });
+      }
+      const reply = goldenPathHandler(req);
+      return { output: reply.output, usage: { tokens: reply.tokens ?? 1 } };
+    }
+    releaseStages(): void {
+      const waiting = this.stageWaiters;
+      this.stageWaiters = [];
+      for (const release of waiting) release();
+    }
+  }
+
+  it('answers a read prompt immediately, while a stage is still in flight', async () => {
+    const executor = new ChatGatedExecutor();
+    const { orchestrator, repo } = setup({ executor });
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await flushChat();
+    expect(executor.startedStages).toEqual(['triage']); // a stage is mid-flight, gated
+
+    const sent = orchestrator.chat(run.id, { prompt: 'what does the PR change?', mode: 'read' });
+    expect(sent.status).toBe('running'); // dispatched synchronously — no waiting on the pipeline
+    await flushChat(); // let the chat invocation reach the (gated) harness
+    executor.releaseChat!();
+    await flushChat();
+
+    expect(repo.getChatExchange(sent.id)).toMatchObject({ status: 'done', response: 'patched the build', tokens: 2 });
+    expect(executor.startedStages).toEqual(['triage']); // the in-flight stage was never disturbed
+    expect(repo.getRun(run.id)!.status).toBe('running');
+
+    executor.gateStages = false;
+    for (let i = 0; i < 50 && repo.getRun(run.id)!.status !== 'done'; i++) {
+      executor.releaseStages();
+      await flushChat();
+    }
+    await orchestrator.settle();
+    expect(repo.getRun(run.id)!.status).toBe('done'); // chat never derailed the pipeline
+  });
+
+  it('holds a write prompt while the pipeline runs, then executes it at the pause point (commit + push)', async () => {
+    const { orchestrator, repo, events } = setup({
+      handler: withChat(golden_with_interrupt('plan', (id) => orchestrator.pause(id))),
+    });
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    const sent = orchestrator.chat(run.id, { prompt: 'fix the failing build', mode: 'write' });
+    expect(sent.status).toBe('queued'); // the run is running → held for the next pause point
+
+    await orchestrator.settle();
+
+    // The pause landed mid-plan (§2.3); the settling drain opened the write window and ran the chat.
+    expect(repo.getRun(run.id)!.status).toBe('paused');
+    const done = repo.getChatExchange(sent.id)!;
+    expect(done).toMatchObject({ status: 'done', response: 'ok — handled' });
+    expect(done.commitSha).toMatch(/^fakesha/); // the agent's tree changes were committed and pushed
+    // Every lifecycle step was streamed: queued → running → done.
+    const chatEvents = events.filter((e) => e.type === 'chat').map((e) => (e.type === 'chat' ? e.exchange.status : ''));
+    expect(chatEvents).toEqual(['queued', 'running', 'done']);
+  });
+
+  it('executes a write prompt right away on a finished (awaiting-review) run', async () => {
+    const { orchestrator, repo } = setup({ handler: withChat(goldenPathHandler) });
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle();
+    expect(repo.getRun(run.id)!.status).toBe('done'); // PR open, awaiting human review
+
+    const sent = orchestrator.chat(run.id, { prompt: 'address the nit on line 40', mode: 'write' });
+    expect(sent.status).toBe('running'); // done is a paused-like status with no stage in flight
+    await orchestrator.settle();
+    expect(repo.getChatExchange(sent.id)!.status).toBe('done');
+  });
+
+  it('gates stage dispatch while a write chat works the tree, and releases it when the chat finishes', async () => {
+    const executor = new ChatGatedExecutor();
+    const { orchestrator, repo } = setup({ executor });
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await flushChat();
+    orchestrator.pause(run.id); // halts the next dispatch; triage (in flight) finishes and honors it
+    executor.gateStages = false;
+    executor.releaseStages();
+    await orchestrator.settle();
+    expect(repo.getRun(run.id)!.status).toBe('paused');
+    expect(executor.startedStages).toEqual(['triage']);
+
+    const sent = orchestrator.chat(run.id, { prompt: 'refactor the config', mode: 'write' });
+    expect(sent.status).toBe('running'); // paused + idle → claimed immediately
+    await flushChat();
+
+    // The operator resumes while the chat agent still owns the tree: the pending stage must wait.
+    orchestrator.resume(run.id);
+    await flushChat();
+    expect(repo.getRun(run.id)!.status).toBe('running');
+    expect(executor.startedStages).toEqual(['triage']); // plan is NOT dispatched under the chat
+
+    executor.releaseChat!(); // the chat finishes → its pump re-kicks the event pump
+    await orchestrator.settle();
+    expect(repo.getChatExchange(sent.id)!.status).toBe('done');
+    expect(executor.startedStages).toContain('plan'); // dispatch resumed only after the chat released
+    expect(repo.getRun(run.id)!.status).toBe('done');
+  });
+
+  it('records a failed chat on the exchange without touching the run', async () => {
+    const { orchestrator, repo } = setup({
+      handler: (req) => {
+        if (req.stage === 'chat') throw new Error('harness exploded');
+        return goldenPathHandler(req);
+      },
+    });
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle();
+
+    const sent = orchestrator.chat(run.id, { prompt: 'q', mode: 'read' });
+    await orchestrator.settle();
+
+    expect(repo.getChatExchange(sent.id)).toMatchObject({ status: 'error', error: expect.stringContaining('harness exploded') });
+    expect(repo.getRun(run.id)!.status).toBe('done'); // the run is untouched by a chat failure
+  });
+
+  it('cancels a queued prompt, refuses to cancel a claimed/finished one, and validates input', async () => {
+    const executor = new ChatGatedExecutor();
+    const { orchestrator, repo } = setup({ executor });
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await flushChat(); // triage in flight keeps the run `running`, so a write prompt stays queued
+
+    const queued = orchestrator.chat(run.id, { prompt: 'later', mode: 'write' });
+    expect(queued.status).toBe('queued');
+    expect(orchestrator.cancelChat(run.id, queued.id).status).toBe('cancelled');
+    expect(() => orchestrator.cancelChat(run.id, queued.id)).toThrow(ApiError); // already cancelled → 409
+    expect(() => orchestrator.cancelChat(run.id, 9999)).toThrow(/not found/);
+
+    expect(() => orchestrator.chat(run.id, { prompt: '   ', mode: 'read' })).toThrow(/prompt is required/);
+    expect(() => orchestrator.chat(run.id, { prompt: 'p', mode: 'sudo' })).toThrow(/unknown chat mode/);
+    expect(() => orchestrator.chat(9999, { prompt: 'p', mode: 'read' })).toThrow(/not found/);
+
+    // The thread (including the cancelled prompt) rides along on the run detail.
+    expect(orchestrator.getRunDetail(run.id).chat.map((c) => c.status)).toEqual(['cancelled']);
+
+    executor.gateStages = false;
+    executor.releaseStages();
+    for (let i = 0; i < 50 && repo.getRun(run.id)!.status !== 'done'; i++) {
+      executor.releaseStages();
+      await flushChat();
+    }
+    await orchestrator.settle();
+  });
+});

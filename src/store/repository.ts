@@ -65,6 +65,43 @@ export interface RunScheduling {
 /** How an operator lets a run cross the global cost ceiling: one more stage, or the whole run. */
 export type CostOverride = 'next_step' | 'full';
 
+/** The permission grant a chat prompt runs under: `read` = read-only tools, dispatches immediately
+ *  (safe alongside an in-flight stage); `write` = edit tools, held until the run is parked. */
+export type ChatMode = 'read' | 'write';
+
+export type ChatStatus = 'queued' | 'running' | 'done' | 'error' | 'cancelled';
+
+/**
+ * One operator ↔ agent chat exchange on a run (the "general chat" side channel): the operator's
+ * prompt plus the agent's eventual reply. Lifecycle: `queued` → `running` → `done`/`error`, or
+ * `queued` → `cancelled` (an operator withdrawal; only a not-yet-claimed prompt can be cancelled).
+ */
+export interface ChatExchange {
+  id: number;
+  runId: number;
+  prompt: string;
+  mode: ChatMode;
+  status: ChatStatus;
+  /** The agent's reply (markdown), set when the exchange completes. */
+  response: string | null;
+  /** Why the exchange failed, set when status is `error`. */
+  error: string | null;
+  /** Write mode: the commit pushed after the agent worked (HEAD after commit-if-dirty + push). */
+  commitSha: string | null;
+  tokens: number;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+/**
+ * Run statuses a `write`-mode chat may execute under: the run is parked with no executor of its own
+ * (paused-like), so an agent editing its working tree cannot race an in-flight stage. Deliberately
+ * excludes `running` (the pipeline is advancing) and `blocked` (the Scheduler Poller may wake the run
+ * and *drop its working tree* at any tick — never edit a tree that can vanish underneath the agent).
+ */
+export const CHAT_WRITE_SAFE_STATUSES: readonly RunStatus[] = ['paused', 'needs_human', 'awaiting_input', 'done', 'stopped'];
+
 export interface Transition {
   id: number;
   runId: number;
@@ -281,6 +318,21 @@ interface ArtifactRow {
   created_at: string;
 }
 
+interface ChatRow {
+  id: number;
+  run_id: number;
+  prompt: string;
+  mode: ChatMode;
+  status: ChatStatus;
+  response: string | null;
+  error: string | null;
+  commit_sha: string | null;
+  tokens: number;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
 interface RepoRow {
   id: number;
   repo_ref: string;
@@ -361,6 +413,23 @@ function mapEvent(r: EventRowRaw): EventRow {
 
 function mapArtifact(r: ArtifactRow): Artifact {
   return { id: r.id, runId: r.run_id, kind: r.kind, locator: parseJson(r.locator), createdAt: r.created_at };
+}
+
+function mapChat(r: ChatRow): ChatExchange {
+  return {
+    id: r.id,
+    runId: r.run_id,
+    prompt: r.prompt,
+    mode: r.mode,
+    status: r.status,
+    response: r.response,
+    error: r.error,
+    commitSha: r.commit_sha,
+    tokens: r.tokens,
+    createdAt: r.created_at,
+    startedAt: r.started_at,
+    finishedAt: r.finished_at,
+  };
 }
 
 function mapRepo(r: RepoRow): Repo {
@@ -814,6 +883,12 @@ export class Repository {
    * only a run carrying a `cost_override` is dispatchable — every other run parks until the aggregate
    * clears or an operator overrides it. Off by default, so the ungated claim is unchanged.
    *
+   * Chat mutual exclusion: a run with a `write`-mode chat exchange mid-flight is not dispatchable —
+   * the chat agent is editing the run's working tree, and a stage starting under it would race the
+   * same tree (the mirror of {@link claimNextChatExchange}'s no-stage-in-flight predicate). Enforced
+   * here, inside the one atomic claim, so a `resume` landing while a chat works simply parks the
+   * pending event until the chat finishes (the Orchestrator re-kicks the pump then).
+   *
    * Dependency gate + dispatch order (Milestone 9 — the Scheduler slotting into this same point, as
    * promised above): a run with cached unsatisfied dependencies (`depends_on` non-empty and the
    * satisfaction latch unstamped) is never claimable — the correctness gate lives *here*, inside the
@@ -837,6 +912,9 @@ export class Repository {
              AND (runs.depends_on = '[]' OR runs.deps_satisfied_at IS NOT NULL)
              AND NOT EXISTS (
                SELECT 1 FROM events p WHERE p.run_id = events.run_id AND p.status = 'processing'
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM run_chat c WHERE c.run_id = events.run_id AND c.status = 'running' AND c.mode = 'write'
              )
              ${costGate}
            ORDER BY runs.priority DESC,
@@ -901,6 +979,100 @@ export class Repository {
    */
   recoverProcessingEvents(): number {
     const info = this.db.prepare("UPDATE events SET status = 'pending' WHERE status = 'processing'").run();
+    return info.changes;
+  }
+
+  // --- run chat (the per-run operator ↔ agent side channel) ---------------------
+
+  /** Enqueue a chat prompt on a run. Every exchange starts `queued`; the chat pump claims it when
+   *  its mode's safety conditions hold (see {@link claimNextChatExchange}). */
+  createChatExchange(input: { runId: number; prompt: string; mode: ChatMode }): ChatExchange {
+    const info = this.db
+      .prepare(`INSERT INTO run_chat (run_id, prompt, mode) VALUES (?, ?, ?)`)
+      .run(input.runId, input.prompt, input.mode);
+    return this.getChatExchange(Number(info.lastInsertRowid))!;
+  }
+
+  getChatExchange(id: number): ChatExchange | undefined {
+    const row = this.db.prepare('SELECT * FROM run_chat WHERE id = ?').get(id) as ChatRow | undefined;
+    return row ? mapChat(row) : undefined;
+  }
+
+  /** A run's chat exchanges, oldest first (the thread the dashboard renders). */
+  listChatExchanges(runId: number): ChatExchange[] {
+    const rows = this.db.prepare('SELECT * FROM run_chat WHERE run_id = ? ORDER BY id ASC').all(runId) as ChatRow[];
+    return rows.map(mapChat);
+  }
+
+  /**
+   * Atomically claim the oldest chat exchange that is **safe to run right now**, marking it
+   * `running`, or return undefined if none. One statement, like {@link claimNextEvent}, so the
+   * permission gate can never race a status change:
+   *
+   *  - One chat at a time per run (any mode) — the thread stays coherent and two chat agents never
+   *    share a working tree.
+   *  - `read` exchanges are always claimable: read-only tools cannot disturb an in-flight stage.
+   *  - `write` exchanges are claimable only while the run is parked in a paused-like status
+   *    ({@link CHAT_WRITE_SAFE_STATUSES}) **and** no stage event is `processing` — the exact mirror
+   *    of the claim gate that then refuses to dispatch a stage while this exchange runs.
+   */
+  claimNextChatExchange(): ChatExchange | undefined {
+    const writeSafe = CHAT_WRITE_SAFE_STATUSES.map((s) => `'${s}'`).join(', ');
+    const row = this.db
+      .prepare(
+        `UPDATE run_chat SET status = 'running', started_at = ${NOW}
+         WHERE id = (
+           SELECT c.id FROM run_chat c
+           JOIN runs ON runs.id = c.run_id
+           WHERE c.status = 'queued'
+             AND NOT EXISTS (SELECT 1 FROM run_chat r WHERE r.run_id = c.run_id AND r.status = 'running')
+             AND (
+               c.mode = 'read'
+               OR (
+                 runs.status IN (${writeSafe})
+                 AND NOT EXISTS (SELECT 1 FROM events e WHERE e.run_id = c.run_id AND e.status = 'processing')
+               )
+             )
+           ORDER BY c.id ASC
+           LIMIT 1
+         )
+         RETURNING *`,
+      )
+      .get() as ChatRow | undefined;
+    return row ? mapChat(row) : undefined;
+  }
+
+  /** Record a claimed exchange's reply (and usage / pushed commit) and mark it `done`. */
+  completeChatExchange(id: number, result: { response: string; tokens?: number; commitSha?: string | null }): void {
+    this.db
+      .prepare(`UPDATE run_chat SET status = 'done', response = ?, tokens = ?, commit_sha = ?, finished_at = ${NOW} WHERE id = ?`)
+      .run(result.response, result.tokens ?? 0, result.commitSha ?? null, id);
+  }
+
+  /** Mark a claimed exchange failed, with the cause the dashboard shows. */
+  failChatExchange(id: number, error: string): void {
+    this.db.prepare(`UPDATE run_chat SET status = 'error', error = ?, finished_at = ${NOW} WHERE id = ?`).run(error, id);
+  }
+
+  /** Cancel a still-`queued` exchange (an operator withdrawal). Returns false when it was already
+   *  claimed/finished — a running agent cannot be recalled, so only a parked prompt is cancellable. */
+  cancelChatExchange(id: number): boolean {
+    const info = this.db
+      .prepare(`UPDATE run_chat SET status = 'cancelled', finished_at = ${NOW} WHERE id = ? AND status = 'queued'`)
+      .run(id);
+    return info.changes === 1;
+  }
+
+  /**
+   * Re-queue chat exchanges stranded `running` by a crash/shutdown, mirroring
+   * {@link recoverProcessingEvents}: on the next start they are claimed and re-run from scratch —
+   * safe because a chat's side effects (tree edits + commit-if-dirty + push) are idempotent the same
+   * way a stage's are. Returns the number re-queued.
+   */
+  recoverRunningChats(): number {
+    const info = this.db
+      .prepare(`UPDATE run_chat SET status = 'queued', started_at = NULL WHERE status = 'running'`)
+      .run();
     return info.changes;
   }
 

@@ -6,6 +6,9 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  chatSchedulingHint,
+  chatWriteRunsNow,
+  formatChatReply,
   activityLane,
   branchUrl,
   escalationDetail,
@@ -576,5 +579,29 @@ describe('scheduling surfaces (Milestone 9)', () => {
       { id: 1, runId: 1, fromState: 'plan', toState: 'needs_human', trigger: 'dependency_cycle', reason: { issues: [1, 2] }, backEdge: false, counterKey: null, isReset: false, eventId: null, createdAt: '' } as Transition,
     ], 'needs_human');
     expect(model?.guidance).toContain('break the cycle');
+  });
+});
+
+describe('run chat helpers', () => {
+  it('chatWriteRunsNow: paused-like statuses only (mirrors the daemon gate)', () => {
+    for (const s of ['paused', 'needs_human', 'awaiting_input', 'done', 'stopped']) expect(chatWriteRunsNow(s), s).toBe(true);
+    for (const s of ['running', 'blocked', undefined]) expect(chatWriteRunsNow(s), String(s)).toBe(false);
+  });
+
+  it('chatSchedulingHint: read always answers now; write depends on where the run is parked', () => {
+    expect(chatSchedulingHint('read', 'running')).toContain('answers now');
+    expect(chatSchedulingHint('write', 'running')).toContain('held until the pipeline pauses');
+    expect(chatSchedulingHint('write', 'needs_human')).toContain('runs now');
+  });
+
+  it('formatChatReply: escapes everything, promotes code blocks / inline code / bold / paragraphs', () => {
+    expect(formatChatReply('a <script> tag')).toBe('<p>a &lt;script&gt; tag</p>');
+    expect(formatChatReply('one\ntwo\n\nthree')).toBe('<p>one<br>two</p><p>three</p>');
+    expect(formatChatReply('use `npm test` — it is **green**')).toBe('<p>use <code>npm test</code> — it is <strong>green</strong></p>');
+    expect(formatChatReply('fix:\n```ts\nconst a = 1 < 2;\n```\ndone')).toBe(
+      '<p>fix:</p><pre><code>const a = 1 &lt; 2;</code></pre><p>done</p>',
+    );
+    // Inline rules never reach inside a fenced block.
+    expect(formatChatReply('```\n**not bold** `not code`\n```')).toBe('<pre><code>**not bold** `not code`</code></pre>');
   });
 });

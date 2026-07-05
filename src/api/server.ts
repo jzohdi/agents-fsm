@@ -16,7 +16,9 @@
  *   POST /runs/:id/archive      POST /runs/:id/unarchive
  *   POST /runs/:id/cost-override POST /runs/:id/model
  *   POST /runs/:id/effort       POST /runs/:id/harness
+ *   POST /runs/:id/resolve-conflicts
  *   POST /runs/:id/check-pr-feedback   POST /runs/:id/check-reply
+ *   POST /runs/:id/chat         GET /runs/:id/chat          POST /runs/:id/chat/:chatId/cancel
  *   GET  /repos                 POST /repos                 POST /repos/watch
  *   POST /repos/source          (Milestone 12: bind clone-on-run / a local directory)
  *   GET  /fs/dirs[?q=]          (Milestone 12: path completions for the local-directory picker)
@@ -193,7 +195,7 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
   const runMatch = /^\/runs\/(\d+)$/.exec(path);
   if (runMatch && method === 'GET') return sendJson(res, 200, orch.getRunDetail(Number(runMatch[1])));
 
-  const actionMatch = /^\/runs\/(\d+)\/(pause|resume|stop|revert|archive|unarchive|cost-override|model|effort|harness)$/.exec(path);
+  const actionMatch = /^\/runs\/(\d+)\/(pause|resume|stop|revert|archive|unarchive|cost-override|model|effort|harness|resolve-conflicts)$/.exec(path);
   if (actionMatch && method === 'POST') {
     const id = Number(actionMatch[1]);
     switch (actionMatch[2]) {
@@ -245,7 +247,28 @@ async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerRespo
         // `harness`: re-point the run at another harness from its next stage on (clears model/effort overrides).
         return sendJson(res, 200, orch.setHarness(id, str(await readJson(req), 'harness')));
       }
+      case 'resolve-conflicts':
+        // Escape hatch: run the dedicated resolver on a finished run whose PR conflicts (any policy).
+        return sendJson(res, 200, orch.resolveConflicts(id));
     }
+  }
+
+  // --- run chat (the operator's per-run side channel): send a prompt (mode read = immediate,
+  // read-only tools; mode write = held until the pipeline pauses, then edit tools + commit/push),
+  // list the thread, or withdraw a still-queued prompt. Replies stream as `chat` events. ---
+  const chatMatch = /^\/runs\/(\d+)\/chat$/.exec(path);
+  if (chatMatch) {
+    const id = Number(chatMatch[1]);
+    if (method === 'GET') return sendJson(res, 200, orch.listChat(id));
+    if (method === 'POST') {
+      const body = await readJson(req);
+      return sendJson(res, 201, orch.chat(id, { prompt: str(body, 'prompt'), mode: str(body, 'mode') }));
+    }
+    return sendError(res, new ApiError(405, `method ${method} not allowed on /runs/:id/chat`));
+  }
+  const chatCancelMatch = /^\/runs\/(\d+)\/chat\/(\d+)\/cancel$/.exec(path);
+  if (chatCancelMatch && method === 'POST') {
+    return sendJson(res, 200, orch.cancelChat(Number(chatCancelMatch[1]), Number(chatCancelMatch[2])));
   }
 
   // --- on-demand PR-feedback check: poll one run's open PR now (the dashboard's "Check now") ---

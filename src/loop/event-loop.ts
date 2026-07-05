@@ -26,6 +26,36 @@ import { FatalExecutorError } from '../agent/executor';
 export const EVENT_ADVANCE = 'advance';
 
 /**
+ * Event type for a **standalone merge-conflict resolution** ({@link EventLoop.resolveMergeConflict}) —
+ * a finished run whose PR drifted into conflict with base. Unlike an {@link EVENT_ADVANCE}, this does
+ * NOT run the stage pipeline: it dispatches only the dedicated conflict resolver (merge base, resolve,
+ * push) and returns the run to the finished state it came from. Its payload carries `returnState` /
+ * `returnStatus` so recovery (and the success transition) knows where to send the run back.
+ */
+export const EVENT_RESOLVE_CONFLICTS = 'resolve_conflicts';
+
+/**
+ * The pseudo-state a run occupies **while** its merge conflict is being resolved. Not an FSM state:
+ * conflict resolution is a loop-owned control operation (like resume/revert), so the FSM engine never
+ * sees it. Reused as the `agent_runs.stage` label and the prompt-composition key for the resolver
+ * invocation, so telemetry and the dashboard read a clear "resolve_conflicts", not a masqueraded stage.
+ */
+export const RESOLVE_CONFLICTS_STATE = 'resolve_conflicts';
+
+/** Trigger on the control transition that *enters* {@link RESOLVE_CONFLICTS_STATE}. */
+export const RESOLVE_CONFLICTS_TRIGGER = 'resolve_conflicts';
+
+/** Trigger on the transition that returns a run to its finished state after conflicts were resolved. */
+export const RESOLVED_TRIGGER = 'resolved';
+
+/**
+ * Escalation trigger for a base-merge conflict the run could not (or, under `manual` policy, was not
+ * allowed to) resolve — a first-class cause label in the transition log, like `git_error`. Shared by
+ * the runner's between-stage sync and the loop's standalone {@link EventLoop.resolveMergeConflict}.
+ */
+export const MERGE_CONFLICT_TRIGGER = 'merge_conflict';
+
+/**
  * Trigger recorded on the self-transition that parks a run awaiting a human reply (triage `clarify`).
  * Its transition `reason` carries the data the Reply Poller anchors on (issue, question comment, bot
  * login), so the poller reads it straight from the log — no separate marker store.
@@ -461,6 +491,54 @@ export class EventLoop {
     return this.requireRun(runId);
   }
 
+  /**
+   * Resolve a **finished** run's merge conflict in place — a dedicated, self-contained operation, NOT
+   * a pipeline re-run. Used by the PR Feedback Poller (under `auto` policy) when a done run's PR turns
+   * CONFLICTING, and by the operator's "Resolve merge conflicts" button. It moves the run into the
+   * {@link RESOLVE_CONFLICTS_STATE} pseudo-state (status `running`) and enqueues an
+   * {@link EVENT_RESOLVE_CONFLICTS} event whose payload remembers where to send the run back — its
+   * current finished state/status — so a successful resolution returns it exactly there (a done run
+   * stays done, PR now mergeable), while a failed one escalates to `needs_human`. Like `resume`/`revert`
+   * this bypasses the FSM engine (a control action), so it needs no `src/fsm` change. A `reason` is
+   * required (recorded on the entering transition). Returns the updated run; the caller kicks the pump.
+   */
+  resolveMergeConflict(runId: number, reason: unknown): Run {
+    const run = this.repo.getRun(runId);
+    if (!run) throw new Error(`resolveMergeConflict: run ${runId} not found`);
+    if (run.status !== 'done' && run.status !== 'needs_human') {
+      throw new Error(`resolveMergeConflict: run ${runId} is "${run.status}", not a finished (done/needs_human) run`);
+    }
+    if (run.prNumber === null) throw new Error(`resolveMergeConflict: run ${runId} has no PR to resolve`);
+    if (reason === undefined || reason === null || reason === '') {
+      throw new Error('resolveMergeConflict: a reason is required');
+    }
+
+    const transition = this.repo.transaction(() => {
+      // A finished run holds no follow-up event, but discard defensively so the resolution is driven by
+      // exactly one fresh event (mirrors reopenForPrFeedback).
+      this.repo.discardPendingEvents(runId);
+      const t = this.repo.commitTransition({
+        runId,
+        fromState: run.currentState,
+        toState: RESOLVE_CONFLICTS_STATE,
+        trigger: RESOLVE_CONFLICTS_TRIGGER,
+        reason,
+        status: 'running',
+        eventId: null, // a control transition, not driven by an event
+      });
+      // Remember where to return once resolved: the run's finished state + status, carried on the event
+      // so it survives a crash/recovery and drives the success transition.
+      this.repo.enqueueEvent({
+        runId,
+        type: EVENT_RESOLVE_CONFLICTS,
+        payload: { returnState: run.currentState, returnStatus: run.status },
+      });
+      return t;
+    });
+    this.emit(transition, runId);
+    return this.requireRun(runId);
+  }
+
   private requireRun(runId: number): Run {
     const run = this.repo.getRun(runId);
     if (!run) throw new Error(`run ${runId} vanished`);
@@ -616,6 +694,11 @@ export class EventLoop {
     const run = this.repo.getRun(event.runId);
     if (!run) throw new Error(`applyEvent: run ${event.runId} not found`);
 
+    // Standalone merge-conflict resolution is a loop-owned operation, not a stage — it runs only the
+    // dedicated resolver, independent of the FSM (so it skips the config-version and budget guards,
+    // which are about running stages). Branch here before any of that stage machinery.
+    if (event.type === EVENT_RESOLVE_CONFLICTS) return this.applyConflictResolution(run, event);
+
     // Config-version pinning (README §3.3 Layer 2): a run uses the config version it
     // started under for its whole lifetime. This loop carries one config; if the run was
     // started under a different one, we must not silently apply these (possibly changed)
@@ -757,6 +840,52 @@ export class EventLoop {
       return t;
     });
 
+    this.emit(transition, run.id);
+  }
+
+  /**
+   * Dispatch a {@link EVENT_RESOLVE_CONFLICTS} event: run the dedicated conflict resolver, then return
+   * the run to the finished state it came from (carried on the event payload) on success, or escalate
+   * to `needs_human` on failure. No FSM, no pipeline — the run's disposition is unchanged, only its PR
+   * is made mergeable. Idempotent under recovery: a re-dispatched event re-runs the resolver, which is
+   * a cheap no-op once the branch already contains base.
+   */
+  private async applyConflictResolution(run: Run, event: EventRow): Promise<void> {
+    const payload = (event.payload ?? {}) as { returnState?: string; returnStatus?: string };
+    const returnState = payload.returnState ?? this.fsm.escalationState;
+    const returnStatus = (payload.returnStatus as RunStatus | undefined) ?? 'needs_human';
+
+    let outcome: { kind: 'resolved' } | { kind: 'escalate'; reason: unknown };
+    try {
+      outcome = await this.runner.resolveConflicts(run);
+    } catch (err) {
+      // Same shutdown rule as a stage: our own interruption must not park the run — leave the event
+      // `processing` for recovery to re-run.
+      if (this.shuttingDown) {
+        throw new ShutdownInterruptError(`conflict resolution for run ${run.id} interrupted by shutdown: ${String(err)}`);
+      }
+      if (err instanceof FatalExecutorError) throw err;
+      this.escalate(run, event, 'executor_error', { error: String(err) });
+      return;
+    }
+    if (outcome.kind === 'escalate') {
+      if (this.shuttingDown) {
+        throw new ShutdownInterruptError(`conflict resolution for run ${run.id} interrupted by shutdown (would have escalated)`);
+      }
+      this.escalate(run, event, MERGE_CONFLICT_TRIGGER, outcome.reason);
+      return;
+    }
+    // Resolved: the PR is mergeable again. Return the run to where it was (a done run stays done), a
+    // control transition out of the pseudo-state — no follow-up event, so the pipeline does not resume.
+    const transition = this.repo.commitTransition({
+      runId: run.id,
+      fromState: run.currentState, // RESOLVE_CONFLICTS_STATE
+      toState: returnState,
+      trigger: RESOLVED_TRIGGER,
+      reason: { kind: 'merge_conflict_resolved', prNumber: run.prNumber },
+      status: returnStatus,
+      eventId: event.id,
+    });
     this.emit(transition, run.id);
   }
 

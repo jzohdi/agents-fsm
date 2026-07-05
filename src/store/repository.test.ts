@@ -793,3 +793,119 @@ describe('scheduling cache + dependency gate (Milestone 9)', () => {
     expect(repo.findActiveRunByIssue('owner/repo#1')).toBeUndefined();
   });
 });
+
+describe('run chat (the per-run operator ↔ agent side channel)', () => {
+  it('creates a queued exchange and lists a run thread oldest-first', () => {
+    const run = newRun();
+    const a = repo.createChatExchange({ runId: run.id, prompt: 'what does the PR change?', mode: 'read' });
+    const b = repo.createChatExchange({ runId: run.id, prompt: 'fix the failing build', mode: 'write' });
+
+    expect(a).toMatchObject({ runId: run.id, prompt: 'what does the PR change?', mode: 'read', status: 'queued', response: null, error: null, commitSha: null, tokens: 0 });
+    expect(repo.listChatExchanges(run.id).map((c) => c.id)).toEqual([a.id, b.id]);
+    expect(repo.getChatExchange(999)).toBeUndefined();
+  });
+
+  it('claims a read exchange even while a stage event is processing', () => {
+    const run = newRun();
+    repo.enqueueEvent({ runId: run.id, type: 'advance' });
+    expect(repo.claimNextEvent()).toBeDefined(); // a stage is now in flight
+    const chat = repo.createChatExchange({ runId: run.id, prompt: 'q', mode: 'read' });
+
+    const claimed = repo.claimNextChatExchange();
+    expect(claimed?.id).toBe(chat.id);
+    expect(claimed?.status).toBe('running');
+    expect(claimed?.startedAt).not.toBeNull();
+  });
+
+  it('holds a write exchange until the run is parked with no stage in flight', () => {
+    const run = newRun(); // status running
+    repo.enqueueEvent({ runId: run.id, type: 'advance' });
+    const event = repo.claimNextEvent()!; // stage in flight
+    const chat = repo.createChatExchange({ runId: run.id, prompt: 'fix it', mode: 'write' });
+
+    expect(repo.claimNextChatExchange()).toBeUndefined(); // running status → held
+    repo.setRunStatus(run.id, 'paused');
+    expect(repo.claimNextChatExchange()).toBeUndefined(); // paused but the stage is still mid-flight
+    repo.markEventDone(event.id);
+    expect(repo.claimNextChatExchange()?.id).toBe(chat.id); // parked + idle → claimable
+  });
+
+  it('claims write exchanges in every paused-like status, never running/blocked', () => {
+    const claimable = (status: string) => {
+      const run = newRun();
+      repo.setRunStatus(run.id, status as never);
+      repo.createChatExchange({ runId: run.id, prompt: 'p', mode: 'write' });
+      const claimed = repo.claimNextChatExchange();
+      if (claimed) repo.completeChatExchange(claimed.id, { response: 'ok' }); // clear for the next case
+      return claimed !== undefined;
+    };
+    expect(claimable('running')).toBe(false);
+    expect(claimable('blocked')).toBe(false);
+    for (const status of ['paused', 'needs_human', 'awaiting_input', 'done', 'stopped']) {
+      expect(claimable(status), status).toBe(true);
+    }
+  });
+
+  it('runs one chat at a time per run, in FIFO order', () => {
+    const run = newRun();
+    repo.setRunStatus(run.id, 'paused');
+    const first = repo.createChatExchange({ runId: run.id, prompt: 'one', mode: 'read' });
+    const second = repo.createChatExchange({ runId: run.id, prompt: 'two', mode: 'write' });
+
+    expect(repo.claimNextChatExchange()?.id).toBe(first.id);
+    expect(repo.claimNextChatExchange()).toBeUndefined(); // first is still running
+    repo.completeChatExchange(first.id, { response: 'answer', tokens: 12 });
+    expect(repo.claimNextChatExchange()?.id).toBe(second.id);
+  });
+
+  it('blocks stage dispatch while a write chat runs, and never for a read chat', () => {
+    const run = newRun();
+    repo.setRunStatus(run.id, 'paused');
+    const write = repo.createChatExchange({ runId: run.id, prompt: 'w', mode: 'write' });
+    expect(repo.claimNextChatExchange()?.id).toBe(write.id);
+
+    // The operator resumes mid-chat: the pending event must park until the write chat finishes.
+    repo.setRunStatus(run.id, 'running');
+    repo.enqueueEvent({ runId: run.id, type: 'advance' });
+    expect(repo.claimNextEvent()).toBeUndefined();
+    repo.completeChatExchange(write.id, { response: 'done', commitSha: 'abc123' });
+    expect(repo.claimNextEvent()).toBeDefined();
+    expect(repo.getChatExchange(write.id)).toMatchObject({ status: 'done', response: 'done', commitSha: 'abc123' });
+
+    // A running *read* chat never gates dispatch.
+    repo.recoverProcessingEvents();
+    const read = repo.createChatExchange({ runId: run.id, prompt: 'r', mode: 'read' });
+    expect(repo.claimNextChatExchange()?.id).toBe(read.id);
+    expect(repo.claimNextEvent()).toBeDefined();
+  });
+
+  it('completes, fails, and cancels exchanges through their lifecycle', () => {
+    const run = newRun();
+    repo.setRunStatus(run.id, 'paused');
+    const chat = repo.createChatExchange({ runId: run.id, prompt: 'p', mode: 'read' });
+
+    // Only a queued exchange is cancellable.
+    expect(repo.claimNextChatExchange()?.id).toBe(chat.id);
+    expect(repo.cancelChatExchange(chat.id)).toBe(false);
+    repo.failChatExchange(chat.id, 'boom');
+    expect(repo.getChatExchange(chat.id)).toMatchObject({ status: 'error', error: 'boom' });
+
+    const queued = repo.createChatExchange({ runId: run.id, prompt: 'q', mode: 'write' });
+    expect(repo.cancelChatExchange(queued.id)).toBe(true);
+    expect(repo.getChatExchange(queued.id)!.status).toBe('cancelled');
+    expect(repo.claimNextChatExchange()).toBeUndefined(); // a cancelled exchange is never claimed
+  });
+
+  it('re-queues exchanges stranded running by a crash (recoverRunningChats)', () => {
+    const run = newRun();
+    repo.setRunStatus(run.id, 'paused');
+    const chat = repo.createChatExchange({ runId: run.id, prompt: 'p', mode: 'write' });
+    expect(repo.claimNextChatExchange()?.id).toBe(chat.id);
+
+    expect(repo.recoverRunningChats()).toBe(1);
+    const recovered = repo.getChatExchange(chat.id)!;
+    expect(recovered.status).toBe('queued');
+    expect(recovered.startedAt).toBeNull();
+    expect(repo.claimNextChatExchange()?.id).toBe(chat.id); // claimable again
+  });
+});

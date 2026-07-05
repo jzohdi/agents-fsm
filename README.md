@@ -459,7 +459,7 @@ The build order puts the novel, high-risk core first (FSM engine, then event-dri
 
 ## 8. Implementation status
 
-**Done: Milestone 0 (Foundations), Milestone 1 (FSM engine), Milestone 2 (event loop + agent runner on stubs), Milestone 3 (integrations — Git/GitHub adapter + Claude Code subprocess executor), Milestone 4 (real agents), Milestone 5 (API + telemetry surface), Milestone 6 (local web dashboard), Milestone 7 (polish — transactional outbox, `needs_human` UX, operating guide), Milestone 8 (multi-repo + parallel execution — worker pool, concurrent crash-recovery, rate-limit retry, global cost ceiling), Milestone 9 (multi-issue async + dependency ordering — the Scheduler, issue markers, the dependency dispatch gate).**
+**Done: Milestone 0 (Foundations), Milestone 1 (FSM engine), Milestone 2 (event loop + agent runner on stubs), Milestone 3 (integrations — Git/GitHub adapter + Claude Code subprocess executor), Milestone 4 (real agents), Milestone 5 (API + telemetry surface), Milestone 6 (local web dashboard), Milestone 7 (polish — transactional outbox, `needs_human` UX, operating guide), Milestone 8 (multi-repo + parallel execution — worker pool, concurrent crash-recovery, rate-limit retry, global cost ceiling), Milestone 9 (multi-issue async + dependency ordering — the Scheduler, issue markers, the dependency dispatch gate), Milestone 11 (continuous mode — core shipped, §9.10), Milestone 12 (per-repo source binding). Plus cross-cutting features shipped on top of the milestones: multi-harness support (Claude Code + Cursor), PR-feedback re-entry, graceful shutdown, merge-conflict handling, and the per-run operator↔agent chat side channel. Not started: Milestone 10 (Claude Agent SDK stage executor). Remaining planned work is tracked as [GitHub issues](https://github.com/jzohdi/agents-fsm/issues) (see the "Remaining work" list at the end of this section).**
 
 - **Layer 1 — State Store** (`src/store/`): SQLite schema, `db.ts` connection/migration, and a typed `Repository`. Round counters are derived from the `transitions` log (`computeCounters`), never stored as mutable fields. `commitTransition` is transactional; the event queue supports atomic, status-gated claim.
 - **Layer 2 — FSM Engine** (`src/fsm/`): pure `decideNext` (forward resolution with skip flags, `toOneOf` targets, guard escalation), `budgetExceeded`, and config loading with zod + semantic validation and content-hash versioning. The default pipeline (§2) ships as `src/fsm/default-config.json`.
@@ -511,7 +511,7 @@ The build order puts the novel, high-risk core first (FSM engine, then event-dri
 - The engine does **not** enforce "at least one of `needs_frontend`/`needs_backend` is true." That policy belongs to the `plan` agent (§2); the engine stays pure and reads the flags as given.
 - The run-budget guard is checked **before each stage dispatch**, not before each internal phase; the per-stage `reviewCap` bounds within-stage cost, and the budget is the backstop across stages (README §2). A crash *before* a stage's transition commits will re-run (and re-charge) that stage on recovery — the accepted at-least-once cost; the idempotency guarantee covers the *post-commit* window, which is what the crash-recovery test pins.
 
-**In progress: Milestone 4 — real agents** (design + decisions in [plans/milestone-4.md](plans/milestone-4.md)). Split into **M4a** (orchestration plumbing, done) and **M4b** (real prompts + the real run — code-complete; only the operator-run live pass against tmux-speedrun remains).
+**Milestone 4 — real agents** (design + decisions in [plans/milestone-4.md](plans/milestone-4.md)). Split into **M4a** (orchestration plumbing, done) and **M4b** (real prompts + the real run — done). Real runs against live repos have since driven the hardening documented below; the flag-gated live e2e stays opt-out by default because it spends tokens (see the note after M4b), so it is an opt-in check rather than outstanding work.
 
 **Done in Milestone 4a** (plumbing, on `FakeGitHub` + `StubExecutor`, no network/cost — 187 tests passing):
 
@@ -530,7 +530,7 @@ The build order puts the novel, high-risk core first (FSM engine, then event-dri
 - **CLI real mode** (`src/cli.ts`, the default): builds the real runner with `--repo`/`--base`/`--work`/`--cheap` config, plus repo-source/auth/model options — `--local-repo` (clone each run's working tree from a local checkout, offline, still pushing to GitHub), `--clone-url` (SSH/HTTPS remote override), `--permission-mode` (so the headless harness can edit/run tests unattended), and `--model` (the concrete model for produce/self-review, e.g. `sonnet` — cheaper than the opus default but capable of the strict JSON contract that the cheap haiku model is not). Runs are now real by default; pass `--mock` for the stub/fake harness (no money, no network).
 - **Tests** (+31 over M4a): prompt-composition tests including the guard that *every* stage with an agent recipe has a role prompt (`prompts.test.ts`); the cheap-model override + empty-repo guard (`real-run.test.ts`); CLI arg parsing with the mode default — runs are real unless `--mock` is passed (`cli-args.test.ts`); a seeded-defect internal-sequence test asserting the simplify-corrected envelope — not produce's — is handed off (`runner.test.ts`); and an **offline real-prompt e2e** (`real-prompts-e2e.test.ts`) that drives the whole loop with the real prompts + real subprocess executor over a fake harness, asserting a well-formed composed prompt *and the issue plumbed into the input* on every invocation and a run to `done`. The cap→escalate path was already covered. Real-run hardening surfaced by the first live shakeout is pinned too: `openDb` creates a missing parent dir (`db.test.ts`), the subprocess spawn closes stdin so `claude -p` never blocks waiting on it (`subprocess-executor.test.ts`), `--local-repo` clones the working tree from a local checkout while still pushing to GitHub (`github-cli.test.ts`), an **unauthenticated harness is classified as a `FatalExecutorError`** so the loop aborts the whole drain (not just one run) and the CLI prints login-and-test instructions instead of a stack trace (`subprocess-executor.test.ts` + `event-loop.test.ts`), `.agent-work/` (per-run target-repo clones) is excluded from this project's `eslint`/`vitest` so a real run never pollutes the dev tooling, and the harness output parser **extracts a JSON envelope wrapped in a prose preamble/epilogue** (the near-universal LLM habit of writing a sentence before the JSON) via balanced-brace scanning — recovery, not coercion, since the strict envelope/verdict schema still validates the extracted object (`subprocess-executor.test.ts`). The `--model` flag lets the operator pick the produce/review model (e.g. `sonnet`) since the cheap default (haiku) is too weak to follow the JSON contract. And **`code_review` inspects the diff itself** (§3.6, revised): rather than injecting the computed diff into the prompt (a regenerated `package-lock.json` of ~6k lines blew the context window), the runner gives the reviewer the base branch and grants it read-only git tools (`Bash(git diff:*)`, …) so it diffs with `--stat` first and drills in — the harness manages its own context (`runner-lifecycle.test.ts`). Finally, **run branch names carry a random suffix** (`agent/run-<id>-<hex>`) so a fresh run never adopts a prior run's leftover remote branch + PR when ids are reused (a wiped db restarting at 1 had let a stale implementation land on a new run's branch — the `tdd` agent correctly caught it and escalated); commit messages, PR title, and a descriptive PR body were improved; and the CLI now prints the escalation reason + a resume hint on a `needs_human` finish instead of leaving it only in the DB (`runner-lifecycle.test.ts`). The subprocess executor also enforces a **per-invocation wall-clock timeout** (default 20 min, `--timeout <min>`): a real run had a single `tdd` invocation iterate on a slow browser test suite for 23 minutes unbounded, so on expiry the child is killed (SIGTERM→SIGKILL) and the phase escalates (recoverable) rather than running forever (`subprocess-executor.test.ts`). Agents are also told to keep the working tree clean — no committed test screenshots / lockfile churn — since the orchestrator commits it verbatim.
 
-**Remaining in Milestone 4b: the operator-run live pass.** The token-spending, PR-creating end-to-end run against `jzohdi/tmux-speedrun` (README §6) is wired and runnable two ways — the CLI (real by default), and a flag-gated vitest (`real-e2e.test.ts`, `RUN_REAL_E2E=1`, skipped by default) — but awaits the operator-created home-page issue and live `gh`/API auth, so it is not part of `npm test` and has not been run here. See [plans/milestone-4.md](plans/milestone-4.md) §6.
+**Milestone 4b live e2e (opt-in, not blocking).** The token-spending, PR-creating end-to-end run is wired and runnable two ways — the CLI (real by default), and a flag-gated vitest (`real-e2e.test.ts`, `RUN_REAL_E2E=1`, skipped by default because it spends money and needs live `gh`/API auth), so it is not part of `npm test`. Real runs against live repos have since occurred (they surfaced the hardening captured in the M4b notes above), so this harness is an available opt-in check rather than remaining work. See [plans/milestone-4.md](plans/milestone-4.md) §6.
 
 **Added in Milestone 5 — API + telemetry surface** (design in [plans/milestone-5.md](plans/milestone-5.md)): the headless control plane's public surface, so the M6 dashboard can be a pure client of it. 299 tests passing (+27 over M4).
 
@@ -649,6 +649,45 @@ per issue (409), `POST /scheduler/check`, the best-effort **`af:<state>` PR labe
 (`Issue.state`/`dropWorkingTree`/`setPrLabels` adapter additions), and dashboard blocked/priority
 badges + a RunDetail scheduling line. The FSM engine and its tests are untouched — ordering lives
 entirely beside it.
+
+**Added on top — merge-conflict handling** (`repos.conflict_policy`, schema migration 12). Between-stage
+base sync keeps a run's branch current; a per-repo `conflict_policy` (`manual` default / `auto`) decides
+what happens on conflict, and `auto` runs a mechanically-verified **resolver agent** as a pseudo-stage
+(`resolve_conflicts`). A poller re-opens a finished (`done`) run whose PR has gone **CONFLICTING** so the
+conflict is addressed rather than silently blocking the merge. The working tree is never left mid-merge.
+
+**Added on top — Milestone 12: per-repo source binding** (`repos.source_mode`, schema migration 11). A
+repo must declare a **source mode before it can run** — `clone` (fetch from the GitHub remote) or `local`
+(build each run's working tree from a validated local git checkout, offline, still pushing to GitHub) —
+resolved per run through the repo registry (`src/integration/local-checkout.ts`, dir validation via
+`src/api/dir-suggest.ts`). This removes the last implicit single-repo assumption in working-tree setup and
+fixes the daemon-cwd triage bug + sync-on-merge for local sources.
+
+**Added on top — per-run operator↔agent chat side channel** (`run_chat` table, schema migration 13;
+`POST /runs/:id/chat`, `GET /runs/:id/chat`, `POST /runs/:id/chat/:chatId/cancel`; `RunChat.svelte` dock).
+A per-run side channel between the operator and the run's agent. **Read** prompts run immediately;
+**write** prompts hold until the pipeline pauses — enforced by SQL mutual exclusion with stage dispatch (a
+queued write ⇄ the event claim, so chat and a stage never touch the working tree at once). Replies stream
+to the dashboard as `chat` stream events.
+
+### Remaining planned work (tracked as GitHub issues)
+
+Everything below is not-yet-built planned work, one [GitHub issue](https://github.com/jzohdi/agents-fsm/issues) each:
+
+- **Milestone 10 — Claude Agent SDK stage executor** (the only whole milestone not started) — [#9](https://github.com/jzohdi/agents-fsm/issues/9).
+- **Continuous mode: configurable in-flight cap > 1** (parallel pickup; today hardcoded to 1) — [#10](https://github.com/jzohdi/agents-fsm/issues/10).
+- **Continuous mode: label/milestone backlog filter** — [#11](https://github.com/jzohdi/agents-fsm/issues/11).
+- **Per-stage harness override** — [#12](https://github.com/jzohdi/agents-fsm/issues/12).
+- **Per-harness model catalogs for off-default runs** — [#13](https://github.com/jzohdi/agents-fsm/issues/13).
+- **Cursor `.cursor/rules` system-prompt path** (conditional) — [#14](https://github.com/jzohdi/agents-fsm/issues/14).
+- **Opt-in auto-merge of approved PRs** — [#15](https://github.com/jzohdi/agents-fsm/issues/15).
+- **Remote / phone access** (API auth + networking + hardening) — [#16](https://github.com/jzohdi/agents-fsm/issues/16).
+- **Webhook-driven signals to replace polling** — [#17](https://github.com/jzohdi/agents-fsm/issues/17).
+- **Per-repo FSM config and per-repo secrets** (multi-org) — [#18](https://github.com/jzohdi/agents-fsm/issues/18).
+- **Time-based aging in the Scheduler order** (starvation mitigation) — [#19](https://github.com/jzohdi/agents-fsm/issues/19).
+- **Cursor token/cost accounting** (Cursor records `0`) — [#2](https://github.com/jzohdi/agents-fsm/issues/2).
+- **Layer 3 escalation-resolution advisor** (suggested-fix option cards) — [#4](https://github.com/jzohdi/agents-fsm/issues/4).
+- **Configurable custom prompt context from the UI** — [#5](https://github.com/jzohdi/agents-fsm/issues/5).
 
 > The per-milestone test counts above record each milestone as it shipped and are not updated after
 > the fact. For the current figure run `npm test` (plus `npm run check:dashboard` for the dashboard

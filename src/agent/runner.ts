@@ -20,11 +20,11 @@
 import { randomBytes } from 'node:crypto';
 
 import { recipeFor, type AgentsConfig, type StageIo } from '../fsm/config';
-import { ADDRESSING_PR_FEEDBACK_FLAG, RESUME_TRIGGER, REVERT_TRIGGER } from '../loop/event-loop';
+import { ADDRESSING_PR_FEEDBACK_FLAG, MERGE_CONFLICT_TRIGGER, RESOLVE_CONFLICTS_STATE, RESUME_TRIGGER, REVERT_TRIGGER } from '../loop/event-loop';
 import type { BaseSync, GitHub, Issue, IssueComment, PullRequest } from '../integration/github';
 import { BOT_COMMENT_MARKER, defaultScheduling, parseMarker, upsertMarker, type SchedulingDecl } from '../integration/issue-markers';
 import { isRepoResolver, singleRepoResolver, type RepoContext, type RepoResolver } from '../integration/github-resolver';
-import type { AgentPhase, ConflictPolicy, Repository, Run, Transition } from '../store/repository';
+import type { AgentPhase, ChatExchange, ConflictPolicy, Repository, Run, Transition } from '../store/repository';
 import type { AgentActivity, AgentRunResult, StageExecutor } from './executor';
 import { isHarnessResolver, singleHarness, type HarnessResolver } from './harness';
 import {
@@ -71,19 +71,47 @@ export function phaseModel(logical: string, override: string | null): string {
 }
 
 /**
- * Escalation trigger for a base-merge conflict the run could not (or, under `manual` policy, was not
- * allowed to) resolve — a first-class cause label in the transition log, like `git_error`.
+ * Tools the conflict resolver is pre-approved to use (Claude Code reads this as `--allowedTools`, so a
+ * headless run never stalls on a permission prompt it cannot answer — the bug where the resolver's
+ * `Write`/`Edit` were blocked and it spun retrying). It reads and rewrites the conflicted files, and
+ * that is all it needs. **Deliberately no `Bash`**: the resolver must not run git commands (checkout
+ * --ours, merge --abort, add/commit) that would disturb the in-progress merge the runner concludes
+ * itself via `finishBaseMerge` — the prompt says so, and withholding the tool enforces it. Cursor
+ * ignores this list (its `-p --force` grants write/shell wholesale).
  */
-export const MERGE_CONFLICT_TRIGGER = 'merge_conflict';
+export const RESOLVE_CONFLICTS_ALLOWED_TOOLS = ['Read', 'Grep', 'Glob', 'Edit', 'Write'];
 
 /**
- * Pseudo-stage label for the conflict-resolver harness invocation (telemetry `agent_runs.stage` and
- * the prompt-composition key). Not an FSM state: resolution happens *within* a stage's dispatch, as
- * part of the between-stage base sync — the FSM never sees it (README §3.3: the engine is sacred).
- * `agent_runs.phase` stays `'produce'` (its CHECK constraint is closed; the stage label carries the
- * meaning).
+ * The pseudo-stage label a run-chat invocation runs under (the operator's "general chat" side
+ * channel). Like {@link RESOLVE_CONFLICTS_STATE} it is not an FSM state — chat is an orchestrator-
+ * owned side operation the engine never sees — but it is the `agent_runs.stage` label and the
+ * prompt-composition key, so telemetry and the dashboard read a clear "chat".
  */
-export const RESOLVE_CONFLICTS_STAGE = 'resolve_conflicts';
+export const CHAT_STAGE = 'chat';
+
+/**
+ * Tools a **read**-mode chat is granted: inspect-only file tools plus the read-only git commands
+ * (the same grant `code_review` gets), so the agent can answer questions about the branch/PR while
+ * a stage may be running — nothing here can disturb the working tree. Cursor ignores allow-lists
+ * (`-p --force` grants write/shell wholesale), so for Cursor runs the read-only rule is carried by
+ * the chat prompt instead of the harness.
+ */
+export const CHAT_READ_TOOLS = ['Read', 'Grep', 'Glob', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)', 'Bash(git status:*)'];
+
+/** Tools a **write**-mode chat is granted — the full producing-stage grant (`frontend`/`backend`),
+ *  since a write chat only ever runs while the pipeline is parked (no stage to race). */
+export const CHAT_WRITE_TOOLS = ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash'];
+
+/** How many prior completed exchanges ride along as the chat's conversation context. */
+const CHAT_HISTORY_LIMIT = 10;
+
+/** What a chat invocation produced: the reply shown to the operator, its token usage (stored on the
+ *  exchange for per-prompt telemetry), plus (write mode) the pushed commit. */
+export interface ChatResult {
+  response: string;
+  tokens: number;
+  commitSha?: string;
+}
 
 /** Default base branch a run's working branch is cut from and diffed against. */
 export const DEFAULT_BASE_BRANCH = 'main';
@@ -437,14 +465,23 @@ export class AgentRunner {
 
   // --- stage preparation ------------------------------------------------------
 
-  private async prepareStage(run: Run, io: StageIo): Promise<StagePrep> {
+  /**
+   * Read the issue and ensure the run's working tree exists (creating + persisting the branch the
+   * first time). The tree-and-branch primitive shared by {@link prepareStage} and the standalone
+   * {@link resolveConflicts} — both need a checked-out branch to operate on, nothing stage-specific.
+   */
+  private async prepareTree(run: Run): Promise<{ issue: Issue; workingDir: string; branch: string }> {
     const { github, baseBranch } = this.repoContext(run);
     const issue = await github.readIssue(run.issueRef);
-
-    // produce/review: ensure the working tree exists, creating the branch the first time.
     const branch = run.branch ?? branchName(run);
     const tree = await github.prepareWorkingTree({ runId: run.id, branch, base: baseBranch });
     if (run.branch === null) this.repo.setRunBranch(run.id, branch);
+    return { issue, workingDir: tree.path, branch };
+  }
+
+  private async prepareStage(run: Run, io: StageIo): Promise<StagePrep> {
+    const { github, baseBranch } = this.repoContext(run);
+    const { issue, workingDir, branch } = await this.prepareTree(run);
 
     const input: Record<string, unknown> = { issue };
     // code_review (a review stage with a PR) inspects the branch diff itself via its git tools, so
@@ -464,7 +501,7 @@ export class AgentRunner {
       input.pullRequest = { number: run.prNumber, branch, addressingFeedback: true };
       input.prFeedback = prComments.map((c) => ({ author: c.author, body: c.body, createdAt: c.createdAt }));
     }
-    return { issue, workingDir: tree.path, branch, input };
+    return { issue, workingDir, branch, input };
   }
 
   // --- between-stage base sync (merge-conflict handling) -----------------------
@@ -477,11 +514,10 @@ export class AgentRunner {
   }
 
   /**
-   * Fold the latest base into the run's branch before the stage runs, so long-lived runs never drift
-   * into an unmergeable PR. Returns `undefined` to proceed (up to date, merged clean, or conflicts
-   * resolved-and-verified) or an escalation outcome. Invariant: **the tree is never left mid-merge** —
-   * every failure path aborts the merge before escalating/rethrowing, so a resume or the next stage
-   * always finds a checkout-able tree.
+   * Fold the latest base into the run's branch **before the stage runs**, so long-lived runs never
+   * drift into an unmergeable PR (the "every stage pulls latest first" rule). Returns `undefined` to
+   * proceed (up to date, merged clean, or conflicts resolved-and-verified) or an escalation outcome.
+   * Invariant: **the tree is never left mid-merge** — every failure path aborts the merge first.
    */
   private async syncWithBase(run: Run, prep: StagePrep): Promise<StageOutcome | undefined> {
     const { github, baseBranch } = this.repoContext(run);
@@ -492,6 +528,7 @@ export class AgentRunner {
       return gitError(run, 'sync_base', err);
     }
     if (sync.result === 'merged') {
+      // The clean merge commit rides out on the stage's own push later; nothing to do here.
       this.repo.recordLog({
         runId: run.id,
         message: `merged the latest ${baseBranch} into ${prep.branch} cleanly (between-stage base sync)`,
@@ -503,26 +540,15 @@ export class AgentRunner {
     const policy = this.conflictPolicy(run);
     const reason = { kind: 'merge_conflict', stage: run.currentState, base: baseBranch, files: sync.conflictFiles, policy };
     if (policy !== 'auto') {
-      // Manual policy: the operator resolves (merge base into the branch themselves, push, resume).
+      // Manual policy: the operator resolves (merge base into the branch themselves, push, resume) —
+      // or clicks "Resolve merge conflicts" to invoke the resolver on demand.
       await github.abortBaseMerge(run.id);
       return { kind: 'escalate', trigger: MERGE_CONFLICT_TRIGGER, reason };
     }
 
-    // Auto policy: one resolver invocation over the in-progress merge, then *mechanical* verification —
-    // the agent edits the conflicted files; finishBaseMerge trusts only the git state.
-    try {
-      await this.invokeConflictResolver(run, prep, baseBranch, sync.conflictFiles);
-    } catch (err) {
-      await github.abortBaseMerge(run.id); // restore the tree, then let the loop escalate executor_error
-      throw err;
-    }
-    let finish: { ok: true } | { ok: false; unresolved: string[] };
-    try {
-      finish = await github.finishBaseMerge(run.id, prep.branch!); // prepareStage always sets branch
-    } catch (err) {
-      await github.abortBaseMerge(run.id);
-      return gitError(run, 'sync_base', err);
-    }
+    // Auto policy: the resolver runs over the in-progress merge (executor throws propagate → the loop
+    // escalates executor_error). Success → proceed to the stage; failure → escalate with the evidence.
+    const finish = await this.resolveInProgressMerge(run, prep, baseBranch, sync.conflictFiles);
     if (finish.ok) {
       this.repo.recordLog({
         runId: run.id,
@@ -531,29 +557,141 @@ export class AgentRunner {
       });
       return undefined;
     }
-    await github.abortBaseMerge(run.id);
+    if ('gitError' in finish) return gitError(run, 'sync_base', finish.gitError);
     return { kind: 'escalate', trigger: MERGE_CONFLICT_TRIGGER, reason: { ...reason, resolutionAttempted: true, unresolved: finish.unresolved } };
   }
 
   /**
-   * One conflict-resolver harness invocation over the working tree's in-progress merge. Telemetry is
-   * recorded under the {@link RESOLVE_CONFLICTS_STAGE} pseudo-stage (phase `produce` — the column's
-   * CHECK set is closed; the stage label carries the meaning). The agent's *text output is ignored*:
-   * whether the conflicts are actually gone is judged mechanically by `finishBaseMerge`, so a resolver
-   * that lies (or rambles) can never sneak markers into a commit.
+   * Resolve a merge that is **already in progress** (a conflict was detected): run one resolver
+   * invocation over the conflicted files, then conclude the merge via mechanical verification
+   * ({@link GitHub.finishBaseMerge} — never trusts the agent's self-report). Shared by the between-
+   * stage {@link syncWithBase} and the standalone {@link resolveConflicts}.
+   *
+   * Invariant: **always leaves the tree clean.** A resolver throw aborts the merge then propagates
+   * (the loop escalates `executor_error`); a verification miss or a git failure aborts and is reported.
    */
-  private async invokeConflictResolver(run: Run, prep: StagePrep, base: string, files: string[]): Promise<void> {
-    // Same model/effort override precedence as any produce phase — the resolver reconciles *intent*
-    // between the branch and base, frontier-grade work (cf. the simplify-model lesson above).
+  private async resolveInProgressMerge(
+    run: Run,
+    prep: StagePrep,
+    baseBranch: string,
+    files: string[],
+  ): Promise<{ ok: true } | { ok: false; unresolved: string[] } | { ok: false; gitError: unknown }> {
+    const { github } = this.repoContext(run);
+    try {
+      await this.invokeConflictResolver(run, prep, baseBranch, files);
+    } catch (err) {
+      await github.abortBaseMerge(run.id); // restore the tree, then let the caller propagate executor_error
+      throw err;
+    }
+    try {
+      const finish = await github.finishBaseMerge(run.id, prep.branch!); // prepareTree always sets branch
+      if (!finish.ok) await github.abortBaseMerge(run.id); // markers remained → roll back to a clean tree
+      return finish;
+    } catch (err) {
+      await github.abortBaseMerge(run.id);
+      return { ok: false, gitError: err };
+    }
+  }
+
+  /**
+   * **Standalone** merge-conflict resolution for a *finished* run whose PR drifted into conflict with
+   * base — the dedicated `resolve_conflicts` operation the loop dispatches (from the PR poller under
+   * `auto` policy, or the operator's "Resolve merge conflicts" button). Unlike the between-stage sync
+   * it runs *no pipeline*: it merges base, resolves+pushes, and reports back so the loop returns the
+   * run to the finished state it came from.
+   *
+   * Because invoking it *is* the authorization (a human clicked, or auto policy opted in), it always
+   * runs the resolver on a conflict — the `manual` gate is the between-stage sync's job, not this one.
+   */
+  async resolveConflicts(run: Run): Promise<{ kind: 'resolved' } | { kind: 'escalate'; reason: unknown }> {
+    const { github, baseBranch } = this.repoContext(run);
+    let prep: StagePrep;
+    try {
+      prep = { ...(await this.prepareTree(run)), input: {} };
+    } catch (err) {
+      return { kind: 'escalate', reason: { kind: 'merge_conflict', stage: RESOLVE_CONFLICTS_STATE, base: baseBranch, op: 'prepare', detail: String(err) } };
+    }
+    let sync: BaseSync;
+    try {
+      sync = await github.syncBranchWithBase(run.id, baseBranch);
+    } catch (err) {
+      return { kind: 'escalate', reason: { kind: 'merge_conflict', stage: RESOLVE_CONFLICTS_STATE, base: baseBranch, op: 'sync_base', detail: String(err) } };
+    }
+    if (sync.result !== 'conflict') {
+      // Nothing to reconcile. A clean merge must still be pushed (no later stage will do it here); an
+      // `up_to_date` branch already contains base, so its PR is mergeable and there is nothing to push.
+      if (sync.result === 'merged') {
+        try {
+          await github.commitAndPush({ workingDir: prep.workingDir!, branch: prep.branch!, message: `Merge latest ${baseBranch}` });
+        } catch (err) {
+          return { kind: 'escalate', reason: { kind: 'merge_conflict', stage: RESOLVE_CONFLICTS_STATE, base: baseBranch, op: 'sync_base', detail: String(err) } };
+        }
+      }
+      this.repo.recordLog({
+        runId: run.id,
+        message: sync.result === 'merged' ? `merged the latest ${baseBranch} and pushed — no conflicts` : `already up to date with ${baseBranch} — nothing to resolve`,
+        data: { kind: 'conflict_resolution', result: sync.result },
+      });
+      return { kind: 'resolved' };
+    }
+
+    const finish = await this.resolveInProgressMerge(run, prep, baseBranch, sync.conflictFiles);
+    if (finish.ok) {
+      this.repo.recordLog({
+        runId: run.id,
+        message: `resolved ${sync.conflictFiles.length} merge-conflicted file(s) with ${baseBranch} and pushed`,
+        data: { kind: 'conflict_resolution', result: 'resolved', files: sync.conflictFiles },
+      });
+      return { kind: 'resolved' };
+    }
+    const detail = 'gitError' in finish ? { op: 'finish_merge', detail: String(finish.gitError) } : { unresolved: finish.unresolved };
+    return {
+      kind: 'escalate',
+      reason: { kind: 'merge_conflict', stage: RESOLVE_CONFLICTS_STATE, base: baseBranch, files: sync.conflictFiles, resolutionAttempted: true, ...detail },
+    };
+  }
+
+  // --- run chat (the operator's per-run "general chat" side channel) -----------
+
+  /**
+   * Run one claimed chat exchange to completion — the operator's ad-hoc prompt against this run's
+   * working tree. Not a stage: no envelope, no FSM transition; the agent's reply is the product. The
+   * caller (the Orchestrator's chat pump) owns the exchange lifecycle and the safety scheduling —
+   * by the time this runs, a `write` exchange is guaranteed alone on the run (paused-like status, no
+   * stage in flight, stage dispatch gated on it), while a `read` exchange may legitimately overlap a
+   * running stage (its tool grant cannot disturb the tree).
+   *
+   * Read mode: answer from the tree/branch/PR with the read-only grant. Write mode: do the work,
+   * then commit-if-dirty + push through the adapter (agents never run git), so e.g. "fix the failing
+   * build" lands on the run's open PR. Usage is charged to the run's tokens/cost (real spend, and the
+   * cost ceiling must see it) but deliberately NOT `agentRuns` — the run budget bounds the *pipeline's*
+   * loops, and operator-initiated chat must not eat the stages' budget. Throws on failure; the caller
+   * records the error on the exchange.
+   */
+  async runChat(run: Run, exchange: ChatExchange): Promise<ChatResult> {
+    const { github, baseBranch } = this.repoContext(run);
+    const prep = await this.prepareTree(run);
+    const history = this.repo
+      .listChatExchanges(run.id)
+      .filter((c) => c.status === 'done' && c.id !== exchange.id)
+      .slice(-CHAT_HISTORY_LIMIT)
+      .map((c) => ({ mode: c.mode, prompt: c.prompt, response: c.response }));
+
+    // Same model/effort override precedence as any produce phase — the chat answers for the run, so
+    // it runs on the run's picked model.
     const model = phaseModel(DEFAULT_MODELS.produce, run.modelOverride);
     const effort = run.effortOverride && DEFAULT_MODELS.produce === OVERRIDE_ROLE ? run.effortOverride : undefined;
     const input = {
       issueRef: run.issueRef,
       repoRef: run.repoRef,
-      stage: RESOLVE_CONFLICTS_STAGE,
+      stage: CHAT_STAGE,
       phase: 'produce',
       issue: prep.issue,
-      conflict: { base, branch: prep.branch, files },
+      base: baseBranch,
+      artifacts: this.repo.listArtifacts(run.id),
+      run: { state: run.currentState, status: run.status },
+      chat: { mode: exchange.mode, prompt: exchange.prompt, history },
+      ...(run.prNumber !== null ? { pullRequest: { number: run.prNumber, branch: prep.branch } } : {}),
     };
 
     const startedAt = Date.now();
@@ -562,20 +700,21 @@ export class AgentRunner {
       const executor = this.harnesses.for(run.harness);
       result = await executor.run({
         runId: run.id,
-        stage: RESOLVE_CONFLICTS_STAGE,
+        stage: CHAT_STAGE,
         phase: 'produce',
         model,
         ...(effort ? { effort } : {}),
-        system: this.systemPrompt(RESOLVE_CONFLICTS_STAGE, 'produce'),
+        system: this.systemPrompt(CHAT_STAGE, 'produce'),
         input,
-        onActivity: (activity) => this.handleActivity(run.id, RESOLVE_CONFLICTS_STAGE, 'produce', activity),
-        ...(prep.workingDir ? { workingDir: prep.workingDir } : {}),
+        onActivity: (activity) => this.handleActivity(run.id, CHAT_STAGE, 'produce', activity),
+        allowedTools: exchange.mode === 'write' ? CHAT_WRITE_TOOLS : CHAT_READ_TOOLS,
+        workingDir: prep.workingDir,
       });
     } catch (err) {
       // Same telemetry contract as invokePhase: record the failed invocation, then propagate.
       this.repo.recordAgentRun({
         runId: run.id,
-        stage: RESOLVE_CONFLICTS_STAGE,
+        stage: CHAT_STAGE,
         phase: 'produce',
         model,
         input,
@@ -588,7 +727,92 @@ export class AgentRunner {
     }
     this.repo.recordAgentRun({
       runId: run.id,
-      stage: RESOLVE_CONFLICTS_STAGE,
+      stage: CHAT_STAGE,
+      phase: 'produce',
+      model,
+      input,
+      output: result.output,
+      tokens: result.usage.tokens,
+      durationMs: Date.now() - startedAt,
+      success: true,
+    });
+    this.repo.addRunUsage(run.id, { tokens: result.usage.tokens, cost: result.usage.cost });
+
+    const response = chatResponseText(result.output);
+    if (exchange.mode !== 'write') return { response, tokens: result.usage.tokens };
+
+    // Write mode: everything the agent left in the tree is the deliverable — commit-if-dirty and
+    // push through the adapter (base.md's "the tree is committed verbatim" rule applies to chat too).
+    const commit = await github.commitAndPush({
+      workingDir: prep.workingDir,
+      branch: prep.branch,
+      message: chatCommitMessage(exchange.prompt),
+    });
+    this.repo.recordLog({
+      runId: run.id,
+      message: `chat: committed and pushed the agent's changes (${commit.sha.slice(0, 7)})`,
+      data: { kind: 'chat', mode: exchange.mode, sha: commit.sha },
+    });
+    return { response, tokens: result.usage.tokens, commitSha: commit.sha };
+  }
+
+  /**
+   * One conflict-resolver harness invocation over the working tree's in-progress merge. Telemetry is
+   * recorded under the {@link RESOLVE_CONFLICTS_STATE} pseudo-stage (phase `produce` — the column's
+   * CHECK set is closed; the stage label carries the meaning). The agent's *text output is ignored*:
+   * whether the conflicts are actually gone is judged mechanically by `finishBaseMerge`, so a resolver
+   * that lies (or rambles) can never sneak markers into a commit.
+   */
+  private async invokeConflictResolver(run: Run, prep: StagePrep, base: string, files: string[]): Promise<void> {
+    // Same model/effort override precedence as any produce phase — the resolver reconciles *intent*
+    // between the branch and base, frontier-grade work (cf. the simplify-model lesson above).
+    const model = phaseModel(DEFAULT_MODELS.produce, run.modelOverride);
+    const effort = run.effortOverride && DEFAULT_MODELS.produce === OVERRIDE_ROLE ? run.effortOverride : undefined;
+    const input = {
+      issueRef: run.issueRef,
+      repoRef: run.repoRef,
+      stage: RESOLVE_CONFLICTS_STATE,
+      phase: 'produce',
+      issue: prep.issue,
+      conflict: { base, branch: prep.branch, files },
+    };
+
+    const startedAt = Date.now();
+    let result: AgentRunResult;
+    try {
+      const executor = this.harnesses.for(run.harness);
+      result = await executor.run({
+        runId: run.id,
+        stage: RESOLVE_CONFLICTS_STATE,
+        phase: 'produce',
+        model,
+        ...(effort ? { effort } : {}),
+        system: this.systemPrompt(RESOLVE_CONFLICTS_STATE, 'produce'),
+        input,
+        onActivity: (activity) => this.handleActivity(run.id, RESOLVE_CONFLICTS_STATE, 'produce', activity),
+        // Pre-approve the edit tools so a headless run never stalls on a permission prompt (see the
+        // constant's doc) — the same grant the producing stages get, minus Bash.
+        allowedTools: RESOLVE_CONFLICTS_ALLOWED_TOOLS,
+        ...(prep.workingDir ? { workingDir: prep.workingDir } : {}),
+      });
+    } catch (err) {
+      // Same telemetry contract as invokePhase: record the failed invocation, then propagate.
+      this.repo.recordAgentRun({
+        runId: run.id,
+        stage: RESOLVE_CONFLICTS_STATE,
+        phase: 'produce',
+        model,
+        input,
+        output: { error: String(err) },
+        tokens: 0,
+        durationMs: Date.now() - startedAt,
+        success: false,
+      });
+      throw err;
+    }
+    this.repo.recordAgentRun({
+      runId: run.id,
+      stage: RESOLVE_CONFLICTS_STATE,
       phase: 'produce',
       model,
       input,
@@ -832,6 +1056,28 @@ function branchName(run: Run): string {
 
 function commitMessage(run: Run, issue: Issue): string {
   return `[agent] ${run.currentState}: ${issue.title || `issue #${issue.number}`} (#${issue.number})`;
+}
+
+/** The commit message a write-mode chat's changes land under: the operator's prompt, first line only,
+ *  bounded so a pasted paragraph never becomes a subject line. */
+export function chatCommitMessage(prompt: string): string {
+  const firstLine = prompt.trim().split('\n')[0]!.trim();
+  const snippet = firstLine.length > 72 ? `${firstLine.slice(0, 71)}…` : firstLine;
+  return `[agent] chat: ${snippet}`;
+}
+
+/**
+ * The operator-facing reply text from a chat invocation's parsed output. The chat contract asks for
+ * `{ "response": "<markdown>" }` (so the harness's JSON-extraction heuristics parse it losslessly);
+ * a model that answered in plain text anyway is still its own words, and anything else is shown as
+ * JSON rather than dropped — chat is interactive, so favor showing *something* over escalating.
+ */
+export function chatResponseText(output: unknown): string {
+  if (output && typeof output === 'object' && typeof (output as { response?: unknown }).response === 'string') {
+    return (output as { response: string }).response.trim();
+  }
+  if (typeof output === 'string') return output.trim();
+  return JSON.stringify(output, null, 2);
 }
 
 /**

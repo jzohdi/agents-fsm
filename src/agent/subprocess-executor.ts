@@ -71,12 +71,12 @@ export interface SpawnOptions {
 export type SpawnProcess = (command: string, args: string[], options: SpawnOptions) => Promise<ProcessResult>;
 
 /**
- * Default per-invocation wall-clock cap (20 min). A single stage's harness invocation can otherwise
+ * Default per-invocation wall-clock cap (40 min). A single stage's harness invocation can otherwise
  * run unbounded — a real run saw a `tdd` invocation iterate on a slow browser test suite for 23
  * minutes with no ceiling. On timeout the child is killed and the phase escalates (recoverable);
- * a repo with a genuinely slow suite raises this via `--timeout`.
+ * a repo with a genuinely slow suite raises this further via `--timeout`.
  */
-export const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
+export const DEFAULT_TIMEOUT_MS = 40 * 60 * 1000;
 
 /**
  * Rate-limit retry defaults (Milestone 8 Phase B — B3). N parallel agents (the worker pool) multiply

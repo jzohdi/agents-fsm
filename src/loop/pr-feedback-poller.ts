@@ -33,6 +33,8 @@ import type { Repository, Run } from '../store/repository';
 /** The minimal re-entry surface the poller needs from the Event Loop (it owns the transition + event). */
 export interface PrFeedbackReopener {
   reopenForPrFeedback(runId: number, reason: unknown): void;
+  /** Resolve a finished run's merge conflict in place (dedicated resolver, not a pipeline re-run). */
+  resolveMergeConflict(runId: number, reason: unknown): void;
 }
 
 /** Default marker a PR comment must start with to be treated as actionable feedback. */
@@ -201,20 +203,20 @@ export class PrFeedbackPoller {
     }
 
     // Merge-conflict detection (rides the same getPr): base moved under a finished run's open PR and
-    // GitHub now reports it CONFLICTING. Under the repo's `auto` policy, re-open the run — the
-    // between-stage base sync at re-entry (runner syncWithBase) merges base and auto-resolves, and the
-    // pipeline re-finishes with a mergeable PR. Only `done` runs re-open themselves: a `needs_human`
+    // GitHub now reports it CONFLICTING. Under the repo's `auto` policy, run the *dedicated* conflict
+    // resolver (merge base, resolve, push) — NOT a pipeline re-run: the run returns to `done` with a
+    // mergeable PR, never re-planning/re-implementing. Only `done` runs auto-resolve: a `needs_human`
     // run is parked *for a person* and must not spring back to life on its own. Under `manual` policy
-    // this does nothing — the human sees the conflict on GitHub and drives resolution. No dedupe
-    // bookkeeping needed: re-opening makes the run non-finished, so it leaves this poller's watch set
-    // until it finishes again (with a freshly-pushed merge commit, i.e. no longer conflicting).
+    // this does nothing — the human sees the conflict on GitHub and drives resolution (or clicks the
+    // "Resolve merge conflicts" button). No dedupe bookkeeping needed: resolving makes the run
+    // non-finished (running) while it works, and once done its PR is mergeable, so it never re-triggers.
     if (pr.mergeable === 'conflicting' && run.status === 'done' && this.repo.getRepo(run.repoRef)?.conflictPolicy === 'auto') {
       this.repo.recordLog({
         runId: run.id,
-        message: `PR #${prNumber} conflicts with ${baseBranch} — re-opening to merge the latest base and resolve (auto policy)`,
+        message: `PR #${prNumber} conflicts with ${baseBranch} — resolving the conflict (auto policy)`,
         data: { kind: 'pr_conflict_detected', prNumber },
       });
-      this.reopener.reopenForPrFeedback(run.id, { kind: 'merge_conflict', prNumber, base: baseBranch });
+      this.reopener.resolveMergeConflict(run.id, { kind: 'merge_conflict', prNumber, base: baseBranch });
       return 'reopened';
     }
 

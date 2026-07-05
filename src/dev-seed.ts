@@ -254,3 +254,25 @@ export function seedRuns(repo: Repository, version: string): number[] {
   }
   return ids;
 }
+
+/**
+ * Seed a run's chat thread (the operator ↔ agent side channel) so the preview's chat dock shows every
+ * state: a finished read Q&A, a finished write exchange with its pushed commit, and a still-queued
+ * write prompt (held while the run is `running`, withdrawable). Writes rows directly — the queued one
+ * is genuinely claimable, so pausing the run in the preview really executes it against the stub.
+ */
+export function seedChat(repo: Repository, runId: number): void {
+  const asked = repo.createChatExchange({ runId, prompt: 'what does the PR change so far?', mode: 'read' });
+  repo.completeChatExchange(asked.id, {
+    response:
+      'The branch touches **3 files**:\n\n- `src/checkout/session.ts` — clears the pending refresh timer on the error path\n- `src/checkout/session.test.ts` — regression test for the boundary condition\n\nNo API surface changed; `npm test` is green as of the last stage.',
+    tokens: 812,
+  });
+  const fixed = repo.createChatExchange({ runId, prompt: 'rename the helper to clearPendingRefresh and update callers', mode: 'write' });
+  repo.completeChatExchange(fixed.id, {
+    response: 'Renamed `resetTimer` → `clearPendingRefresh` and updated both call sites. Tests still pass.',
+    tokens: 1540,
+    commitSha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0',
+  });
+  repo.createChatExchange({ runId, prompt: 'add a JSDoc block to the session module explaining the refresh lifecycle', mode: 'write' });
+}

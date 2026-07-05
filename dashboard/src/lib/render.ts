@@ -809,3 +809,48 @@ export function traversedBackEdges(transitions: Transition[] | undefined): BackE
   return [...seen.values()];
 }
 
+// --- run chat (the operator ↔ agent side channel) --------------------------------
+
+/** Run statuses a write-mode chat prompt executes under immediately (mirrors the daemon's
+ *  CHAT_WRITE_SAFE_STATUSES); anywhere else a write prompt holds for the next pause point. */
+const CHAT_WRITE_SAFE = new Set<string>(['paused', 'needs_human', 'awaiting_input', 'done', 'stopped']);
+
+/** Whether a write-mode prompt sent now would run immediately (vs. hold until the pipeline pauses). */
+export function chatWriteRunsNow(status: string | undefined): boolean {
+  return status !== undefined && CHAT_WRITE_SAFE.has(status);
+}
+
+/** The composer's scheduling hint: what will happen to a prompt sent right now, in the chosen mode. */
+export function chatSchedulingHint(mode: 'read' | 'write', status: string | undefined): string {
+  if (mode === 'read') return 'answers now — runs alongside the pipeline, read-only';
+  return chatWriteRunsNow(status)
+    ? 'runs now — the pipeline is parked, changes are committed & pushed'
+    : 'held until the pipeline pauses, then edits, commits & pushes';
+}
+
+/**
+ * Render a chat reply's markdown-ish text to safe HTML: everything is escaped first, then a small,
+ * deliberate subset is promoted — fenced code blocks, inline code, **bold**, and paragraphs/line
+ * breaks. A full markdown engine is overkill (and a dependency) for replies this size; this mirrors
+ * the `formatWire` approach used for the activity feed.
+ */
+export function formatChatReply(text: string): string {
+  const escaped = escapeHtml(text);
+  // Lift fenced code blocks out first, so their contents are never touched by the inline rules below.
+  const blocks: string[] = [];
+  const withBlocks = escaped.replace(/```[a-zA-Z0-9_-]*\n([\s\S]*?)```/g, (_m, code: string) => {
+    blocks.push(`<pre><code>${code.replace(/\n$/, '')}</code></pre>`);
+    return `\n\n@@AF_CODE_${blocks.length - 1}@@\n\n`;
+  });
+  const inline = withBlocks
+    .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  const html = inline
+    .split(/\n{2,}/)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0)
+    .map((p) => (/^@@AF_CODE_\d+@@$/.test(p) ? p : `<p>${p.replace(/\n/g, '<br>')}</p>`))
+    .join('');
+  return html.replace(/@@AF_CODE_(\d+)@@/g, (_m, i: string) => blocks[Number(i)]!);
+}
+

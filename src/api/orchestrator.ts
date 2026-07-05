@@ -26,6 +26,7 @@ import type { AgentRunner } from '../agent/runner';
 import type {
   AgentRunRecord,
   Artifact,
+  ChatExchange,
   CostOverride,
   ListRunsFilter,
   LogRecord,
@@ -71,6 +72,8 @@ export interface RunDetail {
   agentRuns: AgentRunRecord[];
   artifacts: Artifact[];
   logs: LogRecord[];
+  /** The run's operator ↔ agent chat thread, oldest first (the "general chat" side channel). */
+  chat: ChatExchange[];
 }
 
 export interface OrchestratorOptions {
@@ -171,6 +174,11 @@ export class Orchestrator {
   private draining = false;
   private rerun = false;
   private current: Promise<void> = Promise.resolve();
+  // Single-flight chat pump (the run-chat side channel) — same shape as the drain pump, separate so
+  // a read-mode chat can execute *while* a stage drains (the whole point of read mode).
+  private chatDraining = false;
+  private chatRerun = false;
+  private chatCurrent: Promise<void> = Promise.resolve();
   private readonly onError: (err: unknown) => void;
 
   constructor(options: OrchestratorOptions) {
@@ -212,10 +220,13 @@ export class Orchestrator {
     this.replyPoller = new ReplyPoller(this.repo, this.resolver, this);
   }
 
-  /** Reclaim crash-stranded events, then drain anything already queued (e.g. after a daemon restart). */
+  /** Reclaim crash-stranded events and chat exchanges, then drain anything already queued (e.g.
+   *  after a daemon restart). */
   recover(): void {
     this.loop.recover();
+    this.repo.recoverRunningChats(); // a chat interrupted by a crash/shutdown re-queues and re-runs
     this.kick();
+    this.kickChat();
   }
 
   /**
@@ -240,6 +251,7 @@ export class Orchestrator {
     this.loop.beginShutdown();
     interruptHarnessChildren();
     await this.current; // the background drain (if any) — its workers either commit or abort as interrupted
+    await this.chatCurrent; // an interrupted chat exchange re-queues itself for the next start
     const runIds = this.repo.listProcessingRunIds();
     let savepointed = 0;
     for (const runId of runIds) {
@@ -359,6 +371,7 @@ export class Orchestrator {
     this.requireRun(runId); // 404 if missing
     const run = this.conflictOnThrow(() => this.loop.pauseRun(runId)); // 409 if not running
     this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
+    this.kickChat(); // paused between dispatches → a held write-mode chat prompt can run now
     return run;
   }
 
@@ -399,6 +412,7 @@ export class Orchestrator {
     this.requireRun(runId); // 404 if missing
     const run = this.conflictOnThrow(() => this.loop.stopRun(runId)); // 409 if already terminal
     this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
+    this.kickChat(); // stopped is a paused-like status → held write-mode chat prompts get their window
     return run;
   }
 
@@ -426,6 +440,82 @@ export class Orchestrator {
     this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
     this.kick();
     return run;
+  }
+
+  /**
+   * Resolve a finished run's merge conflict in place — the dedicated `resolve_conflicts` operation. The
+   * PR Feedback Poller calls this (under `auto` policy) when a done run's PR turns CONFLICTING; the
+   * dashboard's "Resolve merge conflicts" button calls {@link resolveConflicts}, which routes here. It
+   * moves the run into the resolver pseudo-state and kicks the pump; the loop merges base, resolves, and
+   * pushes, then returns the run to `done` (or escalates on failure). Satisfies {@link PrFeedbackReopener}.
+   */
+  resolveMergeConflict(runId: number, reason: unknown): Run {
+    const run = this.conflictOnThrow(() => this.loop.resolveMergeConflict(runId, reason)); // 409 if not finished / no PR
+    this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
+    this.kick();
+    return run;
+  }
+
+  /**
+   * The operator's "Resolve merge conflicts" escape hatch (`POST /runs/:id/resolve-conflicts`): kick off
+   * the dedicated resolver for a finished run whose PR conflicts, regardless of the repo's conflict
+   * policy — clicking the button *is* the authorization. 404 for an unknown run; the loop rejects a run
+   * that isn't finished or has no PR. Returns the run now in the resolver pseudo-state.
+   */
+  resolveConflicts(runId: number): Run {
+    this.requireRun(runId); // 404 if missing
+    return this.resolveMergeConflict(runId, { kind: 'merge_conflict', operatorRequested: true });
+  }
+
+  // --- run chat (the operator's per-run "general chat" side channel) ------------
+
+  /**
+   * Send a chat prompt to a run's agent (`POST /runs/:id/chat`) — the operator's ad-hoc side channel,
+   * scoped to this one run/issue. `mode` is the permission grant and drives the scheduling:
+   *
+   *  - `read` — read-only tools; dispatches **immediately**, even while a stage is running (nothing
+   *    it can do disturbs the tree), so "what does this PR change?" answers right away.
+   *  - `write` — edit tools; **held queued** until the run is parked in a paused-like status
+   *    (paused / needs_human / awaiting_input / done / stopped) with no stage in flight, then runs
+   *    with the tree to itself — stage dispatch is gated off while it works. So "fix the build" typed
+   *    mid-stage lands safely at the next pause point instead of racing the pipeline.
+   *
+   * Never interrupts a running stage in either mode. Returns the exchange (already `running` when the
+   * pump could dispatch it synchronously); replies arrive on the stream as `chat` events.
+   */
+  chat(runId: number, input: { prompt: string; mode: string }): ChatExchange {
+    this.requireRun(runId); // 404 if missing
+    const prompt = input.prompt.trim();
+    if (!prompt) throw new ApiError(400, 'prompt is required');
+    if (input.mode !== 'read' && input.mode !== 'write') {
+      throw new ApiError(400, `unknown chat mode "${input.mode}" (expected read | write)`);
+    }
+    const exchange = this.repo.createChatExchange({ runId, prompt, mode: input.mode });
+    this.broadcaster.publish({ type: 'chat', runId, exchange });
+    this.kickChat();
+    // The pump claims synchronously when the exchange is dispatchable right now — return the fresh
+    // row so an immediately-running prompt doesn't read back as "queued".
+    return this.repo.getChatExchange(exchange.id)!;
+  }
+
+  /** Withdraw a still-queued chat prompt (`POST /runs/:id/chat/:chatId/cancel`). A claimed (running)
+   *  or finished exchange is a `409` — a working agent cannot be recalled. */
+  cancelChat(runId: number, chatId: number): ChatExchange {
+    this.requireRun(runId); // 404 if missing
+    const existing = this.repo.getChatExchange(chatId);
+    if (!existing || existing.runId !== runId) throw new ApiError(404, `chat prompt ${chatId} not found on run ${runId}`);
+    if (!this.repo.cancelChatExchange(chatId)) {
+      throw new ApiError(409, `cannot cancel a "${existing.status}" chat prompt — only a queued one`);
+    }
+    const exchange = this.repo.getChatExchange(chatId)!;
+    this.broadcaster.publish({ type: 'chat', runId, exchange });
+    return exchange;
+  }
+
+  /** A run's chat thread, oldest first (`GET /runs/:id/chat`; also rides along in {@link getRunDetail}). */
+  listChat(runId: number): ChatExchange[] {
+    this.requireRun(runId); // 404 if missing
+    return this.repo.listChatExchanges(runId);
   }
 
   /**
@@ -496,6 +586,7 @@ export class Orchestrator {
   async checkDependencies(): Promise<SchedulerPass> {
     const pass = await this.schedulerPoller.checkOnce();
     if (pass.woken > 0) this.kick();
+    this.kickChat(); // a pass can escalate cycle members to needs_human — a write-chat window
     return pass;
   }
 
@@ -684,7 +775,7 @@ export class Orchestrator {
     return this.requireRun(runId);
   }
 
-  /** A run plus its transition history, per-phase agent runs, artifact refs, and activity log. */
+  /** A run plus its transition history, per-phase agent runs, artifact refs, activity log, and chat thread. */
   getRunDetail(runId: number): RunDetail {
     const run = this.requireRun(runId);
     return {
@@ -693,6 +784,7 @@ export class Orchestrator {
       agentRuns: this.repo.listAgentRuns(runId),
       artifacts: this.repo.listArtifacts(runId),
       logs: this.repo.listLogs(runId),
+      chat: this.repo.listChatExchanges(runId),
     };
   }
 
@@ -958,9 +1050,14 @@ export class Orchestrator {
     return this.broadcaster.subscribe(listener);
   }
 
-  /** Await the in-flight drain (tests use this instead of sleeping; a daemon never needs to). */
+  /** Await the in-flight drain + chat pumps (tests use this instead of sleeping; a daemon never needs
+   *  to). The two pumps kick each other — a finished write chat releases stage dispatch, a settled
+   *  drain opens a write-chat window — so loop until both are quiescent. */
   async settle(): Promise<void> {
-    await this.current;
+    do {
+      await this.current;
+      await this.chatCurrent;
+    } while (this.draining || this.chatDraining);
   }
 
   /**
@@ -1001,7 +1098,72 @@ export class Orchestrator {
       this.onError(err);
     } finally {
       this.draining = false;
+      // The drain settling is exactly when runs land in paused-like statuses (needs_human, done,
+      // awaiting_input, a pause honored mid-stage) with their events finalized — the window a held
+      // write-mode chat prompt has been waiting for.
+      this.kickChat();
     }
+  }
+
+  /** Start a background chat-pump pass if none is running; otherwise flag the running one to re-scan
+   *  once it settles (the {@link kick} single-flight pattern, for the chat side channel). */
+  private kickChat(): void {
+    if (this.chatDraining) {
+      this.chatRerun = true;
+      return;
+    }
+    this.chatDraining = true;
+    this.chatCurrent = this.chatLoop();
+  }
+
+  /**
+   * Drain the chat queue: claim and run every exchange that is safe *right now* (the permission gate
+   * lives in {@link Repository.claimNextChatExchange}), one at a time. Deliberately serial — chat
+   * volume is an operator typing, not a fleet — and stops claiming during shutdown (an in-flight
+   * exchange re-queues itself; see {@link runChatExchange}).
+   */
+  private async chatLoop(): Promise<void> {
+    try {
+      do {
+        this.chatRerun = false;
+        while (!this.loop.isShuttingDown) {
+          const exchange = this.repo.claimNextChatExchange();
+          if (!exchange) break;
+          await this.runChatExchange(exchange);
+        }
+      } while (this.chatRerun);
+    } catch (err) {
+      this.onError(err); // defensive: per-exchange failures are recorded on the exchange, not thrown
+    } finally {
+      this.chatDraining = false;
+    }
+  }
+
+  /** Run one claimed exchange end to end, recording its outcome and streaming each state change. */
+  private async runChatExchange(exchange: ChatExchange): Promise<void> {
+    this.broadcaster.publish({ type: 'chat', runId: exchange.runId, exchange }); // now `running`
+    try {
+      const run = this.repo.getRun(exchange.runId);
+      if (!run) throw new Error(`run ${exchange.runId} vanished`);
+      const result = await this.runner.runChat(run, exchange);
+      this.repo.completeChatExchange(exchange.id, {
+        response: result.response,
+        tokens: result.tokens,
+        commitSha: result.commitSha ?? null,
+      });
+    } catch (err) {
+      if (this.loop.isShuttingDown) {
+        // The failure is (almost surely) our own shutdown interrupt — the harness child was signalled.
+        // Re-queue rather than fail, mirroring how an interrupted stage's event stays recoverable.
+        this.repo.recoverRunningChats();
+      } else {
+        this.repo.failChatExchange(exchange.id, err instanceof Error ? err.message : String(err));
+      }
+    }
+    this.broadcaster.publish({ type: 'chat', runId: exchange.runId, exchange: this.repo.getChatExchange(exchange.id)! });
+    // A write exchange gated stage dispatch while it ran; now that the run's tree is free again,
+    // re-kick the event pump so a resume/reopen that landed mid-chat dispatches immediately.
+    if (exchange.mode === 'write' && !this.loop.isShuttingDown) this.kick();
   }
 
   /**

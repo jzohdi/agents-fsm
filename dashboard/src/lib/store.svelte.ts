@@ -8,7 +8,7 @@
 
 import { request } from './api';
 import { routeFromPath, routePath, type Route } from './render';
-import type { LoadedConfig, LogLine, ModelCatalog, Repo, Run, RunDetail, Settings, Suggestion } from './types';
+import type { ChatExchange, ChatMode, LoadedConfig, LogLine, ModelCatalog, Repo, Run, RunDetail, Settings, Suggestion } from './types';
 
 export const ui = $state({
   runs: [] as Run[], // newest first
@@ -50,6 +50,14 @@ export const ui = $state({
   // an older daemon without the route (the selector then hides).
   defaultHarness: null as string | null,
   harnesses: [] as string[],
+  // Run chat (the per-run operator ↔ agent side channel). The thread itself lives on `detail.chat`;
+  // these are the dock's view state: open/closed, the sticky permission mode, and how many replies
+  // landed while the dock was closed (the launcher badge). Unread resets on open and on run switch.
+  chatOpen: false,
+  chatMode: 'read' as ChatMode,
+  chatUnread: 0,
+  // A send in flight (disables the composer so one prompt can't be posted twice).
+  chatSending: false,
 });
 
 /** Adopt the current pathname and follow browser back/forward. Call once at mount. */
@@ -437,8 +445,10 @@ export async function startRun(issueRef: string): Promise<void> {
 }
 
 export async function selectRun(id: number): Promise<void> {
+  const switched = ui.selectedId !== id;
   ui.selectedId = id;
   ui.logs = [];
+  if (switched) ui.chatUnread = 0; // the badge counts the *selected* run's replies only
   await refreshDetail();
 }
 
@@ -461,6 +471,21 @@ export async function control(action: 'pause' | 'resume' | 'stop', notes?: strin
     await refreshDetail();
   } catch (err) {
     banner(`${action} failed: ${(err as Error).message}`, 'err');
+  }
+}
+
+/**
+ * Escape hatch: ask the daemon to run the dedicated conflict resolver on a finished run whose PR
+ * conflicts with base (`POST /runs/:id/resolve-conflicts`). Works regardless of the repo's conflict
+ * policy — clicking is the authorization. Refreshes the run so it shows entering `resolve_conflicts`.
+ */
+export async function resolveConflicts(id: number): Promise<void> {
+  try {
+    upsertRun(await request<Run>('POST', `/runs/${id}/resolve-conflicts`));
+    if (id === ui.selectedId) await refreshDetail();
+    banner(`Resolving merge conflicts for run ${id}…`, 'ok');
+  } catch (err) {
+    banner(`Could not start conflict resolution: ${(err as Error).message}`, 'err');
   }
 }
 
@@ -531,6 +556,49 @@ export async function checkReply(id: number): Promise<void> {
   }
 }
 
+// --- run chat (the per-run operator ↔ agent side channel) -----------------------
+
+export function toggleChat(open?: boolean): void {
+  ui.chatOpen = open ?? !ui.chatOpen;
+  if (ui.chatOpen) ui.chatUnread = 0;
+}
+
+export function setChatMode(mode: ChatMode): void {
+  ui.chatMode = mode;
+}
+
+/**
+ * Send a chat prompt to the selected run (`POST /runs/:id/chat`). `read` prompts dispatch
+ * immediately (even mid-stage); `write` prompts hold until the pipeline pauses, then edit + commit +
+ * push. Returns whether the send was accepted, so the composer knows to clear itself. The reply
+ * arrives via the stream's `chat` event (which refreshes the thread).
+ */
+export async function sendChat(prompt: string, mode: ChatMode): Promise<boolean> {
+  if (ui.selectedId === null || !prompt.trim() || ui.chatSending) return false;
+  ui.chatSending = true;
+  try {
+    await request<ChatExchange>('POST', `/runs/${ui.selectedId}/chat`, { prompt: prompt.trim(), mode });
+    await refreshDetail(); // show the new exchange (queued or already running) without waiting on SSE
+    return true;
+  } catch (err) {
+    banner(`Chat failed: ${(err as Error).message}`, 'err');
+    return false;
+  } finally {
+    ui.chatSending = false;
+  }
+}
+
+/** Withdraw a still-queued chat prompt (`POST /runs/:id/chat/:chatId/cancel`). */
+export async function cancelChat(chatId: number): Promise<void> {
+  if (ui.selectedId === null) return;
+  try {
+    await request<ChatExchange>('POST', `/runs/${ui.selectedId}/chat/${chatId}/cancel`);
+    await refreshDetail();
+  } catch (err) {
+    banner(`Cancel failed: ${(err as Error).message}`, 'err');
+  }
+}
+
 export async function saveConfig(raw: unknown): Promise<{ ok: boolean; msg: string }> {
   try {
     const { version } = await request<{ version: string }>('PUT', '/config', raw);
@@ -558,5 +626,13 @@ export function connectStream(): void {
     if (data.activity.runId === ui.selectedId) {
       ui.logs.push(toLogLine('info', data.activity.activity.summary, { stage: data.activity.stage, kind: data.activity.activity.kind }));
     }
+  });
+  // Run-chat lifecycle (queued → running → done/error/cancelled): refresh the selected run's thread
+  // and, when a reply lands while the dock is closed, bump the launcher's unread badge.
+  es.addEventListener('chat', (e: MessageEvent) => {
+    const data = JSON.parse(e.data) as { runId: number; exchange: ChatExchange };
+    if (data.runId !== ui.selectedId) return;
+    if (!ui.chatOpen && (data.exchange.status === 'done' || data.exchange.status === 'error')) ui.chatUnread += 1;
+    void refreshDetail();
   });
 }

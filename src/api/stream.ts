@@ -12,7 +12,7 @@
  */
 
 import type { PhaseActivity } from '../agent/runner';
-import type { Run, RunStatus, Transition } from '../store/repository';
+import type { ChatExchange, Run, RunStatus, Transition } from '../store/repository';
 
 /**
  * Everything the dashboard watches, as one discriminated union:
@@ -21,11 +21,14 @@ import type { Run, RunStatus, Transition } from '../store/repository';
  *  - `activity` — one live "what is the agent doing now" step from a running stage (also persisted to
  *    the `logs` table; this is the in-process push of the same data).
  *  - `status` — a run status change with no state transition: `pause` / `resume`-from-paused / `stop`.
+ *  - `chat` — a run-chat exchange changed state (queued / claimed / done / error / cancelled), with
+ *    the full exchange so connected dashboards update the thread without a refetch.
  */
 export type StreamEvent =
   | { type: 'transition'; runId: number; transition: Transition; run: Run }
   | { type: 'activity'; activity: PhaseActivity }
-  | { type: 'status'; runId: number; status: RunStatus; run: Run };
+  | { type: 'status'; runId: number; status: RunStatus; run: Run }
+  | { type: 'chat'; runId: number; exchange: ChatExchange };
 
 export type StreamListener = (event: StreamEvent) => void;
 

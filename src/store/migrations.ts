@@ -157,6 +157,32 @@ export const MIGRATIONS: Migration[] = [
     // and a fresh DB already has it from schema.sql. Mirrors schema.sql.
     apply: (db) => addColumnIfMissing(db, 'repos', 'conflict_policy', "TEXT NOT NULL DEFAULT 'manual'"),
   },
+  {
+    version: 13,
+    name: 'create run_chat',
+    // Per-run operator ↔ agent chat (the "general chat" side channel). Mirrors schema.sql; `CREATE
+    // TABLE IF NOT EXISTS` makes this a no-op on a fresh DB the baseline already provisioned and a
+    // retrofit on a pre-existing one.
+    apply: (db) =>
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS run_chat (
+           id          INTEGER PRIMARY KEY AUTOINCREMENT,
+           run_id      INTEGER NOT NULL REFERENCES runs(id),
+           prompt      TEXT    NOT NULL,
+           mode        TEXT    NOT NULL CHECK (mode IN ('read', 'write')),
+           status      TEXT    NOT NULL DEFAULT 'queued'
+                         CHECK (status IN ('queued', 'running', 'done', 'error', 'cancelled')),
+           response    TEXT,
+           error       TEXT,
+           commit_sha  TEXT,
+           tokens      INTEGER NOT NULL DEFAULT 0,
+           created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+           started_at  TEXT,
+           finished_at TEXT
+         );
+         CREATE INDEX IF NOT EXISTS idx_run_chat_run ON run_chat(run_id, id);`,
+      ),
+  },
 ];
 
 // Guard the invariants the runner relies on: versions a gap-free, strictly increasing 1..N sequence

@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { ui, control, revertRun, overrideCost, setModel, setEffort, setHarness, loadCatalog, checkPrFeedback, checkReply } from './store.svelte';
+  import { ui, control, revertRun, resolveConflicts, overrideCost, setModel, setEffort, setHarness, loadCatalog, checkPrFeedback, checkReply } from './store.svelte';
   import ModelPicker from './ModelPicker.svelte';
   import EffortSelect from './EffortSelect.svelte';
   import { telemetryModel, escalationModel, activityLane, costStatusModel, issueUrl, prUrl, branchUrl, isWatchingPrFeedback, fmtRunCost, fmtDuration, fmtTokens, escapeHtml, humanizeState, humanizeHarness, schedulingLabel } from './render';
   import StateMachine from './StateMachine.svelte';
   import ScrollArea from './ScrollArea.svelte';
+  import RunChat from './RunChat.svelte';
 
   const detail = $derived(ui.detail);
   const run = $derived(detail?.run ?? null);
@@ -53,11 +54,17 @@
 
   let revertTo = $state('');
   let revertReason = $state('');
+  // The revert form is disclosed on demand (it's the rare action); close it when switching runs.
+  let revertOpen = $state(false);
   // Operator guidance typed into the escalation panel; sent with resume and delivered to the
   // retried stage as its `reentry.operatorNotes` (so a guided resume changes the retry's behavior).
   let guidance = $state('');
   $effect(() => {
     if (revertable.length && !revertable.includes(revertTo)) revertTo = revertable[0]!;
+  });
+  $effect(() => {
+    void run?.id;
+    revertOpen = false;
   });
 
   // Split the one activity stream into two non-redundant feeds: the agent's actions (tool calls) go to
@@ -92,6 +99,7 @@
     e.preventDefault();
     await revertRun(revertTo, revertReason);
     revertReason = '';
+    revertOpen = false;
   }
 
   async function submitGuidedResume(e: SubmitEvent) {
@@ -120,6 +128,13 @@
           <span title="Scheduling declarations from the issue's marker block (edit them on the issue)">{schedulingLine}</span><span class="sep">·</span>
         {/if}
         <span class="af-statline af-stat-{run.status}"><span class="pip"></span>{run.status.replace('_', ' ')}</span>
+        <!-- resolve_conflicts is a loop-owned pseudo-state off the FSM spine, so the stepper (which
+             renders forward states) can't show it — surface it explicitly so a run mid-resolution
+             doesn't read as "stuck in plan". -->
+        {#if run.currentState === 'resolve_conflicts'}
+          <span class="sep">·</span>
+          <span class="af-statline af-resolving" title="Merging the latest base into the branch and resolving conflicts (dedicated resolver — not the pipeline)"><span class="pip"></span>resolving merge conflicts</span>
+        {/if}
       </div>
       <div class="af-open">
         {#if issueHref}<a class="af-openbtn" href={issueHref} target="_blank" rel="noopener">Open issue ↗</a>{/if}
@@ -127,59 +142,87 @@
       </div>
     </div>
     <div class="af-controls">
-      {#if !terminal && ui.harnesses.length > 1}
-        <!-- Per-run harness switch: takes effect on the run's NEXT stage (an in-flight stage finishes
-             on its current harness; pause first to hold the run before its next dispatch). Switching
-             clears the model/effort overrides — they belong to the old harness's catalog. -->
-        <div class="af-model">
-          <span class="lbl">harness</span>
-          <select
-            aria-label="run harness"
-            value={run.harness}
-            onchange={(e) => setHarness(run.id, e.currentTarget.value)}
-          >
-            {#each ui.harnesses as h (h)}<option value={h}>{humanizeHarness(h)}</option>{/each}
-          </select>
-        </div>
-      {/if}
-      {#if !terminal && runCatalog && runCatalog.models.length}
-        <!-- A plain wrapper (not a <label>): a <label> around the picker's button would forward a second
-             synthetic click to it, immediately re-closing the popover. -->
-        <div class="af-model">
-          <span class="lbl">model</span>
-          <ModelPicker
-            models={runCatalog.models}
-            value={run.modelOverride}
-            defaultLabel={runCatalog.defaultModel}
-            onselect={(id) => setModel(run.id, id)}
-            ariaLabel="run model"
-          />
-        </div>
-        {#if runEfforts.length}
-          <EffortSelect efforts={runEfforts} value={run.effortOverride} onselect={(e) => setEffort(run.id, e)} ariaLabel="run reasoning effort" />
+      <!-- Transport row: the run's one likely action is the solid button (Pause while running,
+           Resume when held); Stop and the revert disclosure stay quiet mono ghosts. The primary is
+           first in the DOM (focus order) but painted rightmost via CSS `order`. -->
+      <div class="af-actrow">
+        {#if run.status === 'running'}
+          <button type="button" class="af-primary" onclick={() => control('pause')}><span class="glyph" aria-hidden="true">❚❚</span>Pause</button>
+        {:else if run.status === 'paused' || run.status === 'needs_human' || run.status === 'stopped'}
+          <!-- stop is reversible: Resume re-opens a stopped run and continues from where it left off -->
+          <button type="button" class="af-primary" onclick={() => control('resume')}><span class="glyph" aria-hidden="true">▸</span>Resume</button>
+        {:else if run.status === 'done' && !watchingPrFeedback}
+          <span class="terminal-note">complete — no further control</span>
         {/if}
-      {/if}
-      {#if run.status === 'running'}
-        <button type="button" onclick={() => control('pause')}>Pause</button>
-      {/if}
-      {#if run.status === 'paused' || run.status === 'needs_human'}
-        <button type="button" onclick={() => control('resume')}>Resume</button>
-      {/if}
-      {#if run.status === 'stopped'}
-        <!-- stop is reversible: re-open the stopped run and continue from where it left off -->
-        <button type="button" onclick={() => control('resume')}>Resume</button>
-      {/if}
-      {#if !terminal}
-        <form class="af-revert" onsubmit={submitRevert}>
+        {#if !terminal}
+          <button type="button" class="af-ghostact danger" onclick={() => control('stop')}>Stop</button>
+          <button
+            type="button"
+            class="af-ghostact"
+            class:on={revertOpen}
+            aria-expanded={revertOpen}
+            onclick={() => (revertOpen = !revertOpen)}
+          >Revert<span class="caret" aria-hidden="true">{revertOpen ? '▴' : '▾'}</span></button>
+        {/if}
+        <!-- Escape hatch: a finished run with a PR can drift into conflict with base. This runs the
+             dedicated resolver (merge base, resolve, push) without re-running the pipeline — works under
+             either conflict policy, since clicking it is the authorization. -->
+        {#if run.prNumber !== null && (run.status === 'done' || run.status === 'needs_human')}
+          <button type="button" class="af-ghostact" onclick={() => resolveConflicts(run.id)} title="Merge the latest base into this run's branch, resolve any conflicts with an agent, and push — without re-running the pipeline">
+            Resolve merge conflicts
+          </button>
+        {/if}
+      </div>
+
+      {#if revertOpen && !terminal}
+        <!-- The disclosed revert panel — amber, like every back-edge in this UI. -->
+        <form class="af-rewind" onsubmit={submitRevert}>
+          <span class="rlbl" aria-hidden="true">↩ back to</span>
           <select bind:value={revertTo} aria-label="revert to state">
             {#each revertable as s (s)}<option value={s}>{s}</option>{/each}
           </select>
-          <input bind:value={revertReason} placeholder="revert reason" aria-label="revert reason" />
+          <input bind:value={revertReason} placeholder="why? (recorded on the run)" aria-label="revert reason" />
           <button type="submit">Revert</button>
         </form>
-        <button type="button" class="stop" onclick={() => control('stop')}>Stop</button>
-      {:else if run.status === 'done' && !watchingPrFeedback}
-        <span class="terminal-note">terminal — no further control</span>
+      {/if}
+
+      {#if !terminal && (ui.harnesses.length > 1 || (runCatalog?.models.length ?? 0) > 0)}
+        <!-- Agent-config rail: what will run the next stage. Deliberately quiet next to the transport
+             row — settings you glance at, not actions you reach for. -->
+        <div class="af-rig">
+          {#if ui.harnesses.length > 1}
+            <!-- Per-run harness switch: takes effect on the run's NEXT stage (an in-flight stage finishes
+                 on its current harness; pause first to hold the run before its next dispatch). Switching
+                 clears the model/effort overrides — they belong to the old harness's catalog. -->
+            <label class="cell">
+              <span class="lbl">harness</span>
+              <select
+                aria-label="run harness"
+                value={run.harness}
+                onchange={(e) => setHarness(run.id, e.currentTarget.value)}
+              >
+                {#each ui.harnesses as h (h)}<option value={h}>{humanizeHarness(h)}</option>{/each}
+              </select>
+            </label>
+          {/if}
+          {#if runCatalog && runCatalog.models.length}
+            <!-- A plain wrapper (not a <label>): a <label> around the picker's button would forward a second
+                 synthetic click to it, immediately re-closing the popover. -->
+            <div class="cell">
+              <span class="lbl">model</span>
+              <ModelPicker
+                models={runCatalog.models}
+                value={run.modelOverride}
+                defaultLabel={runCatalog.defaultModel}
+                onselect={(id) => setModel(run.id, id)}
+                ariaLabel="run model"
+              />
+            </div>
+            {#if runEfforts.length}
+              <EffortSelect efforts={runEfforts} value={run.effortOverride} onselect={(e) => setEffort(run.id, e)} ariaLabel="run reasoning effort" />
+            {/if}
+          {/if}
+        </div>
       {/if}
       {#if showCostOverride}
         <div class="af-cost-override">
@@ -360,4 +403,7 @@
     </div>
   </div>
 </section>
+
+<!-- The run's agent-chat dock (floating, bottom-right) — exclusive to the selected run. -->
+<RunChat />
 {/if}

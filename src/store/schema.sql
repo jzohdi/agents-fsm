@@ -174,6 +174,30 @@ CREATE TABLE IF NOT EXISTS repos (
   conflict_policy TEXT NOT NULL DEFAULT 'manual'   -- 'manual' | 'auto'
 );
 
+-- Per-run operator ↔ agent chat — the run's "general chat" side channel (singular name by convention
+-- for new tables). One row per exchange: the operator's prompt plus the agent's eventual reply. `mode`
+-- is the permission grant the operator chose: 'read' exchanges run immediately (read-only tools, safe
+-- alongside an in-flight stage); 'write' exchanges queue until the run is parked in a paused-like
+-- status with no stage in flight, then run with edit tools and commit+push their changes. While a
+-- 'write' exchange is `running`, the event claim refuses to dispatch a stage for its run (the chat ⇄
+-- stage mutual exclusion — see Repository.claimNextEvent / claimNextChatExchange).
+CREATE TABLE IF NOT EXISTS run_chat (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id      INTEGER NOT NULL REFERENCES runs(id),
+  prompt      TEXT    NOT NULL,
+  mode        TEXT    NOT NULL CHECK (mode IN ('read', 'write')),
+  status      TEXT    NOT NULL DEFAULT 'queued'
+                CHECK (status IN ('queued', 'running', 'done', 'error', 'cancelled')),
+  response    TEXT,                                    -- the agent's reply (markdown), set when done
+  error       TEXT,                                    -- why the exchange failed, set when status = 'error'
+  commit_sha  TEXT,                                    -- write mode: the commit pushed after the agent worked
+  tokens      INTEGER NOT NULL DEFAULT 0,
+  created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  started_at  TEXT,
+  finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_run_chat_run ON run_chat(run_id, id);
+
 -- A tiny key/value store for daemon-level settings that must survive restarts (multi-harness support).
 -- One row today: `default_harness` — the harness a new run gets when the request omits one, remembered
 -- across boots (the dashboard's harness selector writes it; `resolveDefaultHarness` reads it). Kept

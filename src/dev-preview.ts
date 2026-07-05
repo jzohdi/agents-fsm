@@ -18,7 +18,7 @@ import { parseCliArgs } from './cli-args';
 import { buildOrchestrator } from './build-runner';
 import { createApiServer } from './api/server';
 import { FakeGitHub } from './integration/github-fake';
-import { seedRuns, seedSuggestions } from './dev-seed';
+import { seedChat, seedRuns, seedSuggestions } from './dev-seed';
 import type { AgentActivity } from './agent/executor';
 
 const PORT = Number(process.env.PORT ?? 4319);
@@ -74,6 +74,8 @@ function main(): void {
   // the "model thinking" stream animates on the run the operator first sees.
   const running = repo.listRuns({ status: 'running' });
   const runningId = running.length ? Math.max(...running.map((r) => r.id)) : ids[0]!;
+  // Seed the auto-selected run's chat thread so the dock previews every exchange state.
+  seedChat(repo, runningId);
 
   const server: Server = createApiServer(orchestrator);
   server.listen(PORT, '127.0.0.1', () => {

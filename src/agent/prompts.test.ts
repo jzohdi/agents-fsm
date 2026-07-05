@@ -65,6 +65,15 @@ describe('createSystemPromptFn — composition', () => {
     expect(prompt).not.toContain(VERDICT_CONTRACT);
   });
 
+  it('composes chat as base + the chat phase, with its own inline contract (no envelope/verdict)', () => {
+    const prompt = systemPrompt('chat', 'produce');
+    expect(prompt).toContain(BASE);
+    expect(prompt).toContain('Phase: operator chat');
+    expect(prompt).toContain('"response"');
+    expect(prompt).not.toContain(ENVELOPE_CONTRACT);
+    expect(prompt).not.toContain(VERDICT_CONTRACT);
+  });
+
   it('throws for a stage with no role prompt (fail fast, never a half-formed prompt)', () => {
     expect(() => systemPrompt('no_such_stage', 'produce')).toThrowError(/No stage prompt for "no_such_stage"/);
   });

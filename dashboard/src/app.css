@@ -93,6 +93,7 @@ input, textarea, button, select { font: inherit; }
 .af-repotab:hover { color: var(--ink); background: var(--paper); }
 .af-repotab.on { color: var(--ink); background: var(--accent-soft); border-color: var(--accent-line); }
 .af-repotab .nm { letter-spacing: -0.01em; }
+.af-repotab .nm .own { color: var(--ink3); font-weight: 500; }
 .af-repotab .ct { font-family: var(--mono); font-size: 11px; color: var(--ink3); }
 .af-repotab.on .ct { color: var(--accent); }
 .af-repotab .warn { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--rose); }
@@ -173,6 +174,7 @@ input, textarea, button, select { font: inherit; }
 .af-stat-awaiting_input, .af-stat-blocked { color: var(--violet); }
 .af-stat-done { color: var(--ink3); }
 .af-stat-needs_human { color: var(--rose); }
+.af-resolving { color: var(--amber); }
 .af-stat-stopped { color: var(--ink4); }
 
 /* --- pipeline buckets (no sidebar, no cards) --- */
@@ -237,23 +239,60 @@ input, textarea, button, select { font: inherit; }
 .af-dhead .sep { color: var(--ink4); }
 .af-statline { display: inline-flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
 .af-statline .pip { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
-.af-controls { margin-left: auto; display: flex; border: 1px solid var(--rule); flex-wrap: wrap; }
-.af-controls button { border: 0; background: transparent; font-size: 13px; font-weight: 600; color: var(--ink2); padding: 9px 18px; cursor: pointer; border-left: 1px solid var(--rule); }
-.af-controls button:first-child { border-left: 0; }
-.af-controls button:hover { background: var(--paper2); color: var(--ink); }
-.af-controls button.stop:hover { background: var(--rose-soft); color: var(--rose); }
-.af-controls .terminal-note { padding: 9px 18px; color: var(--ink3); font-size: 12.5px; }
-.af-revert { display: flex; align-items: stretch; }
-.af-revert select, .af-revert input { border: 0; border-left: 1px solid var(--rule); background: transparent; padding: 9px 12px; font-family: var(--mono); font-size: 12px; color: var(--ink); }
-.af-revert input { width: 150px; }
-.af-revert input:focus, .af-revert select:focus { outline: none; background: var(--paper2); }
+/* --- run controls: a right-aligned two-tier block --------------------------------------------
+   Tier 1 (actions): the one likely action is a solid accent button; Stop / Revert / rescue actions
+   are quiet mono ghosts beside it. Tier 2 (config rail): harness · model · effort as a hairline-
+   separated labeled rail beneath — glanceable settings, visually subordinate to the actions.
+   The revert form itself is disclosed on demand (`Revert ▾`), amber like every back-edge. */
+.af-controls { margin-left: auto; display: flex; flex-direction: column; align-items: flex-end; gap: 12px; max-width: 100%; }
+.af-actrow { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
+.af-primary {
+  display: inline-flex; align-items: center; gap: 9px; order: 10; margin-left: 8px;
+  border: 0; border-radius: 2px; background: var(--accent); color: #fff; cursor: pointer;
+  font-size: 13px; font-weight: 600; letter-spacing: 0.01em; padding: 10px 24px;
+  box-shadow: 0 10px 22px -14px rgba(31, 122, 82, 0.9);
+}
+.af-primary:hover { background: #19623f; }
+.af-primary .glyph { font-size: 9px; line-height: 1; letter-spacing: 0.08em; }
+.af-ghostact {
+  border: 1px solid transparent; border-radius: 2px; background: none; cursor: pointer;
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--ink3); padding: 9px 12px; transition: color 0.12s, background 0.12s, border-color 0.12s;
+}
+.af-ghostact:hover { color: var(--ink); background: var(--paper2); border-color: var(--rule); }
+.af-ghostact.danger:hover { color: var(--rose); background: var(--rose-soft); border-color: var(--rose-soft); }
+.af-ghostact.on { color: var(--ink); background: var(--paper2); border-color: var(--rule2); }
+.af-ghostact .caret { margin-left: 6px; font-size: 8.5px; color: var(--ink4); }
+.af-controls .terminal-note { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink4); padding: 10px 2px; }
 
-/* Per-run model picker, in the run controls (matches the revert select's inline look). */
-.af-model { display: flex; align-items: center; border-left: 1px solid var(--rule); }
-.af-model:first-child { border-left: 0; }
-.af-model .lbl { padding: 9px 0 9px 14px; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink4); }
-.af-model select { border: 0; background: transparent; padding: 9px 8px; font-family: var(--mono); font-size: 12px; color: var(--ink); cursor: pointer; }
-.af-model select:focus { outline: none; background: var(--paper2); }
+/* The disclosed revert panel: rewind target + optional reason + confirm, one bordered strip. */
+.af-rewind {
+  display: flex; align-items: stretch; border: 1px solid var(--rule2); border-radius: 2px;
+  background: var(--paper2); overflow: hidden; animation: af-rise 0.18s both;
+}
+.af-rewind .rlbl {
+  display: flex; align-items: center; font-family: var(--mono); font-size: 9.5px; font-weight: 600;
+  letter-spacing: 0.12em; text-transform: uppercase; color: var(--amber); padding: 0 4px 0 12px; white-space: nowrap;
+}
+.af-rewind select, .af-rewind input { border: 0; background: transparent; padding: 9px 10px; font-family: var(--mono); font-size: 12px; color: var(--ink); }
+.af-rewind input { width: 200px; border-left: 1px solid var(--rule); }
+.af-rewind input::placeholder { color: var(--ink4); }
+.af-rewind select:focus, .af-rewind input:focus { outline: none; background: var(--paper); }
+.af-rewind button {
+  border: 0; border-left: 1px solid var(--rule); background: var(--amber-soft); color: var(--amber);
+  font-size: 12px; font-weight: 700; padding: 9px 16px; cursor: pointer;
+}
+.af-rewind button:hover { background: var(--amber); color: #fff; }
+
+/* The agent-config rail: quiet labeled cells, hairline-separated. */
+.af-rig { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; row-gap: 6px; }
+.af-rig .cell { display: flex; align-items: center; gap: 9px; padding: 0 14px; border-left: 1px solid var(--rule); }
+.af-rig .cell:first-child { border-left: 0; padding-left: 0; }
+.af-rig > :last-child { padding-right: 0; }
+.af-rig .lbl, .af-rig .af-effort .elab { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink4); }
+.af-rig .cell select { border: 0; background: transparent; padding: 6px 2px; font-family: var(--mono); font-size: 12px; color: var(--ink); cursor: pointer; }
+.af-rig .cell select:focus { outline: none; background: var(--paper2); }
+.af-rig .af-effort { gap: 9px; }
 
 /* --- searchable model picker (ModelPicker.svelte): shared by the new-run bar + the run controls --- */
 .af-mp { position: relative; display: inline-flex; }
@@ -318,21 +357,20 @@ input, textarea, button, select { font: inherit; }
 .af-effort .elab { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink4); }
 .af-effort select { border: 0; background: transparent; font-family: var(--mono); font-size: 12.5px; color: var(--ink); cursor: pointer; padding: 6px 4px; }
 .af-effort select:focus { outline: none; background: var(--paper2); }
-.af-model + .af-effort { border-left: 0; padding-left: 0; }
 
 /* Global cost ceiling (M8 B3): the header chip + per-run override controls. */
 .af-cost { display: flex; align-items: center; gap: 7px; font-weight: 600; font-size: 12.5px; color: var(--ink2); font-family: var(--mono); }
 .af-cost .d { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
 .af-cost.over { color: var(--rose); }
 .af-cost.over .d { background: var(--rose); }
-.af-cost-override { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-left: 1px solid var(--rule); }
+.af-cost-override { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .af-cost-override .af-tag { font-size: 11.5px; font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase; color: var(--ink3); }
 .af-cost-override .af-tag.over { color: var(--rose); }
 .af-cost-override button { border: 1px solid var(--accent-line); background: var(--accent-soft); color: var(--accent); font-size: 12.5px; font-weight: 600; padding: 6px 14px; border-radius: 2px; cursor: pointer; }
 .af-cost-override button:hover { background: var(--accent); color: #fff; }
 
 /* PR-feedback watch indicator + on-demand "Check now" (a finished run whose open PR is being polled). */
-.af-prwatch { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-left: 1px solid var(--rule); }
+.af-prwatch { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .af-prwatch .af-tag { display: inline-flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase; color: var(--accent); }
 .af-prwatch .af-tag .pip { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: af-watchpulse 1.9s ease-in-out infinite; }
 .af-prwatch button { border: 1px solid var(--accent-line); background: var(--accent-soft); color: var(--accent); font-size: 12.5px; font-weight: 600; padding: 6px 14px; border-radius: 2px; cursor: pointer; }
@@ -377,9 +415,11 @@ input, textarea, button, select { font: inherit; }
 .af-sm-foot .it b { color: var(--ink2); font-weight: 600; }
 .af-sm-foot .be { color: var(--amber); font-family: var(--mono); font-size: 11.5px; }
 
-/* --- triptych (telemetry / artifacts / transitions), borderless --- */
-.af-triptych { display: grid; grid-template-columns: 1.1fr 1fr 1.25fr; gap: 0; }
-.af-col { padding: 0 30px; border-right: 1px solid var(--rule); }
+/* --- triptych (telemetry / artifacts / transitions), borderless ---
+   minmax(0,…) tracks + min-width:0: an unbroken mono string (a URL, a long reason) must wrap inside
+   its column, never widen the page. */
+.af-triptych { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1.25fr); gap: 0; }
+.af-col { padding: 0 30px; border-right: 1px solid var(--rule); min-width: 0; }
 .af-col:first-child { padding-left: 0; }
 .af-col:last-child { padding-right: 0; border-right: 0; }
 .af-col > .af-eyebrow { display: block; margin-bottom: 16px; }
@@ -407,26 +447,29 @@ input, textarea, button, select { font: inherit; }
 .af-art:first-of-type { border-top: 0; }
 .af-art .k { font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink3); min-width: 60px; }
 .af-art .v { font-size: 13px; word-break: break-word; }
-.af-tr { display: grid; grid-template-columns: auto auto 1fr; gap: 9px; align-items: baseline; padding: 9px 0; border-top: 1px solid var(--rule); font-size: 13px; }
+.af-tr { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 9px; align-items: baseline; padding: 9px 0; border-top: 1px solid var(--rule); font-size: 13px; }
 .af-tr:first-of-type { border-top: 0; }
 .af-tr .f { color: var(--ink3); font-family: var(--mono); font-size: 12px; }
 .af-tr .ar { color: var(--ink4); }
 .af-tr .to { font-weight: 600; font-family: var(--mono); font-size: 12px; }
 .af-tr .trig { font-family: var(--mono); font-size: 11px; color: var(--ink3); }
-.af-tr .why { grid-column: 1 / -1; color: var(--ink3); font-size: 12px; font-style: italic; margin-top: -2px; }
+.af-tr .why { grid-column: 1 / -1; color: var(--ink3); font-size: 12px; font-style: italic; margin-top: -2px; overflow-wrap: anywhere; }
 .af-tr.back .ar, .af-tr.back .trig { color: var(--amber); }
 .af-empty { color: var(--ink3); font-size: 13px; }
 
-/* --- activity: wire + live thinking --- */
-.af-actgrid { display: grid; grid-template-columns: 1.5fr 1fr; gap: 0; }
-.af-actgrid .wirecol { padding-right: 34px; border-right: 1px solid var(--rule); }
-.af-actgrid .livecol { padding-left: 34px; }
+/* --- activity: wire + live thinking ---
+   minmax(0,…) tracks + overflow-wrap everywhere: wire lines are shell commands and paths — long
+   unbroken tokens must wrap inside their column, never set the page width (the mobile-overflow bug). */
+.af-actgrid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 0; }
+.af-actgrid .wirecol { padding-right: 34px; border-right: 1px solid var(--rule); min-width: 0; }
+.af-actgrid .livecol { padding-left: 34px; min-width: 0; }
 .af-actgrid .af-eyebrow { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 .af-wire { font-family: var(--mono); font-size: 12.5px; }
 /* Label column is wide enough for the longest stage id (e.g. INTERFACE_DESIGN); the ellipsis is a
    safety net so an unusually long custom stage clips instead of overlapping the message (the bug). */
-.af-wire .ln { display: grid; grid-template-columns: 116px 1fr; gap: 14px; padding: 9px 0; border-top: 1px solid var(--rule); align-items: baseline; }
+.af-wire .ln { display: grid; grid-template-columns: 116px minmax(0, 1fr); gap: 14px; padding: 9px 0; border-top: 1px solid var(--rule); align-items: baseline; }
 .af-wire .ln:first-child { border-top: 0; }
+.af-wire .msg { overflow-wrap: anywhere; }
 .af-wire .stg { font-weight: 600; font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink3); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .af-wire .ln.warn { background: linear-gradient(90deg, var(--rose-soft), transparent 70%); margin: 0 -10px; padding: 9px 10px; }
 .af-wire .ln.warn .stg { color: var(--rose); }
@@ -434,13 +477,15 @@ input, textarea, button, select { font: inherit; }
 .af-wire .msg mark { background: var(--hl); color: var(--ink); padding: 1px 5px; border-radius: 3px; }
 
 .af-livebox { background: #15140f; border-radius: 4px; overflow: hidden; }
-.af-livebox .top { display: flex; align-items: center; gap: 9px; padding: 11px 15px; border-bottom: 1px solid #2a2820; }
+.af-livebox .top { display: flex; align-items: center; gap: 9px; padding: 11px 15px; border-bottom: 1px solid #2a2820; min-width: 0; }
+.af-livebox .top .lab, .af-livebox .top .model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .af-livebox .top .dd { width: 7px; height: 7px; border-radius: 50%; background: #5fd39a; box-shadow: 0 0 8px #5fd39a; animation: af-bk 1.3s steps(2) infinite; }
 @keyframes af-bk { 50% { opacity: 0.3; } }
 .af-livebox .top .lab { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: #9a9485; }
 .af-livebox .top .model { margin-left: auto; font-family: var(--mono); font-size: 11px; color: #5fd39a; }
 .af-stream {
   height: 248px; overflow: hidden; padding: 12px 15px; font-family: var(--mono); font-size: 12px; line-height: 1.85;
+  overflow-wrap: anywhere;
   -webkit-mask-image: linear-gradient(to bottom, transparent, #000 16%, #000 92%, transparent);
   mask-image: linear-gradient(to bottom, transparent, #000 16%, #000 92%, transparent);
 }
@@ -663,31 +708,57 @@ input, textarea, button, select { font: inherit; }
   .af-live { font-size: 0; gap: 0; } /* dot-only; its colour still carries the connection state */
   .af-live .d { width: 9px; height: 9px; }
 
-  /* --- file-a-run bar: the input owns its line; harness + Start run sit beneath --- */
-  .af-filebar .inner { flex-wrap: wrap; }
-  .af-filebar .lab { display: none; }
-  .af-filebar input { flex: 1 1 100%; padding: 14px 0 10px; }
-  .af-harness { border-left: 0; padding: 0 12px 12px 0; margin-right: auto; }
-  .af-filebar .file-btn { padding: 9px 24px; margin-bottom: 10px; align-self: center; white-space: nowrap; }
+  /* --- repo tabs: a one-line thumbable scroll strip (no wrap-jumble); owners drop out of the
+     pills (the title attr keeps the full ref), and the + enroll stays reachable at the end. --- */
+  .af-repotabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .af-repotabs::-webkit-scrollbar { display: none; }
+  .af-repotab { flex: 0 0 auto; white-space: nowrap; padding: 7px 12px; }
+  .af-repotab .nm .own { display: none; }
+  .af-repoadd { flex: 0 0 auto; }
+
+  /* --- file-a-run: a compose form — eyebrow title, the input on its own line, config as hairline
+     spec rows (label left, control right — same idiom as the run-detail rail), then a full-width
+     Start run. Mirrors the run-controls hierarchy: one emphasized action, quiet settings. --- */
+  .af-filebar .inner { flex-wrap: wrap; padding-top: 14px; padding-bottom: 16px; }
+  .af-filebar .lab { flex: 1 1 100%; border-right: 0; padding: 0; font-size: 10px; color: var(--ink3); }
+  .af-filebar input { flex: 1 1 100%; padding: 10px 0 12px; border-bottom: 1px solid var(--rule); }
+  .af-filebar .af-harness, .af-filebar .af-effort {
+    flex: 1 1 100%; justify-content: space-between; border-left: 0; border-bottom: 1px solid var(--rule); padding: 7px 0;
+  }
+  .af-filebar .hlab, .af-filebar .elab { font-size: 9.5px; letter-spacing: 0.14em; }
+  .af-filebar .af-harness select, .af-filebar .af-effort select, .af-filebar .af-mp-trigger { padding-right: 0; }
+  .af-filebar .file-btn { flex: 1 1 100%; margin-top: 14px; padding: 13px; font-size: 14px; border-radius: 2px; }
   .af-ac .grp, .af-ac .opt, .af-ac .none { padding-left: 16px; padding-right: 16px; }
   .af-runerr { padding-left: 16px; padding-right: 16px; }
 
-  /* --- run controls: one stacked column of full-width cells (hairline rows, not a jumble) --- */
+  /* --- run controls: the primary action owns a full-width row; Stop/Revert share the row beneath
+     as bordered halves; the config rail becomes hairline spec rows (label left, control right). --- */
   .af-dhead { gap: 18px; }
-  .af-controls { flex: 1 1 100%; margin-left: 0; flex-direction: column; align-items: stretch; }
-  .af-controls > * { border-left: 0; border-top: 1px solid var(--rule); }
-  /* Re-add the row separator on buttons: the desktop rule's `border: 0` shorthand cleared it. */
-  .af-controls button { border-left: 0; border-top: 1px solid var(--rule); padding: 12px 14px; }
-  .af-controls > :first-child { border-top: 0; }
-  .af-model { border-left: 0; justify-content: space-between; }
-  .af-revert { display: grid; grid-template-columns: 1fr auto; }
-  .af-revert select { grid-area: 1 / 1; border-left: 0; }
-  .af-revert button { grid-area: 1 / 2; border-top: 0; border-left: 1px solid var(--rule); }
-  .af-revert input { grid-area: 2 / 1 / 3 / 3; width: auto; border-left: 0; border-top: 1px solid var(--rule); }
+  .af-controls { flex: 1 1 100%; margin-left: 0; align-items: stretch; gap: 14px; border-top: 1px solid var(--rule); padding-top: 16px; }
+  .af-actrow { gap: 8px; }
+  .af-primary { order: -1; flex: 1 1 100%; margin-left: 0; justify-content: center; padding: 13px; font-size: 14px; }
+  .af-ghostact { flex: 1 1 0; border-color: var(--rule); padding: 10px 12px; }
+  .af-controls .terminal-note { flex: 1 1 100%; text-align: center; }
+  .af-rig { flex-direction: column; align-items: stretch; row-gap: 0; }
+  .af-rig .cell, .af-rig .af-effort { justify-content: space-between; border-left: 0; border-top: 1px solid var(--rule); padding: 7px 0; }
+  .af-rig > :first-child { border-top: 0; }
+  /* Revert panel: target + confirm on the first line, the reason gets its own full-width line. */
+  .af-rewind { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; }
+  .af-rewind .rlbl { grid-area: 1 / 1; }
+  .af-rewind select { grid-area: 1 / 2; }
+  .af-rewind button { grid-area: 1 / 3 / 3 / 4; }
+  .af-rewind input { grid-area: 2 / 1 / 3 / 3; width: auto; border-left: 0; border-top: 1px solid var(--rule); }
   /* Override rows: the tag reads as a heading line, the action buttons share the row beneath. */
-  .af-cost-override, .af-prwatch { border-left: 0; flex-wrap: wrap; padding: 12px 14px; }
+  .af-cost-override, .af-prwatch { justify-content: flex-start; }
   .af-cost-override .af-tag, .af-prwatch .af-tag { flex-basis: 100%; }
-  .af-cost-override button, .af-prwatch button { flex: 1 1 auto; border: 1px solid var(--accent-line); padding: 8px 14px; }
+  .af-cost-override button, .af-prwatch button { flex: 1 1 auto; }
+
+  /* --- activity wire: log-style lines — the stage tag flows inline before the message, so the
+     full width is available and long commands wrap instead of pushing past the screen edge. --- */
+  .af-wire { font-size: 12px; }
+  .af-wire .ln { display: block; padding: 8px 0; }
+  .af-wire .stg { display: inline; margin-right: 9px; white-space: normal; }
+  .af-wire .msg { display: inline; }
 
   /* --- home attention queue: what + when, the why on its own wrapping line, then the status --- */
   .af-hattn-row { display: grid; grid-template-columns: 16px 1fr auto; row-gap: 6px; align-items: baseline; }
@@ -715,7 +786,6 @@ input, textarea, button, select { font: inherit; }
   .af-wrap { padding: 0 16px; }
   .af-dhead h1 { font-size: 23px; }
   .af-filebar input { font-size: 14px; }
-  .af-filebar .lab { display: none; }
   /* condensed pipeline lanes (req 2 — mobile variant) */
   .af-bucket { flex: 0 0 200px; }
   .af-bucket.is-empty { flex: 0 0 auto; }
@@ -733,3 +803,112 @@ input, textarea, button, select { font: inherit; }
   .af-hstats .sub { font-size: 11px; }
   .af-hrepo .nm { font-size: 19px; }
 }
+
+/* --- run chat (the operator ↔ agent side channel; RunChat.svelte) ---
+   A floating "correspondence" dock, bottom-right: out of the way as a small mono pill, expanding into
+   a hairline-ruled thread. Prompts are typewritten (mono, like the file-a-run bar); replies are set as
+   prose behind an accent rule — the same editorial voice as the rest of Synthesis, no card boxes. */
+.af-chat-launch {
+  position: fixed; right: 22px; bottom: 20px; z-index: 60;
+  display: inline-flex; align-items: center; gap: 9px;
+  border: 1px solid var(--rule2); background: var(--paper2); color: var(--ink2);
+  font-family: var(--mono); font-size: 11px; font-weight: 500; letter-spacing: 0.14em; text-transform: uppercase;
+  padding: 9px 14px; border-radius: 2px; cursor: pointer;
+  box-shadow: 0 14px 30px -18px rgba(40, 35, 20, 0.5);
+  transition: color 0.12s, border-color 0.12s, transform 0.12s;
+}
+.af-chat-launch:hover { color: var(--ink); border-color: var(--accent-line); transform: translateY(-1px); }
+.af-chat-launch .lab { color: inherit; }
+.af-chat-launch .run { color: var(--ink4); letter-spacing: 0.08em; }
+.af-chat-launch .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink4); position: relative; flex: 0 0 auto; }
+.af-chat-launch .dot.held { background: var(--amber); }
+.af-chat-launch .dot.on { background: var(--accent); }
+.af-chat-launch .dot.on::after { content: ""; position: absolute; inset: -4px; border-radius: 50%; border: 1px solid var(--accent); opacity: 0.55; animation: af-rip 2.2s infinite; }
+.af-chat-launch .unread {
+  background: var(--accent); color: #fff; font-size: 10px; font-weight: 700; letter-spacing: 0;
+  min-width: 16px; height: 16px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; padding: 0 5px;
+}
+
+.af-chat {
+  position: fixed; right: 22px; bottom: 20px; z-index: 60;
+  width: min(430px, calc(100vw - 44px)); max-height: min(640px, calc(100vh - 90px));
+  display: flex; flex-direction: column;
+  background: var(--paper); border: 1px solid var(--rule2); border-radius: 2px;
+  box-shadow: 0 30px 60px -30px rgba(40, 35, 20, 0.5);
+  animation: af-rise 0.18s both;
+}
+.af-chat-head {
+  display: flex; align-items: flex-start; gap: 12px; padding: 14px 18px 12px; border-bottom: 1px solid var(--rule);
+}
+.af-chat-head h3 { margin: 2px 0 0; font-family: var(--display); font-style: italic; font-weight: 550; font-size: 17px; letter-spacing: -0.01em; }
+.af-chat-head .min {
+  margin-left: auto; border: 0; background: none; color: var(--ink3); font-size: 15px; line-height: 1;
+  cursor: pointer; padding: 2px 6px; border-radius: 2px;
+}
+.af-chat-head .min:hover { color: var(--ink); background: var(--paper2); }
+.af-chat-live { display: inline-flex; align-items: center; gap: 7px; margin-top: 4px; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); white-space: nowrap; }
+.af-chat-live .d { width: 7px; height: 7px; border-radius: 50%; background: currentColor; position: relative; }
+.af-chat-live .d::after { content: ""; position: absolute; inset: -4px; border-radius: 50%; border: 1px solid var(--accent); opacity: 0.55; animation: af-rip 2.2s infinite; }
+
+.af-chat-thread { flex: 1; overflow-y: auto; padding: 6px 18px 14px; scrollbar-width: thin; }
+.af-chat-empty { padding: 22px 4px 10px; color: var(--ink3); font-size: 12.5px; }
+.af-chat-empty .serif { font-family: var(--display); font-style: italic; font-size: 16px; color: var(--ink2); margin: 0 0 10px; }
+.af-chat-empty p { margin: 0 0 7px; }
+.af-chat-empty b { color: var(--ink2); }
+
+.af-chat-x { padding-top: 14px; animation: af-rise 0.25s both; }
+.af-chat-x + .af-chat-x { border-top: 1px solid var(--rule); margin-top: 14px; }
+.af-chat-x .who {
+  display: block; font-family: var(--mono); font-size: 10px; font-weight: 500; letter-spacing: 0.16em;
+  text-transform: uppercase; color: var(--ink4); margin-bottom: 4px;
+}
+.af-chat-x .q p { margin: 0; font-family: var(--mono); font-size: 12.5px; color: var(--ink2); white-space: pre-wrap; }
+.af-chat-x.cancelled .q p { color: var(--ink4); text-decoration: line-through; }
+.af-chat-x .a { margin-top: 12px; border-left: 2px solid var(--accent-line); padding-left: 12px; }
+.af-chat-x .a .who { color: var(--accent); }
+.af-chat-x .a .who .when { color: var(--ink4); text-transform: none; letter-spacing: 0.04em; }
+.af-chat-x .a .body { font-size: 13px; color: var(--ink); }
+.af-chat-x .a .body p { margin: 0 0 8px; }
+.af-chat-x .a .body p:last-child { margin-bottom: 0; }
+.af-chat-x .a .body code { font-family: var(--mono); font-size: 12px; background: var(--paper2); border: 1px solid var(--rule); padding: 0 4px; border-radius: 2px; }
+.af-chat-x .a .body pre { background: #15140f; color: #cfc9b8; padding: 10px 12px; border-radius: 4px; overflow-x: auto; margin: 8px 0; }
+.af-chat-x .a .body pre code { background: none; border: 0; padding: 0; color: inherit; font-size: 11.5px; line-height: 1.55; }
+.af-chat-x .a.err { border-left-color: var(--rose); }
+.af-chat-x .a.err .who { color: var(--rose); }
+.af-chat-x .a.err p { margin: 0; font-size: 12.5px; color: var(--rose); font-family: var(--mono); white-space: pre-wrap; }
+.af-chat-x .commit { display: inline-block; margin-top: 8px; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink3); }
+.af-chat-x .commit code { color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent-line); padding: 1px 5px; border-radius: 2px; }
+
+.af-chat-x .st { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.af-chat-x .st .af-tag { display: inline-flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 10.5px; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; }
+.af-chat-x .st .af-tag.hold { color: var(--amber); }
+.af-chat-x .st .af-tag.hold .pip { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); animation: af-watchpulse 1.9s ease-in-out infinite; }
+.af-chat-x .st .x { border: 0; background: none; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink4); cursor: pointer; padding: 0; }
+.af-chat-x .st .x:hover { color: var(--rose); text-decoration: underline; }
+.af-chat-x .st.running { font-family: var(--mono); font-size: 11.5px; color: var(--accent); gap: 8px; }
+.af-chat-x .st.running .af-cursor { background: var(--accent); height: 12px; }
+.af-chat-x .st .mut { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink4); }
+
+.af-chat-compose { border-top: 1px solid var(--rule); background: var(--paper2); }
+.af-chat-compose .modes { display: flex; align-items: baseline; gap: 2px; padding: 10px 18px 0; flex-wrap: wrap; }
+.af-chat-compose .modes button {
+  border: 1px solid transparent; background: none; font-family: var(--mono); font-size: 11px; font-weight: 600;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink3); padding: 4px 10px; border-radius: 2px; cursor: pointer;
+}
+.af-chat-compose .modes button .m { font-weight: 400; color: var(--ink4); letter-spacing: 0.04em; margin-left: 4px; }
+.af-chat-compose .modes button:hover { color: var(--ink); }
+.af-chat-compose .modes button.on { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+.af-chat-compose .modes button.on .m { color: var(--accent); opacity: 0.75; }
+.af-chat-compose .hint { flex-basis: 100%; font-size: 11px; color: var(--ink4); padding: 5px 2px 0; }
+.af-chat-compose .row { display: flex; align-items: stretch; gap: 0; margin-top: 8px; border-top: 1px solid var(--rule); }
+.af-chat-compose textarea {
+  flex: 1; border: 0; background: transparent; resize: none; font-family: var(--mono); font-size: 12.5px;
+  color: var(--ink); padding: 12px 18px; min-height: 52px; max-height: 140px; field-sizing: content;
+}
+.af-chat-compose textarea::placeholder { color: var(--ink4); }
+.af-chat-compose textarea:focus { outline: none; }
+.af-chat-compose .send {
+  border: 0; background: var(--accent); color: #fff; font-size: 12.5px; font-weight: 600; padding: 0 20px; cursor: pointer;
+}
+.af-chat-compose .send:hover { background: #19623f; }
+.af-chat-compose .send:disabled { opacity: 0.45; cursor: not-allowed; }

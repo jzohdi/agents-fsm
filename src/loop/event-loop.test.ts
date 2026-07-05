@@ -1345,3 +1345,101 @@ describe('between-stage base sync (merge-conflict handling)', () => {
     expect(github.abortedMerges).toEqual([run.id]); // rolled back — the tree is clean for the operator
   });
 });
+
+describe('standalone merge-conflict resolution (dedicated resolve stage)', () => {
+  /** Drive a run to done with a PR (golden path opens the PR at tdd). */
+  async function doneRunWithPr() {
+    const ctx = setup(goldenPathHandler);
+    const run = ctx.loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await ctx.loop.runUntilIdle();
+    expect(ctx.repo.getRun(run.id)!.status).toBe('done');
+    expect(ctx.repo.getRun(run.id)!.prNumber).not.toBeNull();
+    return { ...ctx, run };
+  }
+
+  it('resolveMergeConflict returns a done run to done via a resolve round-trip — never re-running the pipeline', async () => {
+    const { repo, loop, github, run } = await doneRunWithPr();
+    const plansBefore = repo.listAgentRuns(run.id).filter((a) => a.stage === 'plan').length;
+
+    loop.resolveMergeConflict(run.id, { kind: 'merge_conflict', prNumber: run.prNumber });
+    // Entered the dedicated pseudo-state, running — not plan, not needs_human.
+    expect(repo.getRun(run.id)!.currentState).toBe('resolve_conflicts');
+    expect(repo.getRun(run.id)!.status).toBe('running');
+
+    await loop.runUntilIdle(); // no conflict queued → the merge is a no-op; the run returns straight to done
+    expect(repo.getRun(run.id)!.currentState).toBe('done');
+    expect(repo.getRun(run.id)!.status).toBe('done');
+    expect(repo.listAgentRuns(run.id).filter((a) => a.stage === 'plan').length).toBe(plansBefore); // plan NOT re-run
+    expect(github.abortedMerges).toHaveLength(0);
+  });
+
+  it('runs the resolver agent + pushes when there is a real conflict, then returns to done', async () => {
+    const { repo, loop, github, run } = await doneRunWithPr();
+    github.queueBaseSync({ result: 'conflict', conflictFiles: ['src/app.ts'] }); // base drifted under the PR
+
+    loop.resolveMergeConflict(run.id, { kind: 'merge_conflict', prNumber: run.prNumber });
+    await loop.runUntilIdle();
+
+    expect(repo.getRun(run.id)!.currentState).toBe('done');
+    // The dedicated resolver ran (telemetry under the resolve_conflicts pseudo-stage) and the merge was pushed.
+    expect(repo.listAgentRuns(run.id).some((a) => a.stage === 'resolve_conflicts')).toBe(true);
+    expect(github.finishedMerges).toEqual([{ runId: run.id, branch: repo.getRun(run.id)!.branch }]);
+    expect(github.abortedMerges).toHaveLength(0);
+    expect(repo.listTransitions(run.id).at(-1)).toMatchObject({ fromState: 'resolve_conflicts', trigger: 'resolved', toState: 'done' });
+  });
+
+  it('escalates to needs_human (merge aborted) when the resolver leaves markers behind', async () => {
+    const { repo, loop, github, run } = await doneRunWithPr();
+    github.queueBaseSync({ result: 'conflict', conflictFiles: ['src/app.ts'] });
+    github.finishBaseMergeResult = { ok: false, unresolved: ['src/app.ts'] }; // mechanical verification fails
+
+    loop.resolveMergeConflict(run.id, { kind: 'merge_conflict', prNumber: run.prNumber });
+    await loop.runUntilIdle();
+
+    expect(repo.getRun(run.id)!.status).toBe('needs_human');
+    const last = repo.listTransitions(run.id).at(-1)!;
+    expect(last.trigger).toBe('merge_conflict');
+    expect(last.fromState).toBe('resolve_conflicts');
+    expect(last.reason).toMatchObject({ resolutionAttempted: true, unresolved: ['src/app.ts'] });
+    expect(github.abortedMerges).toEqual([run.id]); // rolled back to a clean tree
+  });
+
+  it('preserves a needs_human run’s disposition — resolving its conflict returns it to needs_human, not done', async () => {
+    const handler: StubHandler = (req) =>
+      req.stage === 'code_review' && req.phase === 'produce'
+        ? { output: { requestedTransition: 'escalate', reason: { note: 'human needed' } } }
+        : goldenPathHandler(req);
+    const { repo, loop } = setup(handler);
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.runUntilIdle();
+    expect(repo.getRun(run.id)!.status).toBe('needs_human');
+    expect(repo.getRun(run.id)!.prNumber).not.toBeNull();
+
+    loop.resolveMergeConflict(run.id, { kind: 'merge_conflict', prNumber: run.prNumber });
+    await loop.runUntilIdle();
+    expect(repo.getRun(run.id)!.status).toBe('needs_human'); // the escalation still stands; only the PR was fixed
+  });
+
+  it('rejects a run that is not finished, or has no PR', async () => {
+    const { repo, loop } = setup(goldenPathHandler);
+    const running = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' }); // status running, no PR yet
+    expect(() => loop.resolveMergeConflict(running.id, { kind: 'merge_conflict' })).toThrow(/not a finished/);
+
+    const noPr = repo.createRun({ issueRef: 'o/r#2', repoRef: 'o/r', initialState: 'done', fsmConfigVersion: loadDefaultConfig().version });
+    repo.setRunStatus(noPr.id, 'done');
+    expect(() => loop.resolveMergeConflict(noPr.id, { kind: 'merge_conflict' })).toThrow(/no PR/);
+  });
+
+  it('is durable: the queued resolve event drives to completion after a daemon restart', async () => {
+    const { repo, loop, runner, run } = await doneRunWithPr();
+    loop.resolveMergeConflict(run.id, { kind: 'merge_conflict', prNumber: run.prNumber }); // enqueues, does not drain
+
+    // Restart: a fresh loop over the same store recovers and drains the pending resolve event.
+    const loaded = loadDefaultConfig();
+    const resumed = new EventLoop(repo, loaded.fsm, loaded.version, runner);
+    resumed.recover();
+    await resumed.runUntilIdle();
+    expect(repo.getRun(run.id)!.currentState).toBe('done');
+    expect(repo.getRun(run.id)!.status).toBe('done');
+  });
+});

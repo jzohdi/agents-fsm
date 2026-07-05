@@ -640,3 +640,71 @@ async function readUntil(
   }
   throw new Error(`stream predicate not met; received:\n${acc}`);
 }
+
+describe('HTTP API — run chat', () => {
+  const chatHandler: StubHandler = (req) =>
+    req.stage === 'chat' ? { output: { response: 'the PR adds a retry loop' }, tokens: 3 } : goldenPathHandler(req);
+
+  it('sends a prompt, lists the thread, and reports the reply on the run detail', async () => {
+    const { base, orchestrator } = await start({ handler: chatHandler });
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle(); // run to done, so a write prompt dispatches immediately too
+
+    const created = await fetch(`${base}/runs/${run.id}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'what does the PR change?', mode: 'read' }),
+    });
+    expect(created.status).toBe(201);
+    const exchange = (await created.json()) as { id: number; mode: string; status: string };
+    expect(exchange.mode).toBe('read');
+    await orchestrator.settle();
+
+    const listed = await fetch(`${base}/runs/${run.id}/chat`);
+    expect(listed.status).toBe(200);
+    const thread = (await listed.json()) as Array<{ id: number; status: string; response: string | null }>;
+    expect(thread).toHaveLength(1);
+    expect(thread[0]).toMatchObject({ id: exchange.id, status: 'done', response: 'the PR adds a retry loop' });
+
+    const detail = await fetch(`${base}/runs/${run.id}`);
+    expect(((await detail.json()) as { chat: unknown[] }).chat).toHaveLength(1);
+  });
+
+  it('cancels a queued prompt and maps chat errors to statuses (400/404/409)', async () => {
+    const { base, orchestrator, repo } = await start({ handler: chatHandler });
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle();
+    // Park the run `blocked` (dependency-gated): NOT a write-safe status, so a write prompt holds.
+    repo.setRunStatus(run.id, 'blocked');
+
+    const queued = await fetch(`${base}/runs/${run.id}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'fix the build', mode: 'write' }),
+    });
+    const exchange = (await queued.json()) as { id: number; status: string };
+    expect(exchange.status).toBe('queued');
+
+    const cancelled = await fetch(`${base}/runs/${run.id}/chat/${exchange.id}/cancel`, { method: 'POST' });
+    expect(cancelled.status).toBe(200);
+    expect(((await cancelled.json()) as { status: string }).status).toBe('cancelled');
+    // Cancelling again is a 409 (only a queued prompt can be withdrawn).
+    expect((await fetch(`${base}/runs/${run.id}/chat/${exchange.id}/cancel`, { method: 'POST' })).status).toBe(409);
+
+    // Validation + routing errors.
+    const noPrompt = await fetch(`${base}/runs/${run.id}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'read' }),
+    });
+    expect(noPrompt.status).toBe(400);
+    const badMode = await fetch(`${base}/runs/${run.id}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'p', mode: 'sudo' }),
+    });
+    expect(badMode.status).toBe(400);
+    expect((await fetch(`${base}/runs/9999/chat`)).status).toBe(404);
+    expect((await fetch(`${base}/runs/${run.id}/chat`, { method: 'PUT' })).status).toBe(405);
+  });
+});

@@ -169,6 +169,10 @@ export function goldenPathHandler(req: AgentRunRequest): StubReply {
 
 function producedEnvelopeFor(stage: string): unknown {
   switch (stage) {
+    case 'chat':
+      // The run-chat side channel (not a pipeline stage): its contract is `{ response }`, the reply
+      // shown to the operator — so mock daemons answer chat prompts with something readable.
+      return { response: 'Mock reply: I read the branch and everything looks consistent with the plan.' };
     case 'plan':
       return {
         requestedTransition: 'proceed',

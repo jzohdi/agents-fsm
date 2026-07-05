@@ -99,12 +99,38 @@ export interface LogRecord {
   data: unknown;
 }
 
+/** Permission grant for a run-chat prompt: `read` runs immediately with read-only tools; `write`
+ *  holds until the pipeline pauses, then runs with edit tools and commits + pushes its changes. */
+export type ChatMode = 'read' | 'write';
+
+export type ChatStatus = 'queued' | 'running' | 'done' | 'error' | 'cancelled';
+
+/** One operator ↔ agent exchange on a run's chat side channel (`POST/GET /runs/:id/chat`). */
+export interface ChatExchange {
+  id: number;
+  runId: number;
+  prompt: string;
+  mode: ChatMode;
+  status: ChatStatus;
+  /** The agent's reply (markdown), set when the exchange completes. */
+  response: string | null;
+  error: string | null;
+  /** Write mode: the commit pushed after the agent worked. */
+  commitSha: string | null;
+  tokens: number;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
 export interface RunDetail {
   run: Run;
   transitions: Transition[];
   agentRuns: AgentRunRecord[];
   artifacts: Artifact[];
   logs: LogRecord[];
+  /** The run's chat thread, oldest first. Absent on an older daemon without the chat routes. */
+  chat?: ChatExchange[];
 }
 
 export interface TransitionDef {

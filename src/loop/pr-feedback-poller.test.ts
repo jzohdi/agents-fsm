@@ -261,18 +261,32 @@ describe('PrFeedbackPoller — merge-conflict detection on finished runs', () =>
     repo.setRepoConflictPolicy('o/r', policy);
   }
 
-  it('reopens a done run whose open PR turned CONFLICTING when the repo policy is auto', async () => {
+  it('runs the dedicated resolver (not a pipeline re-run) on a CONFLICTING done PR under auto policy', async () => {
     const { repo, github, loop, run } = await runToDone();
     enroll(repo, 'auto');
     github.setPrMergeable(repo.getRun(run.id)!.prNumber!, 'conflicting');
 
     const poller = new PrFeedbackPoller(repo, github, loop, { sleep: noopSleep });
     expect(await poller.checkRun(run.id)).toBe('reopened');
-    const reopened = repo.getRun(run.id)!;
-    expect(reopened.status).toBe('running'); // back in the pipeline; re-entry's base sync resolves it
-    expect(reopened.flags[ADDRESSING_PR_FEEDBACK_FLAG]).toBe(true); // stages iterate on the existing PR
-    // The re-open reason names the conflict, so the re-entered stage knows why it is re-running.
-    expect(repo.listTransitions(run.id).at(-1)!.reason).toMatchObject({ kind: 'merge_conflict' });
+    // The run enters the dedicated resolve_conflicts pseudo-state — NOT plan (the old behavior) — and
+    // does not touch the pr-feedback flag (this is conflict resolution, not addressing review feedback).
+    const resolving = repo.getRun(run.id)!;
+    expect(resolving.currentState).toBe('resolve_conflicts');
+    expect(resolving.status).toBe('running');
+    expect(resolving.flags[ADDRESSING_PR_FEEDBACK_FLAG]).toBeUndefined();
+
+    // Drive the queued EVENT_RESOLVE_CONFLICTS: with no conflict queued in the fake the resolver is a
+    // no-op merge and the run returns straight to done — never re-running plan/tdd/etc.
+    await loop.runUntilIdle();
+    const resolved = repo.getRun(run.id)!;
+    expect(resolved.currentState).toBe('done');
+    expect(resolved.status).toBe('done');
+    // The tail is the resolve round-trip only — no pipeline stage was re-dispatched.
+    const tail = repo.listTransitions(run.id).slice(-2).map((t) => [t.fromState, t.trigger, t.toState]);
+    expect(tail).toEqual([
+      ['done', 'resolve_conflicts', 'resolve_conflicts'],
+      ['resolve_conflicts', 'resolved', 'done'],
+    ]);
   });
 
   it('leaves a conflicting PR alone under manual policy (the human drives resolution)', async () => {
