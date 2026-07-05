@@ -9,8 +9,10 @@
  * and assert:
  *   1. The terminal `type:"result"` event parsing is harness-agnostic — Cursor's result event flows
  *      through the same parser and yields the same structured envelope. (→ the parser is REUSABLE.)
- *   2. Cursor's result event carries NO `usage`/`total_cost_usd`, so token+cost accounting comes back
- *      zero/undefined. (→ the documented GAP: budget + M8 cost-ceiling guards go blind for Cursor.)
+ *   2. Cursor's result event carries NO `usage`/`total_cost_usd`. This was the documented GAP (budget +
+ *      M8 cost-ceiling guards went blind for Cursor); it is now CLOSED (agents-fsm#2) by the harness-aware
+ *      `CURSOR_PROFILE.extractUsage`, which estimates tokens from prompt+result length when the CLI reports
+ *      none (cost stays undefined — no price table). The case below is updated to assert the shipped fix.
  *   3. A Cursor error result still classifies as a HarnessError. (→ error handling is reusable.)
  *
  * This is a throwaway spike kept as living documentation of the API-shape reconnaissance; it is not
@@ -19,6 +21,7 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { CURSOR_PROFILE, estimateTokensFromChars } from '../../src/agent/cursor-profile';
 import { HarnessError, parseHarnessOutput } from '../../src/agent/subprocess-executor';
 
 /**
@@ -64,15 +67,21 @@ describe('Cursor harness — reuse of the existing stream-json result parser', (
     expect(parseHarnessOutput(stdout).output).toEqual(envelope);
   });
 
-  it('DOCUMENTED GAP: Cursor result has no usage/cost → tokens 0, cost undefined', () => {
-    const stdout = cursorStreamJson(JSON.stringify({ requestedTransition: 'proceed' }));
+  it('FIXED (agents-fsm#2): Cursor result has no usage → estimated non-zero tokens, cost undefined', () => {
+    // This was the "cost accounting is blind" gap: the run-budget guard (maxTokens) and the M8 B3
+    // global cost ceiling both read `usage`, and Cursor's result carries no Anthropic-style usage, so
+    // both silently no-op'd. It is now closed by the harness-aware `CURSOR_PROFILE.extractUsage`: given
+    // a `UsageContext`, the estimate fallback records tokens ~ (promptChars + result length) / 4, so the
+    // token guard stops being a no-op. Cost stays undefined (no per-token price table to convert honestly
+    // — a documented decision; dollars remain n/a for Cursor on the dashboard).
+    const resultText = JSON.stringify({ requestedTransition: 'proceed' });
+    const stdout = cursorStreamJson(resultText);
+    const promptChars = 500;
 
-    const parsed = parseHarnessOutput(stdout);
+    const parsed = parseHarnessOutput(stdout, CURSOR_PROFILE, { promptChars });
 
-    // This is the crux of the "cost accounting is blind" finding: the run-budget guard (maxTokens)
-    // and the M8 B3 global cost ceiling both read these, so a Cursor harness needs a fallback
-    // estimator or those guards silently no-op. The plan calls this out explicitly.
-    expect(parsed.usage.tokens).toBe(0);
+    expect(parsed.usage.tokens).toBe(estimateTokensFromChars(promptChars + resultText.length));
+    expect(parsed.usage.tokens).toBeGreaterThan(0);
     expect(parsed.usage.cost).toBeUndefined();
   });
 

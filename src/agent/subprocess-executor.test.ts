@@ -38,6 +38,7 @@ function testProfile(overrides: Partial<HarnessProfile> = {}): HarnessProfile {
     summarize: () => [],
     isAuthFailure: (t) => /unauth/i.test(t),
     isRateLimit: (t) => /rate/i.test(t),
+    extractUsage: () => ({ tokens: 0 }),
     authRemedy: 'run the auth fix',
     authFatal: true,
     ...overrides,

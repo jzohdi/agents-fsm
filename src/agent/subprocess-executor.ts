@@ -21,7 +21,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { delimiter, join } from 'node:path';
 import { homedir } from 'node:os';
 
-import { FatalExecutorError, type AgentActivity, type AgentRunRequest, type AgentRunResult, type StageExecutor } from './executor';
+import { FatalExecutorError, type AgentActivity, type AgentRunRequest, type AgentRunResult, type AgentUsage, type StageExecutor } from './executor';
 
 /**
  * Directories where harness CLIs (`claude`, `cursor-agent`) are commonly installed but which a
@@ -195,6 +195,30 @@ function isClaudeAuthFailure(text: string): boolean {
 }
 
 /**
+ * The terminal `type:"result"` event, harness-agnostic. The shared parser reads only
+ * `type`/`is_error`/`result`; per-harness usage/cost fields (Anthropic's `usage`/`total_cost_usd`,
+ * Cursor's own names, `duration_ms`, …) are read by each profile's {@link HarnessProfile.extractUsage}
+ * via the index signature — so the shared type never names one harness's fields.
+ */
+export interface ResultEvent {
+  type: 'result';
+  subtype?: string;
+  is_error?: boolean;
+  result?: string;
+  /** Harness-specific fields the shared type does not name; a profile's `extractUsage` reads them. */
+  [key: string]: unknown;
+}
+
+/**
+ * Inputs a profile MAY use to *estimate* usage when its harness reports none. Only the prompt size is
+ * passed in; the result text is derivable from `event.result`, so it is not duplicated here.
+ */
+export interface UsageContext {
+  /** Character length of the prompt sent this phase (system prompt + JSON-encoded input). */
+  promptChars: number;
+}
+
+/**
  * The harness-specific behaviors behind the generic subprocess engine (Layer 5). Everything else —
  * spawn, stream, timeout, rate-limit retry, and the terminal-result parse — is harness-neutral and
  * lives in {@link SubprocessStageExecutor}. Adding a harness is a new profile + its executor, with no
@@ -215,6 +239,11 @@ export interface HarnessProfile {
   isAuthFailure(text: string): boolean;
   /** Recognize this harness's rate-limit / overloaded wording (retried with backoff). */
   isRateLimit(text: string): boolean;
+  /** Extract token usage (and a dollar cost, iff this harness reports one) from its terminal result
+   *  event. Harness-specific: Claude reads Anthropic field names; Cursor reads its own fields or, when
+   *  the CLI reports none, estimates tokens from `ctx` (documented approximate). MUST return a finite,
+   *  non-negative `tokens`; MUST omit `cost` (leave undefined) rather than fabricate one. */
+  extractUsage(event: ResultEvent, ctx: UsageContext): AgentUsage;
   /** Operator remedy printed (fatal) or carried in the escalation reason (non-fatal) on an auth failure. */
   authRemedy: string;
   /** Whether an auth failure aborts the whole drain (Claude) or escalates only the affected run (Cursor). */
@@ -268,6 +297,15 @@ export const CLAUDE_PROFILE: HarnessProfile = {
   summarize: summarizeEvent,
   isAuthFailure: isClaudeAuthFailure,
   isRateLimit,
+  // Claude's usage accounting, verbatim: sum the four Anthropic TOKEN_FIELDS off `usage`, read a finite
+  // `total_cost_usd`. Byte-for-byte identical to the pre-profile inline block (regression contract). Claude
+  // reports its own tokens, so it never reads `ctx` (the char estimate is Cursor-only).
+  extractUsage(event) {
+    const usage: AgentUsage = { tokens: sumTokens(event.usage as Record<string, unknown> | undefined) };
+    const cost = event.total_cost_usd;
+    if (typeof cost === 'number' && Number.isFinite(cost)) usage.cost = cost;
+    return usage;
+  },
   authRemedy: CLAUDE_AUTH_REMEDY,
   authFatal: true, // an unauthenticated Claude Code fails every stage → abort the drain, print the remedy
 };
@@ -342,7 +380,11 @@ export class SubprocessStageExecutor implements StageExecutor {
       const detail = result.stderr.trim() || result.stdout.trim() || '(no output)';
       throw classifyFailure(this.profile, detail, `${this.profile.command} exited with code ${result.code}`);
     }
-    return parseHarnessOutput(result.stdout, this.profile);
+    // Prompt size for the estimate fallback (a harness reporting no real usage, e.g. Cursor): the two
+    // pieces Claude joins via `--append-system-prompt` and Cursor folds into one prompt string, so the
+    // estimate tracks what was actually sent for either harness. Claude ignores it.
+    const promptChars = req.system.length + userPrompt(req.input).length;
+    return parseHarnessOutput(result.stdout, this.profile, { promptChars });
   }
 }
 
@@ -453,34 +495,30 @@ function asString(value: unknown): string | undefined {
 
 // --- output parsing (pure, exported for direct tests) -----------------------
 
-/** The shape of the Claude Code `result` event we read (extra fields ignored). */
-interface ResultEvent {
-  type: 'result';
-  subtype?: string;
-  is_error?: boolean;
-  result?: string;
-  usage?: Record<string, unknown>;
-  total_cost_usd?: number;
-}
-
 /**
  * Parse the harness's stream-json stdout into our structured result. We scan the
  * newline-delimited events for the terminal `type: "result"` event, parse its `result`
  * text as the agent's structured output (the Agent Runner validates it against the
- * envelope schema), and sum its token usage. This also accepts single-object `json`
- * output, since that one object is itself the final result event.
+ * envelope schema), and delegate token/cost extraction to the profile's `extractUsage`
+ * (harness-aware — Claude reads Anthropic fields, Cursor reads its own or estimates). This
+ * also accepts single-object `json` output, since that one object is itself the final result event.
+ *
+ * `ctx` is an optional third parameter (default `{ promptChars: 0 }`) so every existing call site —
+ * `parseHarnessOutput(stdout)` and `parseHarnessOutput(stdout, profile)` — keeps compiling and
+ * behaving unchanged; only a harness that *estimates* from the prompt size (Cursor) reads it.
  */
-export function parseHarnessOutput(stdout: string, profile: HarnessProfile = CLAUDE_PROFILE): AgentRunResult {
+export function parseHarnessOutput(
+  stdout: string,
+  profile: HarnessProfile = CLAUDE_PROFILE,
+  ctx: UsageContext = { promptChars: 0 },
+): AgentRunResult {
   const event = findResultEvent(stdout);
   if (!event) throw new HarnessError('harness produced no result event');
   if (event.is_error) {
     throw classifyFailure(profile, event.result ?? '(no detail)', `${profile.command} reported an error result`);
   }
 
-  const usage: AgentRunResult['usage'] = { tokens: sumTokens(event.usage) };
-  if (typeof event.total_cost_usd === 'number' && Number.isFinite(event.total_cost_usd)) {
-    usage.cost = event.total_cost_usd;
-  }
+  const usage = profile.extractUsage(event, ctx);
   return { output: parseResultText(event.result ?? ''), usage };
 }
 
