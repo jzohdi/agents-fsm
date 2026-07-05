@@ -768,17 +768,34 @@ export class AgentRunner {
   private async applyStageEffects(run: Run, io: StageIo, prep: StagePrep, envelope: AgentEnvelope): Promise<AgentEnvelope> {
     const { github } = this.repoContext(run);
     if (io.kind === 'review') {
-      // Post review comments to the PR (if any). plan_review has no PR — its feedback travels
-      // back to `plan` via the envelope's `reason`, handled by the normal back-edge mechanism.
-      const comments = envelope.comments ?? [];
-      if (run.prNumber === null || comments.length === 0) return envelope;
+      // plan_review has no PR — nothing to post, nothing to strip; its feedback travels back to `plan`
+      // via the envelope's `reason`, handled by the normal back-edge mechanism.
+      if (run.prNumber === null) return envelope;
       const prNumber = run.prNumber;
-      // Each comment gets its own ledger slot, so a crash mid-post never double-posts on replay (M7).
+      // Post review comments to the PR (if any). Each gets its own ledger slot, so a crash mid-post
+      // never double-posts on replay (M7).
+      const comments = envelope.comments ?? [];
       const ledger = this.ledgerFor(run);
       for (let i = 0; i < comments.length; i++) {
         const body = comments[i]!;
         await ledger.once(`comment:${i}`, () => github.postComment({ prNumber, body }));
       }
+      // On the terminal approving review (code_review's approve → `done`), strip the `.agent/` scratch
+      // from the branch tip so it never reaches `main` and never causes cross-run conflicts (agents-fsm#21).
+      // Gated on `approve` so the artifacts survive a `request_changes` re-run they feed, and evaluated
+      // independently of `comments` so a zero-comment approval still strips. The adapter is naturally
+      // idempotent, so re-firing on a PR-feedback re-approval is safe.
+      if (envelope.requestedTransition === 'approve') {
+        const ref = await github.stripAgentArtifacts(run.id, prep.branch!, `chore(run ${run.id}): remove .agent scratch artifacts before merge`);
+        if (ref) {
+          this.repo.recordLog({
+            runId: run.id,
+            message: `stripped .agent scratch artifacts from ${prep.branch} before merge`,
+            data: { kind: 'strip_artifacts', stage: run.currentState },
+          });
+        }
+      }
+      if (comments.length === 0) return envelope;
       return appendArtifact(envelope, { kind: 'review', locator: { prNumber, comments: comments.length } });
     }
 

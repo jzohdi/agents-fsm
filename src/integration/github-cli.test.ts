@@ -13,7 +13,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 
@@ -556,5 +556,121 @@ describe('GitHubCli — local git (real temp repo)', () => {
     const headBefore = git(tree.path, ['rev-parse', 'HEAD']).trim();
     const commit = await gh.commitAndPush({ workingDir: tree.path, branch: 'agent/run-3', message: 'empty' });
     expect(commit.sha).toBe(headBefore); // HEAD unchanged, no new commit
+  });
+
+  // --- .agent scratch stripping (agents-fsm#21) --------------------------------
+
+  it('stripAgentArtifacts removes only .agent, makes a daemon-authored commit + push, and is an idempotent no-op the second time', async () => {
+    const remote = makeRemote();
+    const workingRoot = mkdtempSync(join(tmpdir(), 'agent-fleet-work-'));
+    const gh = new GitHubCli({ repo: 'o/r', workingRoot, cloneUrl: remote });
+
+    const tree = await gh.prepareWorkingTree({ runId: 50, branch: 'agent/run-50', base: 'main' });
+    // Deliberately do NOT configure user.name/email in this tree: the strip commit must succeed anyway
+    // because it is authored by the daemon identity (proves the DAEMON_IDENTITY -c flags are used).
+    mkdirSync(join(tree.path, '.agent'), { recursive: true });
+    writeFileSync(join(tree.path, '.agent', 'plan.md'), 'run 50 plan\n');
+    writeFileSync(join(tree.path, '.agent', 'interface.md'), 'run 50 interface\n');
+    writeFileSync(join(tree.path, 'feature.txt'), 'real code\n');
+    // Land the artifacts + code on the branch (author via env, no repo user config needed).
+    git(tree.path, ['add', '-A']);
+    git(tree.path, ['commit', '-m', 'work + scratch artifacts']);
+    git(tree.path, ['push', '-u', 'origin', 'agent/run-50']);
+
+    const ref = await gh.stripAgentArtifacts(50, 'agent/run-50', 'chore: remove .agent scratch before merge');
+    expect(ref).not.toBeNull();
+    expect(ref!.sha).toMatch(/^[0-9a-f]{40}$/);
+    // .agent is gone; everything else is untouched.
+    expect(existsSync(join(tree.path, '.agent'))).toBe(false);
+    expect(existsSync(join(tree.path, 'feature.txt'))).toBe(true);
+    // The removal commit is daemon-authored (works with no configured user.name/email).
+    expect(git(tree.path, ['log', '-1', '--pretty=%an']).trim()).toBe('agent-fleet');
+    // …and it reached the remote branch tip.
+    const tipAfterStrip = git(tree.path, ['rev-parse', 'HEAD']).trim();
+    expect(execFileSync('git', ['ls-remote', '--heads', remote, 'agent/run-50'], { encoding: 'utf8' })).toContain(tipAfterStrip);
+
+    // Second call: .agent is already gone → no new commit, returns null (idempotent as to commits).
+    const ref2 = await gh.stripAgentArtifacts(50, 'agent/run-50', 'chore: remove .agent scratch again');
+    expect(ref2).toBeNull();
+    expect(git(tree.path, ['rev-parse', 'HEAD']).trim()).toBe(tipAfterStrip); // HEAD unchanged, no empty commit
+  });
+
+  it('stripAgentArtifacts pushes unconditionally, recovering a removal committed locally but never pushed (crash recovery)', async () => {
+    const remote = makeRemote();
+    const workingRoot = mkdtempSync(join(tmpdir(), 'agent-fleet-work-'));
+    const gh = new GitHubCli({ repo: 'o/r', workingRoot, cloneUrl: remote });
+
+    const tree = await gh.prepareWorkingTree({ runId: 51, branch: 'agent/run-51', base: 'main' });
+    mkdirSync(join(tree.path, '.agent'), { recursive: true });
+    writeFileSync(join(tree.path, '.agent', 'plan.md'), 'run 51 plan\n');
+    git(tree.path, ['add', '-A']);
+    git(tree.path, ['commit', '-m', 'scratch artifacts']);
+    git(tree.path, ['push', '-u', 'origin', 'agent/run-51']);
+
+    // Simulate a prior strip that committed the removal locally but died before pushing: origin's
+    // branch tip still carries .agent while local HEAD has already removed it.
+    git(tree.path, ['rm', '-r', '-f', '.agent']);
+    git(tree.path, ['commit', '-m', 'remove .agent (stranded — never pushed)']);
+    const strandedHead = git(tree.path, ['rev-parse', 'HEAD']).trim();
+    expect(execFileSync('git', ['ls-remote', '--heads', remote, 'agent/run-51'], { encoding: 'utf8' })).not.toContain(strandedHead);
+
+    // Re-run strip (the resume re-run of applyStageEffects): status is clean so it makes no commit and
+    // returns null, but it STILL pushes HEAD — so the stranded removal reaches origin.
+    const ref = await gh.stripAgentArtifacts(51, 'agent/run-51', 'chore: remove .agent scratch before merge');
+    expect(ref).toBeNull();
+    expect(execFileSync('git', ['ls-remote', '--heads', remote, 'agent/run-51'], { encoding: 'utf8' })).toContain(strandedHead);
+  });
+
+  it('two runs each add-then-strip their own .agent artifacts and merge into main sequentially with no conflict', async () => {
+    // The acceptance-criteria proof (agents-fsm#21): back-to-back runs writing the SAME fixed paths
+    // (.agent/plan.md, .agent/interface.md) must merge into main without manual conflict resolution.
+    const remote = makeRemote();
+    const workingRoot = mkdtempSync(join(tmpdir(), 'agent-fleet-work-'));
+    const gh = new GitHubCli({ repo: 'o/r', workingRoot, cloneUrl: remote });
+
+    // A maintainer clone that plays GitHub's server-side merge of each PR into main.
+    const mergeRoot = mkdtempSync(join(tmpdir(), 'agent-fleet-merge-'));
+    const mainClone = join(mergeRoot, 'main');
+    execFileSync('git', ['clone', remote, mainClone]);
+    git(mainClone, ['config', 'user.email', 'm@m']);
+    git(mainClone, ['config', 'user.name', 'M']);
+
+    // --- Run A: add its .agent artifacts + code, strip, merge into main ---
+    const a = await gh.prepareWorkingTree({ runId: 60, branch: 'agent/run-60', base: 'main' });
+    mkdirSync(join(a.path, '.agent'), { recursive: true });
+    writeFileSync(join(a.path, '.agent', 'plan.md'), 'run A plan\n');
+    writeFileSync(join(a.path, '.agent', 'interface.md'), 'run A interface\n');
+    writeFileSync(join(a.path, 'a-feature.txt'), 'A code\n');
+    git(a.path, ['add', '-A']);
+    git(a.path, ['commit', '-m', 'run A work']);
+    git(a.path, ['push', '-u', 'origin', 'agent/run-60']);
+    await gh.stripAgentArtifacts(60, 'agent/run-60', 'chore: strip .agent (run 60)');
+
+    git(mainClone, ['fetch', 'origin']);
+    git(mainClone, ['merge', '--no-edit', 'origin/agent/run-60']); // throws (nonzero exit) on conflict
+    git(mainClone, ['push', 'origin', 'main']);
+    expect(existsSync(join(mainClone, 'a-feature.txt'))).toBe(true);
+    expect(existsSync(join(mainClone, '.agent'))).toBe(false); // main never carries the scratch
+
+    // --- Run B: branches off the UPDATED main, writes the SAME .agent paths, strips, merges ---
+    const b = await gh.prepareWorkingTree({ runId: 61, branch: 'agent/run-61', base: 'main' });
+    mkdirSync(join(b.path, '.agent'), { recursive: true });
+    writeFileSync(join(b.path, '.agent', 'plan.md'), 'run B plan — different content, same path\n');
+    writeFileSync(join(b.path, '.agent', 'interface.md'), 'run B interface\n');
+    writeFileSync(join(b.path, 'b-feature.txt'), 'B code\n');
+    git(b.path, ['add', '-A']);
+    git(b.path, ['commit', '-m', 'run B work']);
+    git(b.path, ['push', '-u', 'origin', 'agent/run-61']);
+    await gh.stripAgentArtifacts(61, 'agent/run-61', 'chore: strip .agent (run 61)');
+
+    git(mainClone, ['fetch', 'origin']);
+    // The merge must be clean: a conflict on .agent/plan.md would make `git merge` exit nonzero, and the
+    // `git` helper (execFileSync) throws on nonzero — so this line itself is the no-conflict assertion.
+    git(mainClone, ['merge', '--no-edit', 'origin/agent/run-61']);
+    git(mainClone, ['push', 'origin', 'main']);
+    expect(git(mainClone, ['status', '--porcelain']).trim()).toBe(''); // no unmerged paths left behind
+    expect(existsSync(join(mainClone, 'a-feature.txt'))).toBe(true);
+    expect(existsSync(join(mainClone, 'b-feature.txt'))).toBe(true);
+    expect(existsSync(join(mainClone, '.agent'))).toBe(false); // still clean after both merges
   });
 });

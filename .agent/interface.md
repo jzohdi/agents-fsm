@@ -1,246 +1,227 @@
-# Interface — Harness-aware usage extraction (agents-fsm#2)
+# Interface — Strip `.agent/` scratch artifacts at terminal code-review approval (agents-fsm#21)
 
-Design contract the `tdd` and implementation stages build against. It pins the seam that moves token/cost
-extraction out of the shared parser and behind each `HarnessProfile`, so Cursor records non-zero usage
-while Claude Code stays **byte-for-byte** unchanged. Grounded in `.agent/plan.md`; this file is the precise
-shape, not a re-derivation.
+This spec pins down the contract the `tdd` and implementation stages build against. It follows the
+chosen approach in `.agent/plan.md`: keep the **fixed artifact paths** (`.agent/plan.md`,
+`.agent/interface.md`) exactly as-is so mid-run handoff is untouched, and add **one new adapter
+method** that the runner fires on the single terminal `code_review` → `done` approval to remove the
+`.agent/` scratch directory from the branch tip, so those files never reach `main` and never cause
+cross-run conflicts.
 
-The extractor is **pure and directly testable** (the acceptance criteria's crux). No FSM, store-schema, or
-`AgentUsage` shape changes.
+`src/fsm/` is **not** touched. No artifact paths change. `recordArtifact` locators, prompt path
+references, and `executor.ts` golden-path locators are unchanged (see §5).
 
 ---
 
-## 1. New / changed types (`src/agent/subprocess-executor.ts`)
+## 1. New adapter method: `GitHub.stripAgentArtifacts`
 
-### 1.1 `ResultEvent` — widened from Claude-only to generic
+Add exactly one method to the `GitHub` interface in `src/integration/github.ts`, alongside the other
+local-git seam methods (`savepointWorkingTree`, `syncBranchWithBase`, …).
 
-Today `ResultEvent` (currently a non-exported `interface` at ~line 457) names Claude's `usage` /
-`total_cost_usd` fields directly. Widen it to the fields the **shared parser** itself needs, plus an index
-signature so a profile's extractor can read harness-specific fields without the shared type naming them:
+### Signature
 
 ```ts
-/** The terminal `type:"result"` event, harness-agnostic. The shared parser reads only `type`/`is_error`/
- *  `result`; per-harness usage/cost fields (Anthropic's `usage`/`total_cost_usd`, Cursor's own names,
- *  `duration_ms`, …) are read by each profile's `extractUsage` via the index signature. */
-export interface ResultEvent {
-  type: 'result';
-  subtype?: string;
-  is_error?: boolean;
-  result?: string;
-  /** Harness-specific fields the shared type does not name; a profile's `extractUsage` reads them. */
-  [key: string]: unknown;
+/**
+ * Remove the pipeline's `.agent/` scratch artifacts (`.agent/plan.md`, `.agent/interface.md`, and
+ * anything else under `.agent/`) from the run's branch tip and push, so the PR's net contribution to
+ * `main` carries no scratch files and back-to-back runs never conflict on those fixed paths (agents-fsm#21).
+ *
+ * The runner calls this exactly once, at the terminal `code_review` approval (approve → `done`), i.e.
+ * AFTER every stage that reads the artifacts has run. Removing them from the branch tip is a one-sided
+ * delete against a `main` that never had them, so neither the between-stage base sync nor the GitHub PR
+ * merge can 3-way-conflict on `.agent/**`.
+ *
+ * Contract:
+ *  - Operates on the run's own working tree (derived from `runId`, like the other tree methods).
+ *  - Idempotent + no-op-safe: when `.agent/` is already gone (re-entry, a second PR-feedback approval,
+ *    or it was never created) it makes NO commit and returns `null`. It STILL pushes HEAD (a harmless
+ *    no-op when up to date) so a removal commit stranded by a crash between commit and push is
+ *    recovered on the resume re-run — the push is unconditional, exactly like `commitAndPush`.
+ *  - Local-tree mutation + push through the same seam as `commitAndPush`; the runner never shells git.
+ *  - The removal commit is authored by the daemon identity (it, not the agent, makes it), matching
+ *    `savepointWorkingTree` / `finishBaseMerge`.
+ *
+ * @returns the `CommitRef` of the removal commit, or `null` when there was nothing to strip.
+ */
+stripAgentArtifacts(runId: number, branch: string, message: string): Promise<CommitRef | null>;
+```
+
+- **Parameters**: `runId` (the adapter derives the tree path from it, mirroring
+  `savepointWorkingTree(runId, …)` / `syncBranchWithBase(runId, …)`); `branch` (the run's working
+  branch, for the push refspec — the runner passes `prep.branch!`); `message` (commit message).
+- **Return**: `Promise<CommitRef | null>`. `CommitRef` is the existing `{ sha: string }`. `null`
+  means nothing was removed (idempotent no-op).
+- **Does not throw** on "already stripped" — that path returns `null`. Real git/network failures
+  surface as thrown errors exactly like `commitAndPush` (handled by the runner's existing
+  effects-error path — see §4).
+
+No changes to any other `GitHub` method or shared type. No new interface types are required (`CommitRef`
+already exists).
+
+---
+
+## 2. Real implementation — `src/integration/github-cli.ts`
+
+Add the method to `GitHubCli`. Use the existing private helpers: `this.runTreePath(runId)`,
+`this.git(...)`, and the module-level `DAEMON_IDENTITY` constant.
+
+Required behavior — **structurally identical to `commitAndPush`** (github-cli.ts:352-362): the
+`status --porcelain` guard decides only whether to **commit** and what to **return**; the **push is
+unconditional**, exactly as `commitAndPush` always `rev-parse HEAD` + pushes after its commit-if-staged
+guard:
+
+```ts
+async stripAgentArtifacts(runId: number, branch: string, message: string): Promise<CommitRef | null> {
+  const path = this.runTreePath(runId);
+  // Remove the whole scratch dir. `--ignore-unmatch` makes `git rm` a no-op (exit 0, nothing staged)
+  // when `.agent/` is already absent, so re-entry / a second approval is safe.
+  await this.git(['rm', '-r', '-f', '--ignore-unmatch', '.agent'], path);
+  // Commit only when the rm actually staged a deletion.
+  const status = await this.git(['status', '--porcelain'], path);
+  const stripped = status.trim().length > 0;
+  if (stripped) {
+    await this.git([...DAEMON_IDENTITY, 'commit', '-m', message], path);
+  }
+  // ALWAYS push HEAD — mirror commitAndPush. This is the crash-recovery window: if a PRIOR attempt
+  // committed the removal but died before pushing (push failure → effectsError → gitError → escalate;
+  // on human resume applyStageEffects re-runs), this call finds `.agent/` already gone so status is
+  // clean and `stripped` is false — yet the removal commit is stranded on local HEAD while origin's
+  // branch tip still carries `.agent/`. Skipping the push here would let `.agent/plan.md` /
+  // `.agent/interface.md` reach `main` at PR merge, silently defeating the feature (violates invariant
+  // #4). Pushing an already-up-to-date HEAD is a harmless no-op, so pushing unconditionally is safe.
+  const sha = (await this.git(['rev-parse', 'HEAD'], path)).trim();
+  await this.git(['push', 'origin', branch], path);
+  // Return the removal CommitRef only when THIS call staged the deletion; `null` on the clean/no-op
+  // path (nothing removed this call — whether never-created, already-stripped, or crash-recovery push).
+  return stripped ? { sha } : null;
 }
 ```
 
-- MUST keep `type: 'result'`, `is_error?`, `result?` so `isResultEvent`, the `is_error` error path, and
-  `parseResultText(event.result ?? '')` are unchanged.
-- Dropping the named `usage?` / `total_cost_usd?` fields is fine — Claude's extractor now reads them off the
-  index signature (they arrive as `unknown`, so it narrows before use).
-- **Export it** (the profiles' `extractUsage` signature references it). It is currently module-local.
+Invariants the implementation must uphold:
+- **Only `.agent/` is removed.** `git rm -r .agent` stages nothing outside that directory; files
+  elsewhere in the tree are untouched.
+- **No commit when nothing staged.** The `status --porcelain` guard makes the second call skip the
+  commit and return `null` (idempotent as to commits).
+- **Push is unconditional.** HEAD is always pushed, exactly like `commitAndPush`, so a removal commit
+  stranded by a crash between commit and push is recovered on the resume re-run. Pushing an
+  already-up-to-date HEAD is a no-op — it never errors on the clean path.
+- **Daemon-authored commit.** Use `DAEMON_IDENTITY` so it succeeds even in a tree with no configured
+  `user.name`/`user.email`.
 
-### 1.2 `UsageContext` — inputs for the estimate fallback
+## 3. Fake implementation — `src/integration/github-fake.ts`
+
+Add the method to the fake plus a public recorder for assertions, mirroring the existing
+`savepoints` / `finishedMerges` / `abortedMerges` lists:
 
 ```ts
-/** Inputs a profile MAY use to *estimate* usage when its harness reports none. Only the prompt size is
- *  passed in; the result text is derivable from `event.result`, so it is not duplicated here. */
-export interface UsageContext {
-  /** Character length of the prompt sent this phase (system prompt + JSON-encoded input). */
-  promptChars: number;
+/** Recorded `stripAgentArtifacts` calls — assert the strip fired exactly when expected (agents-fsm#21). */
+readonly strippedArtifacts: Array<{ runId: number; branch: string }> = [];
+
+async stripAgentArtifacts(runId: number, branch: string, message: string): Promise<CommitRef | null> {
+  this.strippedArtifacts.push({ runId, branch });
+  return { sha: /* a synthesized deterministic sha, e.g. `strip-${runId}` */ };
 }
 ```
 
-Export it (profiles and call sites reference it).
-
-### 1.3 `HarnessProfile.extractUsage` — the new seam method
-
-Add one method to the existing `HarnessProfile` interface (alongside `buildArgs` / `summarize` /
-`isAuthFailure` / `isRateLimit`):
-
-```ts
-/** Extract token usage (and a dollar cost, iff this harness reports one) from its terminal result
- *  event. Harness-specific: Claude reads Anthropic field names; Cursor reads its own fields or, when the
- *  CLI reports none, estimates tokens from `ctx` (documented approximate). MUST return a finite,
- *  non-negative `tokens`; MUST omit `cost` (leave undefined) rather than fabricate one. */
-extractUsage(event: ResultEvent, ctx: UsageContext): AgentUsage;
-```
-
-Adding this to `HarnessProfile` means **every** profile object literal (`CLAUDE_PROFILE`, `CURSOR_PROFILE`,
-and any test fixture profile) must supply it — a compile error otherwise, which is the desired guard.
-
-`AgentUsage` (`{ tokens: number; cost?: number }` from `./executor`) is unchanged. **No `estimated` flag is
-added** — it would ripple through the store column and both render paths for no user-visible gain (dollars
-stay `n/a` for the estimate branch, so nothing misleading is surfaced; see §4).
+- Every call is recorded (so a runner test asserts count + branch). The fake always returns a
+  synthesized `CommitRef` (there is no in-memory `.agent/` model to gate on) — the runner-level tests
+  assert on the recorder, not on the return value.
+- Keep the synthesized sha deterministic (derive from `runId`/`branch`, no clock/random) to match the
+  fake's existing style.
 
 ---
 
-## 2. Parser delegation (`src/agent/subprocess-executor.ts`)
+## 4. Runner integration — `src/agent/runner.ts` `applyStageEffects`
 
-### 2.1 `parseHarnessOutput` — delegate, with an optional `ctx`
+Extend the **review branch** of `applyStageEffects` (currently ~lines 770–783, the `io.kind === 'review'`
+block that posts PR comments). After the comment-posting loop, fire the strip **only** on a terminal
+approving review that has an open PR:
 
-```ts
-export function parseHarnessOutput(
-  stdout: string,
-  profile: HarnessProfile = CLAUDE_PROFILE,
-  ctx: UsageContext = { promptChars: 0 },
-): AgentRunResult;
-```
+**Gate (all three required):**
+1. `io.kind === 'review'` — already the enclosing branch.
+2. `run.prNumber !== null` — excludes `plan_review` (no PR yet → never strips before `interface_design`,
+   which still needs `.agent/plan.md`).
+3. `envelope.requestedTransition === 'approve'` — excludes `request_changes`, so the artifacts survive
+   the frontend/backend re-run they feed. In the default pipeline this matches **only** `code_review`'s
+   `approve` → `done` edge (`plan_review` is already excluded by gate #2).
 
-Body change — replace only the inline usage block (current lines ~480–483) with:
+**Action:**
+- Call `await github.stripAgentArtifacts(run.id, prep.branch!, <message>)` after the comment loop
+  (`prep.branch` is always set by `prepareStage`). Use a clear commit message, e.g.
+  `` `chore(run ${run.id}): remove .agent scratch artifacts before merge` ``.
+- On a non-`null` return, record a log line (mirror the base-sync `this.repo.recordLog({...})` shape),
+  e.g. message `stripped .agent scratch artifacts from <branch> before merge`, `data: { kind:
+  'strip_artifacts', stage: run.currentState }`. A `null` return may be logged or silently skipped —
+  no log line is also acceptable since nothing changed.
+- **Return the same (comment-enriched) envelope** the review branch already returns — do **not** add a
+  new artifact record (removal is the point). Preserve the existing
+  `appendArtifact(envelope, { kind: 'review', … })` return when comments were posted.
 
-```ts
-const usage = profile.extractUsage(event, ctx);
-return { output: parseResultText(event.result ?? ''), usage };
-```
+**Structural note (important):** the current review branch has an early
+`if (run.prNumber === null || comments.length === 0) return envelope;` that returns before any strip
+could run. A `code_review` approval with **zero** comments must still strip. So the strip must be
+evaluated on the `run.prNumber !== null && requestedTransition === 'approve'` path **independently of
+whether comments exist** — restructure so the "no comments" early-return does not bypass the strip.
+The `tdd` tests will assert: *approve with zero comments still strips.*
 
-Invariants:
-- `ctx` is a **third optional parameter** with a default, so every existing call site —
-  `parseHarnessOutput(stdout)` and `parseHarnessOutput(stdout, profile)` in tests and the archive spike —
-  keeps compiling and behaving unchanged.
-- The no-result-event throw (`'harness produced no result event'`) and the `is_error` →
-  `classifyFailure(...)` path are untouched and run **before** `extractUsage` (an error result never reaches
-  the extractor).
-- `sumTokens` / `TOKEN_FIELDS` stay module-local (still used by `CLAUDE_PROFILE.extractUsage` and their
-  existing unit tests). They are NOT deleted, NOT moved, NOT re-exported.
+**Idempotency / re-entry:** safe to fire again on a second approval (a PR-feedback cycle re-approving)
+because the adapter's `git rm --ignore-unmatch` + commit-if-changed returns `null` the second time
+(it still pushes HEAD, a no-op when already up to date). The same unconditional push is what recovers a
+strip that committed locally but crashed before pushing (push failure → `effectsError` → escalate; the
+human resume re-runs `applyStageEffects`): the re-run finds status clean, returns `null`, yet pushes the
+stranded removal commit so `.agent/` still never reaches `main`. The runner needs no guard of its own;
+the M7 ledger is **not** required here (the operation is naturally idempotent), matching how the
+base-sync side effect is un-ledgered.
 
-### 2.2 `CLAUDE_PROFILE.extractUsage` — today's logic, verbatim
-
-```ts
-extractUsage(event) {
-  const usage: AgentUsage = { tokens: sumTokens(event.usage as Record<string, unknown> | undefined) };
-  const cost = event.total_cost_usd;
-  if (typeof cost === 'number' && Number.isFinite(cost)) usage.cost = cost;
-  return usage;
-},
-```
-
-- MUST produce the **exact same** `AgentUsage` the current inline block produces for any Claude stream-json:
-  `tokens = sum of the four TOKEN_FIELDS`, `cost = total_cost_usd` when finite, else `cost` omitted. This is
-  the regression contract — asserted by the existing executor + contract suites and an added explicit test.
-- Claude does not read `ctx`.
-- Import `AgentUsage` from `./executor` if not already imported into this file.
-
-### 2.3 `SubprocessStageExecutor.attempt` — build and pass `ctx`
-
-`attempt(req, options)` (line ~339; it already holds `req`) computes the prompt size and threads it through
-the success-path return (line ~345):
-
-```ts
-const promptChars = req.system.length + userPrompt(req.input).length;
-return parseHarnessOutput(result.stdout, this.profile, { promptChars });
-```
-
-- `userPrompt` is already defined/exported in this file. `promptChars` mirrors the two pieces Claude joins
-  via `--append-system-prompt` and Cursor folds into one prompt string — so the estimate tracks what was
-  actually sent, for either harness.
-- The error path (non-zero exit → `classifyFailure`) is unchanged.
+**Do not** touch the produce branch of `applyStageEffects`, `commitAndPush`, `ensurePr`, or the base
+sync.
 
 ---
 
-## 3. Cursor usage extractor (`src/agent/cursor-profile.ts`)
+## 5. Explicitly unchanged (closes the issue's "update path assumptions" item)
 
-Add `CURSOR_PROFILE.extractUsage` plus one exported pure helper. **A live `cursor-agent` probe (plan Step 1,
-`RUN_REAL_CURSOR=1 npx vitest run archive/harness-cursor-spike/cursor-live-probe.test.ts`) MUST run first**
-to pin the real field names; the fixture pasted into the new test comes from that probe. The extractor is a
-**ladder** so it is correct-or-approximate regardless of what the probe finds (robust to a `cursor-agent`
-version bump). If the probe cannot run (unauth/offline), ship the estimate branch as the safe default and
-leave a `// TODO(probe)`.
-
-### 3.1 `estimateTokensFromChars` — exported pure helper
-
-```ts
-/** Rough token estimate from a character count: `ceil(chars / CHARS_PER_TOKEN)`. `CHARS_PER_TOKEN = 4` is
- *  the standard coarse English heuristic. Only a *fallback* when Cursor reports no real token fields;
- *  documented approximate (plan §8.2/§9, agents-fsm#2). Never negative; `chars <= 0` → 0. */
-export const CHARS_PER_TOKEN = 4;
-export function estimateTokensFromChars(chars: number): number;
-```
-
-Contract: `estimateTokensFromChars(0) === 0`; negative input → `0`; otherwise `Math.ceil(chars / 4)`;
-monotonic non-decreasing in `chars`.
-
-### 3.2 `CURSOR_PROFILE.extractUsage(event, ctx): AgentUsage`
-
-TOKENS ladder:
-1. **Real fields.** If Cursor's result carries real token fields, sum them via a small **explicit**
-   Cursor-specific field list (a `CURSOR_TOKEN_FIELDS`-style const mirroring how `sumTokens` names Claude's —
-   never "sum every numeric field", so `duration_ms` / `duration_api_ms` can't inflate the count). Exact
-   names and location (top-level vs a nested `usage` object) are pinned by the probe; if none found live,
-   leave a `// TODO(probe)` marking the list provisional.
-2. **Estimate fallback.** Otherwise:
-   `tokens = estimateTokensFromChars(ctx.promptChars + (typeof event.result === 'string' ? event.result.length : 0))`.
-
-COST:
-- If Cursor reports a **real finite dollar** figure (field name pinned by the probe), set `usage.cost` to it.
-- Otherwise **omit `cost`** (leave undefined). Do NOT synthesize dollars from the catalog's 1–4 UI tier
-  (`cursor-models.json` `cost` is a relative tier, not $/token) — there is no honest price table.
-
-Invariants:
-- Returns a valid `AgentUsage`: finite non-negative `tokens`; `cost` either a finite number or absent.
-- The estimate MUST be **non-zero for any non-empty prompt/result** and **roughly proportional** to
-  `promptChars + resultChars`, so the `maxTokens` guard stops being a silent no-op.
-- Pure (no I/O, no clock). Testable via both `CURSOR_PROFILE.extractUsage(event, ctx)` directly and
-  `parseHarnessOutput(stdout, CURSOR_PROFILE, ctx)`.
-- A code comment MUST label the estimate approximate, cite plan §8.2/§9 + agents-fsm#2, and record which
-  decision-fork branch shipped (A real usage · B tokens-only · C estimate-only).
+- **Artifact paths stay fixed** at `.agent/plan.md` and `.agent/interface.md`. Therefore:
+  - `recordArtifact` locators and the `interface` artifact this stage records
+    (`{ kind: 'interface', locator: { path: '.agent/interface.md' } }`) are unchanged.
+  - Prompt path references (`prompts/stages/plan.md`, `interface_design.md`, `tdd.md`, `code_review.md`)
+    and `src/agent/executor.ts` golden-path locators need **no** change.
+  - Mid-run handoff (later stages reading `.agent/*.md` from fresh worktrees) is untouched; the only
+    new behavior is the removal from the branch tip at the very end.
+- The existing merge-conflict handling (base sync + `conflict_policy` + `resolve_conflicts` resolver
+  stage) is out of scope and stays exactly as-is.
 
 ---
 
-## 4. Render-side reconciliation (`dashboard/src/lib/render.ts`)
+## 6. Invariants the implementation must uphold (checklist for `tdd`)
 
-The harness side and the render side MUST agree about Cursor's cost visibility. Pick per the probe outcome
-and assert the chosen branch in tests:
-
-- **Branch A (probe finds a real Cursor dollar cost):** remove `'cursor'` from `COST_BLIND_HARNESSES` (it
-  becomes empty) so `fmtRunCost` shows real dollars and `fleetStatsModel` / `repoLedgerModel` include Cursor
-  spend. Update the doc comment.
-- **Branch B/C (no real dollar cost — the likely case, no price table):** keep `'cursor'` in
-  `COST_BLIND_HARNESSES`, but **rewrite its doc comment** so it no longer contradicts shipped behavior:
-  Cursor now records real/estimated **tokens** (shown, non-zero, already ungated) but not a **dollar cost**
-  (no per-token price to convert honestly), so the dollar figure stays a deliberate, documented `n/a`.
-
-Do NOT change `tracksCost` / `fmtRunCost` signatures or the token columns — tokens are already summed
-unconditionally (`r.tokensUsed ?? 0` in `telemetryModel` / `fleetStatsModel` / `repoLedgerModel` / rows), so
-real/estimated tokens surface with **no** render code change; only the `COST_BLIND_HARNESSES` membership +
-doc comment moves (branch A) or stays (branch B/C).
-
----
-
-## 5. Data-flow invariants (end to end)
-
-- `parseHarnessOutput` → `AgentRunResult.usage` → `runner.ts` reads `usage.tokens` / `usage.cost` and calls
-  `repo.addRunUsage(run.id, { tokens, cost, agentRuns: 1 })` (unchanged). Non-zero `tokens` re-arms the
-  `maxTokens` budget guard; a present `cost` re-arms the M8 B3 cost ceiling. This wiring is NOT modified — the
-  fix is entirely upstream in what `usage` contains.
-- Claude path: identical `AgentUsage` bytes as before (regression contract, §2.2).
-- Cursor path: `tokens > 0` for any real invocation (real or estimated); `cost` present iff the CLI reported
-  a real dollar figure.
+1. `stripAgentArtifacts` removes **only** `.agent/**`; all other tracked files are untouched.
+2. Present `.agent/` → one daemon-authored removal commit is created + pushed; returns a `CommitRef`.
+3. Absent `.agent/` (already stripped / never created) → **no commit**, returns `null` — but HEAD is
+   **still pushed** (idempotent no-op). `tdd` must NOT assert "no push when already stripped"; the push
+   is unconditional so a stranded removal commit is recovered.
+4. **Crash recovery:** a strip that committed the removal locally but failed to push, then re-runs
+   (escalate → human resume → `applyStageEffects` re-runs), pushes the stranded commit on the re-run so
+   origin's branch tip loses `.agent/`. After a strip, merging the branch into `main` produces **no
+   conflict** and `main` contains no `.agent/` files.
+5. Two runs' branches (each adding then stripping their own `.agent/plan.md` + real code) merge into
+   `main` sequentially with **no manual conflict resolution** — the acceptance-criteria proof.
+6. Runner: `code_review` **approve** (PR present) → strip fires exactly once with the run's branch —
+   including when there are **zero** review comments.
+7. Runner: `code_review` **request_changes** → **no** strip.
+8. Runner: `plan_review` **approve** (no PR) → **no** strip.
+9. Runner: a PR-feedback re-entry that approves again → strip is idempotent (adapter returns `null`,
+   no error).
 
 ---
 
-## 6. Spike reconciliation (`archive/harness-cursor-spike/cursor-result-parsing.test.ts`)
+## 7. Files to change (for `tdd` + implementation)
 
-The `DOCUMENTED GAP` case (currently asserting `parsed.usage.tokens === 0` / `parsed.usage.cost === undefined`)
-is now false for the Cursor path. Update that case (do NOT delete — the file header says so) to describe the
-shipped fix: with a `UsageContext`, `parseHarnessOutput(stdout, CURSOR_PROFILE, { promptChars })` yields
-non-zero estimated tokens (and `cost` undefined for branch B/C). Keep it as living documentation that agrees
-with shipped behavior. The other three spike cases (envelope parse, chatty/fenced recovery, error→HarnessError)
-still call `parseHarnessOutput(stdout)` (Claude default) and remain valid unchanged.
-
----
-
-## 7. Test surface the `tdd` stage writes against
-
-- `estimateTokensFromChars(chars)` — pure: `0` at/below 0; `ceil(chars/4)`; monotonic.
-- `CURSOR_PROFILE.extractUsage(event, ctx)` — real-field parse (if the probe found fields) → those tokens;
-  a no-token-field event → non-zero estimate proportional to `promptChars + result.length`; the `cost`
-  outcome per the shipped branch.
-- `CLAUDE_PROFILE.extractUsage(event, ctx)` — sums the four `TOKEN_FIELDS`; reads finite `total_cost_usd`;
-  omits `cost` when it is absent/non-finite (explicit Claude-regression assertion).
-- `parseHarnessOutput(stdout, CURSOR_PROFILE, ctx)` against a realistic probe-derived stream-json sample →
-  non-zero tokens; correct cost outcome.
-- Render (`dashboard/src/lib/render.test.ts`): branch A → a `cursor` run shows a real `$` `costLabel` and is
-  summed into `fleetStatsModel`/`repoLedgerModel`; branch B/C → `n/a` retained and tokens still surfaced
-  non-zero.
-- Existing executor + contract suites (`subprocess-executor.test.ts`, `executor-contract.test.ts`) stay green
-  (Claude byte-for-byte). Full `npm test` + typecheck/lint green; working tree clean (no probe transcripts
-  beyond the pasted fixture, no `dist`, no lockfile churn).
+- `src/integration/github.ts` — add `stripAgentArtifacts` to the `GitHub` interface (§1).
+- `src/integration/github-cli.ts` — real implementation (§2).
+- `src/integration/github-fake.ts` — fake implementation + `strippedArtifacts` recorder (§3).
+- `src/agent/runner.ts` — fire the strip on terminal code-review approval in `applyStageEffects` (§4).
+- `README.md` — note that `.agent/` artifacts are branch-local scratch stripped at `code_review`
+  approval (never land in `main`, never cause cross-run conflicts), while remaining readable during
+  the run.
+- Tests: `src/integration/github-cli.test.ts` (real-git strip + sequential-merge), `src/agent/runner.test.ts`
+  and/or `src/loop/event-loop.test.ts` (gate behavior via the fake), `src/integration/github-fake.test.ts`
+  if it covers new adapter methods.
