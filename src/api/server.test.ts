@@ -29,7 +29,7 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((s) => new Promise<void>((r) => s.close(() => r()))));
 });
 
-async function start(opts: { publicDir?: string; handler?: StubHandler } = {}): Promise<{ base: string; orchestrator: Orchestrator; repo: Repository; github: FakeGitHub }> {
+async function start(opts: { publicDir?: string; handler?: StubHandler; apiToken?: string } = {}): Promise<{ base: string; orchestrator: Orchestrator; repo: Repository; github: FakeGitHub }> {
   const loaded = loadDefaultConfig();
   const repo = new Repository(openDb(':memory:'));
   const github = new FakeGitHub({ autoSeedIssues: true });
@@ -53,7 +53,10 @@ async function start(opts: { publicDir?: string; handler?: StubHandler } = {}): 
     validateLocalCheckout: async (dir) =>
       dir.includes('wrong') ? { ok: false, reason: `that directory is a checkout of other/repo, not the linked repo` } : { ok: true },
   });
-  const server = createApiServer(orchestrator, opts.publicDir ? { publicDir: opts.publicDir } : {});
+  const server = createApiServer(orchestrator, {
+    ...(opts.publicDir ? { publicDir: opts.publicDir } : {}),
+    ...(opts.apiToken ? { apiToken: opts.apiToken } : {}),
+  });
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const { port } = server.address() as AddressInfo;
@@ -621,6 +624,73 @@ describe('HTTP API', () => {
       expect(page.headers.get('content-type')).toContain('text/html');
       expect(await page.text()).toContain('<title>agent-fleet');
     }
+  });
+});
+
+describe('HTTP API — auth (issue #25)', () => {
+  const TOKEN = 'super-secret-fleet-token';
+
+  it('auth-off passthrough: with no token configured a normal route and /stream still succeed', async () => {
+    const { base } = await start(); // no apiToken → auth disabled (byte-for-byte current behaviour)
+
+    // A normal route is open.
+    expect((await fetch(`${base}/runs`)).status).toBe(200);
+
+    // The SSE stream is open too.
+    const controller = new AbortController();
+    const stream = await fetch(`${base}/stream`, { signal: controller.signal });
+    expect(stream.status).toBe(200);
+    expect(stream.headers.get('content-type')).toBe('text/event-stream');
+    controller.abort();
+  });
+
+  it('auth-on normal route: /runs rejects missing/wrong tokens with 401 and accepts a valid Bearer', async () => {
+    const { base } = await start({ apiToken: TOKEN });
+
+    // No credential → 401 with the "missing" message.
+    const missing = await fetch(`${base}/runs`);
+    expect(missing.status).toBe(401);
+    expect(((await missing.json()) as { error: string }).error).toBe('authentication required');
+
+    // A present-but-wrong credential → 401 with the distinct "invalid" message.
+    const wrong = await fetch(`${base}/runs`, { headers: { Authorization: 'Bearer nope' } });
+    expect(wrong.status).toBe(401);
+    expect(((await wrong.json()) as { error: string }).error).toBe('invalid token');
+
+    // The correct Bearer token → the route runs normally (200).
+    const ok = await fetch(`${base}/runs`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    expect(ok.status).toBe(200);
+    expect(Array.isArray(await ok.json())).toBe(true);
+  });
+
+  it('auth-on gates before the body is parsed: an unauthenticated POST /runs is a 401, not a 400', async () => {
+    const { base } = await start({ apiToken: TOKEN });
+
+    // Even with a malformed body, the auth gate fires first (would otherwise be a 400 JSON error).
+    const res = await fetch(`${base}/runs`, { method: 'POST', body: '{not json' });
+    expect(res.status).toBe(401);
+  });
+
+  it('auth-on /stream: rejects a tokenless SSE request with 401 and accepts ?token=<correct>', async () => {
+    const { base } = await start({ apiToken: TOKEN });
+
+    // EventSource can't set headers, so the gate must reject a tokenless stream request as a plain
+    // 401 JSON (never a text/event-stream upgrade).
+    const denied = await fetch(`${base}/stream`);
+    expect(denied.status).toBe(401);
+    expect(denied.headers.get('content-type')).not.toBe('text/event-stream');
+
+    // The ?token= fallback authenticates the stream.
+    const controller = new AbortController();
+    const ok = await fetch(`${base}/stream?token=${encodeURIComponent(TOKEN)}`, { signal: controller.signal });
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get('content-type')).toBe('text/event-stream');
+    controller.abort();
+  });
+
+  it('auth-on leaves /health open (liveness probes) even with no token supplied', async () => {
+    const { base } = await start({ apiToken: TOKEN });
+    expect((await fetch(`${base}/health`)).status).toBe(200);
   });
 });
 

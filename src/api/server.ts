@@ -50,6 +50,12 @@ export const DEFAULT_PUBLIC_DIR = fileURLToPath(new URL('../../dashboard/dist/',
 export interface ApiServerOptions {
   /** Directory the dashboard's static assets are served from. Defaults to the bundled `public/`. */
   publicDir?: string;
+  /**
+   * Shared-secret bearer token gating the API + SSE surface (issue #25). Absent/empty ⇒ auth
+   * disabled (current behaviour). When set, every `requiresAuth(path)` route requires a valid
+   * credential. Env-provided only (never persisted); the server just receives the resolved value.
+   */
+  apiToken?: string;
 }
 
 /** Build the daemon's HTTP server. The caller decides when/where to `listen` (port 0 in tests). */
