@@ -21,7 +21,10 @@
  *    and is restart-safe: after a re-open the run's *new* finish transition advances the boundary, so an
  *    already-addressed comment never re-triggers.
  *  - **Stops on merge/close.** Once a PR is `merged` or `closed` the run is flagged and never scanned
- *    again — the work is landed (or abandoned), so there is nothing left to iterate on.
+ *    again — the work is landed (or abandoned), so there is nothing left to iterate on. On a **merge**
+ *    (the terminal, polled merge signal — see agents-fsm#20) the run's worktree is also reclaimed
+ *    (`dropWorkingTree`) and the operator's local base fast-forwarded (`syncBaseBranch`), exactly once
+ *    and idempotently, so per-run trees don't accumulate on disk.
  *  - **`checkOnce` is the pure core**; the timed `poll` driver is a thin loop over it with an injected
  *    clock + sleep so tests drive it without real time.
  */
@@ -185,18 +188,25 @@ export class PrFeedbackPoller {
     // Stop watching a landed/abandoned PR: nothing left to iterate on.
     const pr = await github.getPr(prNumber);
     if (pr.state !== 'open') {
-      this.repo.mergeRunFlags(run.id, { [PR_FEEDBACK_CLOSED_FLAG]: true });
-      this.repo.recordLog({ runId: run.id, message: `PR #${prNumber} is ${pr.state} — no longer watching for feedback`, data: { kind: 'pr_feedback_stopped', prNumber, state: pr.state } });
-      // On a merge, fast-forward the operator's local checkout so future worktrees (and their own base
-      // branch) pick up the landed change (Milestone 12). Best-effort + guarded in the adapter (only when
-      // on-base and clean; a no-op for clone-on-run mode) — a sync failure must never abort the pass.
       if (pr.state === 'merged') {
+        // Merge is the terminal signal (agents-fsm#20): reclaim the run's disk + freshen the base, once.
+        // Ordering is load-bearing — `dropWorkingTree` runs BEFORE the stop flag is set: if it throws (or
+        // the daemon crashes mid-reclaim) the flag is never set, the run stays watched, and the next tick
+        // retries (`getPr` still `merged`). Both ops are idempotent — a missing tree is a no-op — so
+        // re-running is safe. Removal covers both `clone` and `local` source modes.
+        await github.dropWorkingTree(run.id);
+        // Fast-forward the operator's local checkout so future worktrees (and their own base branch) pick
+        // up the landed change (Milestone 12). Best-effort + guarded in the adapter (only when on-base and
+        // clean; a no-op for clone-on-run mode) — a sync failure must never wedge the stop flag or abort
+        // the pass (the next merge / prepareWorkingTree's fetch recovers).
         try {
           await github.syncBaseBranch(baseBranch);
         } catch (err) {
           this.repo.recordLog({ runId: run.id, level: 'warn', message: `post-merge sync of the local checkout failed: ${String(err)}`, data: { kind: 'post_merge_sync_error', prNumber } });
         }
       }
+      this.repo.mergeRunFlags(run.id, { [PR_FEEDBACK_CLOSED_FLAG]: true });
+      this.repo.recordLog({ runId: run.id, message: `PR #${prNumber} is ${pr.state} — no longer watching for feedback`, data: { kind: 'pr_feedback_stopped', prNumber, state: pr.state } });
       return 'stopped';
     }
 

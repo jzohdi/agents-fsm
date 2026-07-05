@@ -371,7 +371,10 @@ export class FakeGitHub implements GitHub {
     return { ...tree };
   }
 
+  /** Records each dropped run id so a test can assert the merge reclaim fired and count invocations. */
+  readonly droppedTrees: number[] = [];
   async dropWorkingTree(runId: number): Promise<void> {
+    this.droppedTrees.push(runId);
     // Forget the tree so the next prepareWorkingTree "re-clones" — mirrors the real adapter's
     // rm -rf. Idempotent on a missing tree, like the real `force` remove.
     this.workingTrees.delete(runId);
