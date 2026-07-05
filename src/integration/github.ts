@@ -303,6 +303,30 @@ export interface GitHub {
   savepointWorkingTree(runId: number, message: string): Promise<boolean>;
 
   /**
+   * Remove the pipeline's `.agent/` scratch artifacts (`.agent/plan.md`, `.agent/interface.md`, and
+   * anything else under `.agent/`) from the run's branch tip and push, so the PR's net contribution to
+   * `main` carries no scratch files and back-to-back runs never conflict on those fixed paths (agents-fsm#21).
+   *
+   * The runner calls this exactly once, at the terminal `code_review` approval (approve → `done`), i.e.
+   * AFTER every stage that reads the artifacts has run. Removing them from the branch tip is a one-sided
+   * delete against a `main` that never had them, so neither the between-stage base sync nor the GitHub PR
+   * merge can 3-way-conflict on `.agent/**`.
+   *
+   * Contract:
+   *  - Operates on the run's own working tree (derived from `runId`, like the other tree methods).
+   *  - Idempotent + no-op-safe: when `.agent/` is already gone (re-entry, a second PR-feedback approval,
+   *    or it was never created) it makes NO commit and returns `null`. It STILL pushes HEAD (a harmless
+   *    no-op when up to date) so a removal commit stranded by a crash between commit and push is
+   *    recovered on the resume re-run — the push is unconditional, exactly like {@link commitAndPush}.
+   *  - Local-tree mutation + push through the same seam as `commitAndPush`; the runner never shells git.
+   *  - The removal commit is authored by the daemon identity (it, not the agent, makes it), matching
+   *    `savepointWorkingTree` / `finishBaseMerge`.
+   *
+   * @returns the `CommitRef` of the removal commit, or `null` when there was nothing to strip.
+   */
+  stripAgentArtifacts(runId: number, branch: string, message: string): Promise<CommitRef | null>;
+
+  /**
    * The diff of the working branch against its base (`base...branch`) — what `code_review`
    * reads. Branch-relative rather than PR-numbered so it needs no network and is a property
    * of the code, not of the PR record.

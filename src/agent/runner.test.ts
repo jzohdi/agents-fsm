@@ -483,7 +483,7 @@ describe('AgentRunner — side-effect outbox (idempotent non-idempotent calls, R
 
 describe('AgentRunner — .agent scratch stripping at terminal code-review approval (agents-fsm#21)', () => {
   /** A review-stage recipe with a single produce phase (the reviewer), matching code_review's shape. */
-  const reviewRecipe = { code_review: { phases: ['produce'], io: { kind: 'review' as const } } };
+  const reviewRecipe = { code_review: { phases: ['produce'], io: { kind: 'review' as const } } } satisfies AgentsConfig;
 
   it('strips the .agent artifacts once on a code_review approval with an open PR — even with zero comments', async () => {
     const { repo, runner, run, github } = setup(

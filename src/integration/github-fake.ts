@@ -433,6 +433,17 @@ export class FakeGitHub implements GitHub {
     return true;
   }
 
+  /** Recorded `stripAgentArtifacts` calls — assert the strip fired exactly when expected (agents-fsm#21). */
+  readonly strippedArtifacts: Array<{ runId: number; branch: string }> = [];
+
+  async stripAgentArtifacts(runId: number, branch: string, message: string): Promise<CommitRef | null> {
+    void message;
+    this.strippedArtifacts.push({ runId, branch });
+    // Deterministic synthesized sha (no clock/random), so the same inputs give the same ref across
+    // instances. The runner tests assert on the recorder, not this value.
+    return { sha: `fakestrip-${runId}-${branch}` };
+  }
+
   async readDiff(input: ReadDiffInput): Promise<string> {
     const override = this.diffs.get(rangeKey(input.base, input.branch));
     if (override !== undefined) return override;
