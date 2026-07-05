@@ -254,6 +254,107 @@ describe('PrFeedbackPoller — multi-repo (Milestone 8 Phase A)', () => {
   });
 });
 
+describe('PrFeedbackPoller — post-merge worktree reclaim + base freshen (agents-fsm#20)', () => {
+  it('on merge, reclaims the run’s worktree and freshens the local base, exactly once', async () => {
+    const { repo, github, loop, run } = await runToDone();
+    const prNumber = repo.getRun(run.id)!.prNumber!;
+    github.setPrState(prNumber, 'merged');
+
+    const poller = new PrFeedbackPoller(repo, github, loop, { sleep: noopSleep });
+    expect(await poller.checkOnce()).toBe(0); // merge is terminal — never a re-open
+
+    // The run's worktree is de-registered and the operator's base is fast-forwarded.
+    expect(github.droppedTrees).toContain(run.id);
+    expect(github.syncedBases).toContain('main');
+
+    // …and the run is flagged stopped, still `done` (cleanup does not change run state).
+    const after = repo.getRun(run.id)!;
+    expect(after.flags[PR_FEEDBACK_CLOSED_FLAG]).toBe(true);
+    expect(after.status).toBe('done');
+
+    // A second pass is a no-op: the flagged run has left the watch set, so neither op fires again.
+    expect(await poller.checkOnce()).toBe(0);
+    expect(github.droppedTrees.filter((id) => id === run.id)).toHaveLength(1);
+    expect(github.syncedBases.filter((b) => b === 'main')).toHaveLength(1);
+  });
+
+  it('re-running the reclaim is idempotent — a missing tree is a no-op, not a throw', async () => {
+    const { repo, github, loop, run } = await runToDone();
+    const prNumber = repo.getRun(run.id)!.prNumber!;
+    github.setPrState(prNumber, 'merged');
+
+    const poller = new PrFeedbackPoller(repo, github, loop, { sleep: noopSleep });
+    // Drive the merge reclaim on-demand twice back to back (the second sees an already-removed tree).
+    await expect(poller.checkRun(run.id)).resolves.toBe('stopped');
+    await expect(poller.checkRun(run.id)).resolves.toBe('not_watching'); // flagged → left the watch set
+    expect(github.droppedTrees).toContain(run.id); // dropped, no error on the re-run
+  });
+
+  it('does not reclaim while the PR is still open (done alone must not trigger cleanup)', async () => {
+    const { repo, github, loop, run } = await runToDone(); // PR stays open
+
+    const poller = new PrFeedbackPoller(repo, github, loop, { sleep: noopSleep });
+    expect(await poller.checkRun(run.id)).toBe('watching');
+    expect(await poller.checkOnce()).toBe(0);
+
+    expect(github.droppedTrees).not.toContain(run.id); // no reclaim
+    expect(github.syncedBases).toHaveLength(0); // no freshen
+    expect(repo.getRun(run.id)!.flags[PR_FEEDBACK_CLOSED_FLAG]).toBeUndefined();
+  });
+
+  it('does not reclaim when the PR is closed without merging (only merge triggers cleanup)', async () => {
+    const { repo, github, loop, run } = await runToDone();
+    github.setPrState(repo.getRun(run.id)!.prNumber!, 'closed');
+
+    const poller = new PrFeedbackPoller(repo, github, loop, { sleep: noopSleep });
+    expect(await poller.checkOnce()).toBe(0);
+
+    expect(github.droppedTrees).not.toContain(run.id); // abandoned ≠ merged → no reclaim
+    expect(github.syncedBases).toHaveLength(0);
+    expect(repo.getRun(run.id)!.flags[PR_FEEDBACK_CLOSED_FLAG]).toBe(true); // still stops watching
+  });
+
+  it('keeps the run watched (and retries) when the worktree reclaim fails, so it is crash-safe', async () => {
+    const { repo, github, loop, run } = await runToDone();
+    github.setPrState(repo.getRun(run.id)!.prNumber!, 'merged');
+
+    // The first reclaim attempt throws (e.g. a transient git failure / a crash mid-reclaim); the next succeeds.
+    const realDrop = github.dropWorkingTree.bind(github);
+    let attempts = 0;
+    github.dropWorkingTree = (id: number) => {
+      attempts += 1;
+      return attempts === 1 ? Promise.reject(new Error('git worktree remove failed')) : realDrop(id);
+    };
+
+    const poller = new PrFeedbackPoller(repo, github, loop, { sleep: noopSleep });
+
+    // Tick 1: reclaim throws → logged, the stop flag is NOT set, the run stays watched.
+    expect(await poller.checkOnce()).toBe(0);
+    expect(repo.getRun(run.id)!.flags[PR_FEEDBACK_CLOSED_FLAG]).toBeUndefined();
+    expect(repo.listLogs(run.id).some((l) => l.level === 'warn' && /PR feedback poll failed/.test(l.message))).toBe(true);
+
+    // Tick 2: the retry drops the tree and the stop flag finally lands (idempotent across restart).
+    expect(await poller.checkOnce()).toBe(0);
+    expect(github.droppedTrees).toContain(run.id);
+    expect(repo.getRun(run.id)!.flags[PR_FEEDBACK_CLOSED_FLAG]).toBe(true);
+  });
+
+  it('treats a base-freshen failure as best-effort — the tree is still reclaimed and the run flagged', async () => {
+    const { repo, github, loop, run } = await runToDone();
+    github.setPrState(repo.getRun(run.id)!.prNumber!, 'merged');
+    github.syncBaseBranch = () => Promise.reject(new Error('git fetch origin failed'));
+
+    const poller = new PrFeedbackPoller(repo, github, loop, { sleep: noopSleep });
+    expect(await poller.checkOnce()).toBe(0);
+
+    // The reclaim happened and the run stopped watching despite the sync miss…
+    expect(github.droppedTrees).toContain(run.id);
+    expect(repo.getRun(run.id)!.flags[PR_FEEDBACK_CLOSED_FLAG]).toBe(true);
+    // …and the failure was logged (cosmetic — the next fetch recovers), not thrown.
+    expect(repo.listLogs(run.id).some((l) => l.level === 'warn' && /post-merge sync of the local checkout failed/.test(l.message))).toBe(true);
+  });
+});
+
 describe('PrFeedbackPoller — merge-conflict detection on finished runs', () => {
   /** Enroll o/r with the given conflict policy (the poller reads it fresh per check). */
   function enroll(repo: Repository, policy: 'manual' | 'auto') {
