@@ -56,7 +56,7 @@ function setup(
 ) {
   const loaded = loadDefaultConfig();
   const repo = new Repository(openDb(':memory:'));
-  const github = new FakeGitHub({ autoSeedIssues: true });
+  const github = new FakeGitHub({ autoSeedIssues: true, repoRef: 'o/r' });
   const broadcaster = new Broadcaster();
   const events: StreamEvent[] = [];
   broadcaster.subscribe((e) => events.push(e));

@@ -43,7 +43,7 @@ export class IssueIntakePoller {
     private readonly repo: Repository,
     private readonly resolver: RepoResolver,
     private readonly starter: RunStarter,
-    private readonly log: (message: string) => void = (m) => console.log(`[issue-intake] ${m}`),
+    private readonly log: (message: string) => void = (m) => console.log(m),
   ) {}
 
   /** One pass over every watched repo; admits at most one run per repo (sequential cap). */
@@ -60,7 +60,7 @@ export class IssueIntakePoller {
         await this.checkRepo(repo.repoRef, repo.watchLabel ?? DEFAULT_WATCH_LABEL, pass, currentSkips);
       } catch (err) {
         // A repo's adapter/read failing isolates to that repo — the next tick retries it.
-        this.log(`${repo.repoRef}: intake pass failed, will retry: ${String(err)}`);
+        this.emit(`${repo.repoRef}: intake pass failed, will retry: ${String(err)}`);
       }
     }
     this.loggedSkips = currentSkips; // forget skips no longer current so a recurrence re-logs
@@ -94,11 +94,11 @@ export class IssueIntakePoller {
         data: { kind: 'issue_intake', issueRef: plan.start.issueRef, issueNumber: plan.start.issueNumber },
       });
       pass.started += 1;
-      this.log(`started run ${run.id} for ${plan.start.issueRef}`);
+      this.emit(`started run ${run.id} for ${plan.start.issueRef}`);
     } catch (err) {
       // A lost race (a manual run beat us to the issue → dup guard) or the cost ceiling (429): leave it;
       // the next tick re-evaluates once the conflict clears. Not fatal to the pass.
-      this.log(`could not start ${plan.start.issueRef}: ${String(err)}`);
+      this.emit(`could not start ${plan.start.issueRef}: ${String(err)}`);
     }
   }
 
@@ -106,6 +106,10 @@ export class IssueIntakePoller {
   private announceSkip(skip: IntakeSkip, currentSkips: Set<string>): void {
     const key = `${skip.ref}:${skip.reason}`;
     currentSkips.add(key);
-    if (!this.loggedSkips.has(key)) this.log(`skipping ${skip.ref}: ${skip.reason}`);
+    if (!this.loggedSkips.has(key)) this.emit(`skipping ${skip.ref}: ${skip.reason}`);
+  }
+
+  private emit(message: string): void {
+    this.log(`[issue-intake] ${message}`);
   }
 }
