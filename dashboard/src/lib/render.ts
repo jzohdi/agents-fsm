@@ -46,21 +46,31 @@ export function escapeHtml(value: unknown): string {
 }
 
 /**
- * Harnesses that don't report token/cost usage, so a run's `costUsed` comes back `0` regardless of real
- * spend (plan §8.2 — Cursor's result carries no usage; a cost estimator is deferred). The dashboard shows
- * "n/a" for these rather than a misleading "$0.00". Mirror of the harness side; keep in sync when a
- * harness gains real usage reporting.
+ * Harnesses whose runs have no honest **dollar** figure to show, so the dashboard renders "$…" as
+ * "n/a" rather than a misleading "$0.00". This gates only the *cost* column — not tokens.
+ *
+ * Cursor is here because there is no per-token price table to convert its usage into dollars (the model
+ * catalog's `cost` is a 1–4 UI tier, not $/token). As of agents-fsm#2 a Cursor run *does* record
+ * non-zero token usage — real if `cursor-agent` reports it, otherwise a documented `chars/4` estimate
+ * (harness side: `CURSOR_PROFILE.extractUsage`, plan §8.2/§9) — and those tokens are shown/summed
+ * unconditionally (token columns are never gated by this set). Only the dollar figure stays a
+ * deliberate, documented `n/a`. Mirror of the harness side; if a harness ever reports a real dollar
+ * cost, drop it here so `fmtRunCost` shows real dollars.
  */
 export const COST_BLIND_HARNESSES = new Set<string>(['cursor']);
 
-/** Whether a harness reports cost/usage — false for a cost-blind harness (plan §8.2). */
+/**
+ * Whether a harness reports a real **dollar** cost — false for a cost-blind harness (no price table).
+ * Note this gates dollars only: a cost-blind harness may still record real/estimated tokens (agents-fsm#2).
+ */
 export function tracksCost(harness: string | null | undefined): boolean {
   return !COST_BLIND_HARNESSES.has(harness ?? '');
 }
 
 /**
- * A run's cost for display: the dollar figure to `digits` dp, or `n/a` when its harness doesn't report
- * usage (plan §8.2) — so a Cursor run never looks deceptively free. Pure, so it is unit-tested.
+ * A run's cost for display: the dollar figure to `digits` dp, or `n/a` when its harness has no honest
+ * dollar cost (no price table — see {@link COST_BLIND_HARNESSES}), so a Cursor run never looks
+ * deceptively free. Tokens are shown separately and unaffected. Pure, so it is unit-tested.
  */
 export function fmtRunCost(harness: string | null | undefined, costUsed: number | null | undefined, digits = 4): string {
   return tracksCost(harness) ? `$${Number(costUsed ?? 0).toFixed(digits)}` : 'n/a';
