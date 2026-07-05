@@ -55,6 +55,17 @@ describe('IssueIntakePoller — watched-repo scanning', () => {
     expect(pass).toEqual({ reposScanned: 0, started: 0, skipped: 0 });
     expect(repo.listRuns()).toHaveLength(0);
   });
+
+  it('does not let a repo-bound fake adapter leak issues from another repo into intake decisions', async () => {
+    const { repo, github, poller } = setup();
+    github.seedIssue('other/repo#1', { number: 1, author: 'other' });
+    github.seedIssue('acme/web#2', { number: 2, author: 'acme' });
+
+    const pass = await poller.checkOnce();
+
+    expect(pass).toEqual({ reposScanned: 1, started: 1, skipped: 0 });
+    expect(repo.listRuns().map((r) => r.issueRef)).toEqual(['acme/web#2']);
+  });
 });
 
 describe('IssueIntakePoller — sequential cap across passes', () => {
@@ -85,12 +96,23 @@ describe('IssueIntakePoller — guards + logging', () => {
     const first = await poller.checkOnce();
     expect(first).toMatchObject({ started: 0, skipped: 1 });
     expect(repo.listRuns()).toHaveLength(0);
-    const skipLogs = () => logs.filter((l) => l.startsWith('skipping acme/web#1'));
+    const skipLogs = () => logs.filter((l) => l.startsWith('[issue-intake] skipping acme/web#1'));
     expect(skipLogs()).toHaveLength(1);
 
     // A second tick with the same unchanged skip does not re-log it (no spam).
     await poller.checkOnce();
     expect(skipLogs()).toHaveLength(1);
+  });
+
+  it('logs skipped issues with the operator-visible prefix and override-label hint', async () => {
+    const { github, poller, logs } = setup({ label: 'fleet: go' });
+    github.seedIssue('acme/web#1', { number: 1, assignees: ['dev'] });
+
+    await poller.checkOnce();
+
+    expect(logs).toContain(
+      '[issue-intake] skipping acme/web#1: already assigned to @dev — add the "fleet: go" label to pick it up anyway',
+    );
   });
 
   it('re-logs a skip after the issue clears and later recurs', async () => {
@@ -103,7 +125,7 @@ describe('IssueIntakePoller — guards + logging', () => {
     // It reopens (a new open issue, same ref, still guarded) → logged again.
     github.seedIssue('acme/web#1', { number: 1, author: 'stranger' });
     await poller.checkOnce();
-    expect(logs.filter((l) => l.startsWith('skipping acme/web#1'))).toHaveLength(2);
+    expect(logs.filter((l) => l.startsWith('[issue-intake] skipping acme/web#1'))).toHaveLength(2);
   });
 });
 

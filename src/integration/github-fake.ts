@@ -285,7 +285,7 @@ export class FakeGitHub implements GitHub {
 
   async listOpenIssues(): Promise<RepoIssue[]> {
     return [...this.issues.values()]
-      .filter((i) => i.state === 'open')
+      .filter((i) => i.state === 'open' && repoFromIssueRef(i.ref) === this.repoRef)
       .sort((a, b) => a.number - b.number)
       .map((i) => ({ ref: i.ref, number: i.number, title: i.title, body: i.body, author: i.author, assignees: [...i.assignees], labels: [...i.labels] }));
   }
@@ -478,4 +478,8 @@ function rangeKey(base: string, branch: string): string {
  *  `readIssue`/`updateIssue`/`createIssue` never leak them (they belong to {@link RepoIssue}). */
 function toIssue(stored: StoredIssue): Issue {
   return { ref: stored.ref, number: stored.number, title: stored.title, body: stored.body, state: stored.state };
+}
+
+function repoFromIssueRef(ref: string): string {
+  return ref.split('#')[0] ?? ref;
 }
