@@ -361,6 +361,28 @@ export class GitHubCli implements GitHub {
     return { sha };
   }
 
+  async stripAgentArtifacts(runId: number, branch: string, message: string): Promise<CommitRef | null> {
+    const path = this.runTreePath(runId);
+    // Remove the whole scratch dir. `--ignore-unmatch` makes `git rm` a no-op (exit 0, nothing staged)
+    // when `.agent/` is already absent, so re-entry / a second approval is safe.
+    await this.git(['rm', '-r', '-f', '--ignore-unmatch', '.agent'], path);
+    // Commit only when the rm actually staged a deletion.
+    const status = await this.git(['status', '--porcelain'], path);
+    const stripped = status.trim().length > 0;
+    if (stripped) {
+      // Daemon-authored (it, not the agent, makes this commit) so it succeeds with no user.name/email.
+      await this.git([...DAEMON_IDENTITY, 'commit', '-m', message], path);
+    }
+    // ALWAYS push HEAD — mirror commitAndPush. This is the crash-recovery window: a prior attempt that
+    // committed the removal but died before pushing leaves it stranded on local HEAD while origin still
+    // carries `.agent/`. Skipping the push here would let the scratch reach `main` at PR merge; pushing
+    // an already-up-to-date HEAD is a harmless no-op, so pushing unconditionally is safe.
+    const sha = (await this.git(['rev-parse', 'HEAD'], path)).trim();
+    await this.git(['push', 'origin', branch], path);
+    // Return the removal CommitRef only when THIS call staged the deletion; `null` on the clean/no-op path.
+    return stripped ? { sha } : null;
+  }
+
   async savepointWorkingTree(runId: number, message: string): Promise<boolean> {
     const path = this.runTreePath(runId);
     if (!existsSync(join(path, '.git'))) return false; // no tree (never prepared, or already dropped)

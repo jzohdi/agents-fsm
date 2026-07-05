@@ -210,3 +210,30 @@ describe('FakeGitHub — pull requests and comments', () => {
     expect(await gh.listPrComments(999)).toEqual([]);
   });
 });
+
+describe('FakeGitHub — stripAgentArtifacts (agents-fsm#21)', () => {
+  it('records every strip request (runId + branch) and returns a synthesized CommitRef', async () => {
+    const gh = new FakeGitHub();
+    expect(gh.strippedArtifacts).toEqual([]); // nothing stripped yet
+
+    const ref = await gh.stripAgentArtifacts(60, 'agent/run-60', 'chore: strip .agent');
+    expect(ref).not.toBeNull();
+    expect(typeof ref!.sha).toBe('string');
+    expect(ref!.sha.length).toBeGreaterThan(0);
+    expect(gh.strippedArtifacts).toEqual([{ runId: 60, branch: 'agent/run-60' }]);
+
+    // A second call (e.g. a PR-feedback re-approval) is recorded too — the runner asserts on the
+    // recorder, not the return value, so the fake need not model an in-memory .agent tree.
+    await gh.stripAgentArtifacts(61, 'agent/run-61', 'chore: strip .agent again');
+    expect(gh.strippedArtifacts).toEqual([
+      { runId: 60, branch: 'agent/run-60' },
+      { runId: 61, branch: 'agent/run-61' },
+    ]);
+  });
+
+  it('synthesizes a deterministic sha (no clock/random)', async () => {
+    const a = await new FakeGitHub().stripAgentArtifacts(7, 'agent/run-7', 'm');
+    const b = await new FakeGitHub().stripAgentArtifacts(7, 'agent/run-7', 'm');
+    expect(a!.sha).toBe(b!.sha); // same inputs → same synthesized sha across instances
+  });
+});

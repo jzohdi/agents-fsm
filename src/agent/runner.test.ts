@@ -481,6 +481,95 @@ describe('AgentRunner — side-effect outbox (idempotent non-idempotent calls, R
   });
 });
 
+describe('AgentRunner — .agent scratch stripping at terminal code-review approval (agents-fsm#21)', () => {
+  /** A review-stage recipe with a single produce phase (the reviewer), matching code_review's shape. */
+  const reviewRecipe = { code_review: { phases: ['produce'], io: { kind: 'review' as const } } } satisfies AgentsConfig;
+
+  it('strips the .agent artifacts once on a code_review approval with an open PR — even with zero comments', async () => {
+    const { repo, runner, run, github } = setup(
+      () => ({ output: { requestedTransition: 'approve' } }), // approve, no comments
+      reviewRecipe,
+      {},
+      'code_review',
+    );
+    const pr = await github.openPr({ branch: 'b', base: 'main', title: 't', body: '' });
+    repo.setRunPr(run.id, pr.number);
+
+    await runner.runStage(repo.getRun(run.id)!);
+
+    // The strip fires exactly once, against the run's own working branch — despite there being no comments
+    // (the "no comments" early-return must not bypass the strip).
+    expect(github.strippedArtifacts).toHaveLength(1);
+    expect(github.strippedArtifacts[0]).toMatchObject({ runId: run.id, branch: repo.getRun(run.id)!.branch });
+  });
+
+  it('still posts review comments AND strips when a code_review approval carries comments', async () => {
+    const { repo, runner, run, github } = setup(
+      () => ({ output: { requestedTransition: 'approve', comments: ['nit: rename x'] } }),
+      reviewRecipe,
+      {},
+      'code_review',
+    );
+    const pr = await github.openPr({ branch: 'b', base: 'main', title: 't', body: '' });
+    repo.setRunPr(run.id, pr.number);
+    const postComment = vi.spyOn(github, 'postComment');
+
+    await runner.runStage(repo.getRun(run.id)!);
+
+    expect(postComment).toHaveBeenCalledTimes(1); // the comment path is preserved
+    expect(github.strippedArtifacts).toHaveLength(1); // …and the strip still fires
+  });
+
+  it('does NOT strip when code_review requests changes (the artifacts must survive the re-run they feed)', async () => {
+    const { repo, runner, run, github } = setup(
+      () => ({ output: { requestedTransition: 'request_changes', comments: ['redo the API'] } }),
+      reviewRecipe,
+      {},
+      'code_review',
+    );
+    const pr = await github.openPr({ branch: 'b', base: 'main', title: 't', body: '' });
+    repo.setRunPr(run.id, pr.number);
+
+    await runner.runStage(repo.getRun(run.id)!);
+
+    expect(github.strippedArtifacts).toEqual([]); // request_changes is excluded from the strip gate
+  });
+
+  it('does NOT strip on a plan_review approval (no PR yet — interface_design still needs .agent/plan.md)', async () => {
+    const { repo, runner, run, github } = setup(
+      () => ({ output: { requestedTransition: 'approve' } }),
+      { plan_review: { phases: ['produce'], io: { kind: 'review' as const } } },
+      {},
+      'plan_review',
+    );
+    // No PR: prNumber stays null, the gate excludes it.
+
+    await runner.runStage(repo.getRun(run.id)!);
+
+    expect(github.strippedArtifacts).toEqual([]);
+  });
+
+  it('is idempotent across a PR-feedback re-approval: a second approval strips again without error', async () => {
+    const { repo, runner, run, github } = setup(
+      () => ({ output: { requestedTransition: 'approve' } }),
+      reviewRecipe,
+      {},
+      'code_review',
+    );
+    const pr = await github.openPr({ branch: 'b', base: 'main', title: 't', body: '' });
+    repo.setRunPr(run.id, pr.number);
+
+    await runner.runStage(repo.getRun(run.id)!); // first approval → strip (visit 0)
+    expect(github.strippedArtifacts).toHaveLength(1);
+
+    // A re-entry into code_review (the PR-feedback re-approval cycle) strips again — the adapter is
+    // naturally idempotent, so re-firing is safe and never throws.
+    repo.appendTransition({ runId: run.id, fromState: 'backend', toState: 'code_review', trigger: 'proceed' });
+    await runner.runStage(repo.getRun(run.id)!);
+    expect(github.strippedArtifacts).toHaveLength(2);
+  });
+});
+
 describe('AgentRunner — malformed output (retry, then escalate, never coerce)', () => {
   it('retries then escalates when produce keeps failing the envelope schema', async () => {
     let attempts = 0;

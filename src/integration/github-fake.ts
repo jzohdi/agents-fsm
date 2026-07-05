@@ -371,7 +371,10 @@ export class FakeGitHub implements GitHub {
     return { ...tree };
   }
 
+  /** Records each dropped run id so a test can assert the merge reclaim fired and count invocations. */
+  readonly droppedTrees: number[] = [];
   async dropWorkingTree(runId: number): Promise<void> {
+    this.droppedTrees.push(runId);
     // Forget the tree so the next prepareWorkingTree "re-clones" — mirrors the real adapter's
     // rm -rf. Idempotent on a missing tree, like the real `force` remove.
     this.workingTrees.delete(runId);
@@ -431,6 +434,17 @@ export class FakeGitHub implements GitHub {
     if (!this.workingTrees.has(runId)) return false;
     this.savepoints.push({ runId, message });
     return true;
+  }
+
+  /** Recorded `stripAgentArtifacts` calls — assert the strip fired exactly when expected (agents-fsm#21). */
+  readonly strippedArtifacts: Array<{ runId: number; branch: string }> = [];
+
+  async stripAgentArtifacts(runId: number, branch: string, message: string): Promise<CommitRef | null> {
+    void message;
+    this.strippedArtifacts.push({ runId, branch });
+    // Deterministic synthesized sha (no clock/random), so the same inputs give the same ref across
+    // instances. The runner tests assert on the recorder, not this value.
+    return { sha: `fakestrip-${runId}-${branch}` };
   }
 
   async readDiff(input: ReadDiffInput): Promise<string> {
