@@ -1,162 +1,178 @@
-# Plan — Eliminate `.agent/` artifact merge conflicts between back-to-back runs (agents-fsm#21)
+# Plan — Clean up a run's worktree and freshen local base when its PR merges (agents-fsm#20)
 
 ## Goal (restated)
 
-Back-to-back runs against the same repo must not produce merge conflicts caused by the pipeline's
-own scratch artifacts, `.agent/plan.md` and `.agent/interface.md`. Merging one run's PR must not set
-up the next run's PR (or its between-stage base sync) to conflict on those files. The artifacts must
-remain readable **on the branch during a run** so later stages (run in fresh worktrees) can hand off
-through them — they only need to stop causing cross-run conflicts at/after merge, and they do **not**
-need to persist in `main`.
+Per-run git worktrees (`<workingRoot>/run-<id>`) accumulate on disk and are never reclaimed, so a
+fleet's disk usage grows unbounded. When a run's PR is **detected merged** — the terminal,
+external/polled merge signal, **not** the `done` transition — the orchestrator should, exactly once
+and idempotently:
 
-## Why the conflict happens today
+1. **Reclaim the run's local working tree** — remove the `run-<id>` worktree *and* de-register it
+   properly (not a bare `rm`), in both `clone` and `local` source modes.
+2. **Freshen the local base branch** — fetch + fast-forward the operator's local base (e.g. `main`) so
+   future worktrees branch off up-to-date refs and the operator's checkout stays current. A no-op in
+   `clone` mode and when the local checkout is dirty or off-base.
 
-- Every producing stage writes its artifact to a **fixed path** (`.agent/plan.md`, `.agent/interface.md`)
-  and the runner commits the whole tree via `commitAndPush` → `git add -A`
-  (`src/integration/github-cli.ts` `commitAndPush`, `src/agent/runner.ts` `applyStageEffects`).
-- Those files therefore land in `main` when a run's PR merges. The next run branches off `main`
-  (now carrying run A's artifacts) and writes its **own different** artifacts at the same paths.
-  (This is directly observable: this very run's branch arrived carrying a stale `.agent/plan.md` from
-  a previous, unrelated run — issue #6.)
-- Two independent, real-git merge points then conflict on those paths:
-  1. **The between-stage base sync** (`runner.ts` `syncWithBase` → `github-cli.ts` `syncBranchWithBase`,
-     which merges `origin/<base>` into the run branch before every non-triage stage). This is where the
-     noise usually fires first: `manual` policy parks the run `needs_human`; `auto` policy burns a
-     resolver invocation — on *nearly every* back-to-back change.
-  2. **The GitHub PR merge** into `main` (done by a human/operator), if `main` moved after the run's
-     last base sync.
-- These are pure noise: the files are the orchestrator's scratch, not user code.
+This must **not** touch `src/fsm/`, must **not** fire while the PR is still open/merge-ready (`done`
+alone must not trigger it), and must be safe to re-run across crash/restart.
 
-## Chosen approach: strip `.agent/` from the branch tip at the terminal `code_review` approval
+## How the system works today (grounding)
 
-Keep the **fixed artifact paths** exactly as they are (so mid-run handoff is untouched), but ensure
-the artifacts never reach `main`: when `code_review` **approves** (the only transition that leads to
-`done`), the runner adds one final commit on the branch that removes the entire `.agent/` scratch
-directory, then pushes. The PR's net contribution to `main` therefore contains **no `.agent/` files**.
+- **`done` ≠ merged.** `done` means merge-ready (PR open, unmerged). A human merges; the merge is
+  observed later by a **polled signal**, not by any FSM transition (README §3.5 / Milestone 9).
+- **The merge-detection path already exists** in `src/loop/pr-feedback-poller.ts` →
+  `PrFeedbackPoller.processRun`. Each tick it reads the finished run's PR (`github.getPr`). When the PR
+  is no longer open it flags the run stopped (`PR_FEEDBACK_CLOSED_FLAG`) so it is never watched again,
+  and **on `pr.state === 'merged'` it already calls `github.syncBaseBranch(baseBranch)`** (best-effort,
+  guarded) — added for Milestone 12. This is precisely the hook the issue asks for. Both the background
+  `checkOnce` loop and the dashboard's on-demand `checkRun` funnel through `processRun`, so wiring here
+  covers both.
+- **The two building blocks are complete and already mode-aware** (do **not** rebuild them):
+  - `github.dropWorkingTree(runId)` (`src/integration/github.ts` iface;
+    `github-cli.ts:318`; `github-fake.ts:374`). In `local` mode it runs `git worktree remove --force`
+    + `git worktree prune` (de-registers, not a bare rm); in `clone` mode it `rm -rf`s the dir. Both are
+    idempotent — a missing tree is a no-op (`--force` / `execIgnore` swallow the error). Currently the
+    **only** caller is the Scheduler Poller (`scheduler-poller.ts:182`) when waking a dependency-blocked
+    run onto a fresh base.
+  - `github.syncBaseBranch(base)` (`github-cli.ts:334`; `github-fake.ts:382`). `local` mode: `git fetch
+    origin`, then `git merge --ff-only origin/<base>` **only** when the checkout is on `base` with a clean
+    tree (else it returns after just the fetch — never disturbs the operator's WIP or another branch).
+    `clone` mode (`!this.localRepo`): returns immediately, a no-op. Currently the only caller is this same
+    merged branch in `processRun`.
+- **Adapter-level mode behavior is already unit-tested** in `src/integration/github-cli.test.ts`:
+  `dropWorkingTree` de-registers the worktree (local) and handles clone/lost-tree; `syncBaseBranch`
+  fast-forwards a clean on-base checkout, leaves a dirty/off-base one alone, and is a no-op for clone
+  mode. So this change only needs to prove the *wiring* fires them on merge — not re-prove their
+  per-mode semantics.
+- **Transactional outbox** (`src/agent/side-effects.ts`) is for **non-idempotent GitHub API calls**
+  made *inside a runner stage*, keyed by state-visit. It does **not** apply here: `dropWorkingTree` and
+  `syncBaseBranch` are **idempotent local git operations** run from a background poller, not a stage.
+  The issue's phrasing ("via the outbox *where a non-idempotent GitHub call is involved*") is
+  conditional and no such call is involved — the flag + idempotent-retry gives once-only semantics.
 
-Why this fully removes the conflict at *both* merge points, deterministically and without depending on
-any merge-driver support:
+## Approach
 
-- `.agent/` files exist **only on live run branches**, never in `main`.
-- The between-stage base sync merges `origin/<base>` (= `main`, which never has `.agent/` files) into a
-  branch that added them only on its own side → a one-sided add → **no 3-way conflict**, ever.
-- The GitHub PR merge is `main` (no `.agent/`) × branch-tip (stripped, no `.agent/`) → **no conflict**.
-- `main` stays clean (no accumulation of scratch), matching the issue's "do not need to persist in main".
+Extend the existing `pr.state === 'merged'` branch in `PrFeedbackPoller.processRun` to also reclaim the
+run's worktree, and reorder so the reclaim happens **before** the run is flagged stopped — making the
+poller's existing per-run retry the crash-safety mechanism.
 
-This is the same architectural pattern the existing merge-conflict handling already uses: a
-loop/runner-owned side effect layered on top of an untouched FSM (cf. the `resolve_conflicts`
-pseudo-stage and the base-sync step). **`src/fsm/` is not touched.**
+Target shape of the `pr.state !== 'open'` block (in `processRun`):
 
-### Why not the other candidate directions
+```ts
+const pr = await github.getPr(prNumber);
+if (pr.state !== 'open') {
+  if (pr.state === 'merged') {
+    // Merge is the terminal signal (issue #20): reclaim disk + freshen base, exactly once.
+    // dropWorkingTree runs BEFORE we flag the run stopped: if it throws (or the daemon crashes
+    // mid-reclaim) the flag is never set, the run stays watched, and the next tick retries
+    // (getPr still 'merged'). Both ops are idempotent — a missing tree is a no-op — so re-running
+    // is safe. Removal applies to clone AND local modes.
+    await github.dropWorkingTree(run.id);
+    // Freshen the operator's local base (local mode: ff a clean on-base checkout; clone/dirty/off-base:
+    // no-op). Best-effort: a freshen miss is cosmetic (next merge / prepareWorkingTree's fetch recovers)
+    // and must not wedge the stop flag or abort the pass.
+    try {
+      await github.syncBaseBranch(baseBranch);
+    } catch (err) {
+      this.repo.recordLog({ runId: run.id, level: 'warn',
+        message: `post-merge sync of the local checkout failed: ${String(err)}`,
+        data: { kind: 'post_merge_sync_error', prNumber } });
+    }
+  }
+  this.repo.mergeRunFlags(run.id, { [PR_FEEDBACK_CLOSED_FLAG]: true });
+  this.repo.recordLog({ runId: run.id,
+    message: `PR #${prNumber} is ${pr.state} — no longer watching for feedback`,
+    data: { kind: 'pr_feedback_stopped', prNumber, state: pr.state } });
+  return 'stopped';
+}
+```
 
-- **`.gitattributes merge=union`/`ours` for `.agent/**`**: rejected. It would auto-resolve the *local*
-  base sync, but GitHub's server-side PR merge does not reliably honor custom merge drivers, so
-  acceptance criterion #1 (clean *sequential PR merges*) could not be guaranteed or unit-tested;
-  `union` also produces semantically garbage concatenated artifacts, and the files would still
-  accumulate in `main`.
-- **Run-scoped artifact subpaths** (`.agent/runs/<runId>/…`): also conflict-free, but it requires
-  threading the run id into every stage prompt that writes/reads the artifacts (brittle — the agent
-  picks the path from prompt text), and it makes the scratch files **accumulate forever** in `main`,
-  the opposite of the issue's stated preference. Stripping keeps the simple fixed paths and leaves
-  `main` clean.
+### Why this satisfies every acceptance criterion
 
-## Changes
+- **Worktree removed + de-listed, both modes:** `dropWorkingTree` is invoked on merge; its adapter
+  already does `worktree remove --force` + `prune` (local) or `rm -rf` (clone).
+- **Base fast-forwarded (local) / no-op (clone/dirty/off-base):** unchanged `syncBaseBranch` call; its
+  adapter already encodes the guards.
+- **At most once + idempotent across crash/restart:** on the happy path the `PR_FEEDBACK_CLOSED_FLAG`
+  drops the run out of `watchedRuns()`, so cleanup fires once. If reclaim fails or the daemon crashes
+  before the flag is set, the run stays watched and the next tick re-runs both ops — both idempotent, so
+  a missing tree / already-ff'd base is a no-op, not an error. Placing `dropWorkingTree` **before** the
+  flag (today `syncBaseBranch` sits *after* it) is the key change that makes the reclaim crash-safe.
+- **Never fires on `done` alone:** `processRun` only reaches this block when `getPr` reports the PR is no
+  longer open; a `done` run with an open PR takes the `watching`/`reopened` paths. The FSM is untouched.
+- **Doesn't disturb still-active runs sharing the checkout:** `dropWorkingTree(run.id)` removes only
+  *this* run's `run-<id>` worktree (siblings are separate worktrees); `syncBaseBranch` ff's the shared
+  checkout only when it's clean and on-base, so an operator (or another run) mid-work is left alone.
 
-### 1. New adapter capability: strip the scratch artifacts (`src/integration/github.ts` + impls)
-- Add one method to the `GitHub` interface, e.g.
-  `stripAgentArtifacts(runId: number, branch: string, message: string): Promise<CommitRef | null>`.
-- **Real impl (`github-cli.ts`)**: in the run's working tree run
-  `git rm -r -f --ignore-unmatch .agent` (idempotent — a no-op when the dir is already gone), then
-  commit **only if something was staged** (reuse the `status --porcelain` guard already in
-  `commitAndPush`), authored by the `DAEMON_IDENTITY` (the daemon, not the agent, makes this commit),
-  and `git push origin <branch>`. Return the new `CommitRef`, or `null` when there was nothing to
-  remove (already stripped / never created). Keep all tree+git mutation behind the adapter — the runner
-  never shells git itself.
-- **Fake impl (`github-fake.ts`)**: record the request (e.g. push to a `strippedArtifacts: Array<{runId,
-  branch}>` recorder, mirroring the existing `savepoints`/`finishedMerges`/`abortedMerges` lists) and
-  return a synthesized `CommitRef`, so runner-level tests can assert the strip fired exactly when
-  expected.
+### Why not alternatives
 
-### 2. Runner: fire the strip on terminal code-review approval (`src/agent/runner.ts`)
-- In `applyStageEffects`, the review branch currently only posts PR comments. Extend it so that a
-  **review stage that has an open PR and is approving** also strips the artifacts before handing off:
-  gate on `io.kind === 'review'` **and** `run.prNumber !== null` **and**
-  `envelope.requestedTransition === 'approve'`. In the default pipeline this matches **only**
-  `code_review`'s approve→`done` edge (plan_review has no PR; `request_changes` is excluded so the
-  artifacts survive for the frontend/backend re-run they feed).
-- Call `github.stripAgentArtifacts(run.id, prep.branch!, <message>)` after the comment loop, and record
-  a log line (mirroring the base-sync `recordLog`) noting the scratch was cleaned. Do **not** add a new
-  artifact record — the removal is the point. Return the (possibly comment-enriched) envelope unchanged.
-- Idempotency: safe on re-entry / a second approval (a PR-feedback cycle) because `git rm
-  --ignore-unmatch` + commit-if-changed is a no-op once already stripped.
-
-### 3. Path assumptions / `recordArtifact` locators
-- Paths are unchanged, so `recordArtifact` locators, prompt path references
-  (`prompts/stages/plan.md`, `interface_design.md`, `tdd.md`, `code_review.md`), and `executor.ts`
-  golden-path locators need **no changes**. The artifacts still resolve to `.agent/plan.md` /
-  `.agent/interface.md` throughout the run; the only new behavior is their removal from the branch
-  tip at the very end. (Called out explicitly to close the issue's "update path assumptions" item:
-  nothing to update because the paths stay fixed.)
-
-### 4. Docs
-- Update the README/operating-guide note on artifact storage/merge behavior: state that `.agent/`
-  artifacts are branch-local scratch that are stripped from the branch tip at `code_review` approval,
-  so they never land in `main` and never cause cross-run conflicts, while remaining readable during
-  the run. Natural anchors: the "Artifacts are the shared memory" note (README §3.3, ~line 134) and/or
-  the merge-conflict-handling section that documents the base sync.
+- **Hook off the `done` transition / a new FSM state** — wrong by construction: `done` ≠ merged, and the
+  issue forbids touching `src/fsm/`. Merge is only known via the poller.
+- **A separate new poller / dedicated merge-cleanup service** — redundant: `processRun` already detects
+  merge, already calls `syncBaseBranch`, already has the once-only flag and per-run error isolation.
+  Adding one line + a reorder reuses all of it; a new poller would duplicate the getPr read and the
+  stop-watching bookkeeping.
+- **Wrap in the side-effects outbox** — unnecessary and mis-scoped (see above): these are idempotent
+  local git ops from a poller, not non-idempotent GitHub API calls inside a stage.
 
 ## Files to change
 
-- `src/integration/github.ts` — add `stripAgentArtifacts` to the `GitHub` interface (+ any shared types).
-- `src/integration/github-cli.ts` — real implementation (`git rm -r -f --ignore-unmatch .agent`,
-  commit-if-changed, push).
-- `src/integration/github-fake.ts` — fake implementation + a recorder for assertions.
-- `src/agent/runner.ts` — invoke the strip on terminal code-review approval in `applyStageEffects`.
-- `README.md` — artifact storage/merge note.
-- Tests: `src/integration/github-cli.test.ts`, `src/agent/runner.test.ts` (and/or
-  `src/loop/event-loop.test.ts`), plus `src/integration/github-fake.test.ts` if it covers new methods.
+- `src/loop/pr-feedback-poller.ts` — in `processRun`, add `await github.dropWorkingTree(run.id)` inside
+  the `pr.state === 'merged'` branch, ordered before `mergeRunFlags` sets the stop flag; keep
+  `syncBaseBranch` best-effort. Refresh the surrounding doc comment (and the file-header "Stops on
+  merge/close" bullet) to note the merge-triggered reclaim.
+- `src/integration/github-fake.ts` — add a `droppedTrees: number[]` tally to `dropWorkingTree` (mirroring
+  the existing `syncedBases` array) so poller tests can assert the reclaim fired and count invocations
+  (for the idempotent/once assertions). Keep the existing `workingTrees.delete` behavior.
+- `src/loop/pr-feedback-poller.test.ts` — new/expanded tests (below).
+
+No changes to `src/integration/github.ts` (interface unchanged), `github-cli.ts` (building blocks
+unchanged), `scheduler-poller.ts`, or `src/fsm/` (untouched).
 
 ## Risks & edge cases
 
-- **Only strip on approve, never on `request_changes`.** Stripping before a frontend/backend re-run
-  would delete artifacts those stages still read. The `requestedTransition === 'approve'` gate handles
-  this; add an explicit test that `request_changes` does **not** strip.
-- **Never strip in `plan_review`.** It approves to `interface_design`, which needs `.agent/plan.md`.
-  The `run.prNumber !== null` gate excludes it (no PR yet); assert this in a test.
-- **code_review still sees the artifacts.** The strip runs in `applyStageEffects`, i.e. *after* the
-  review agent has run, so the reviewer can still read `.agent/plan.md` / `.agent/interface.md` from
-  the tree. The removal only affects what the PR merges. (The reviewer's `git diff origin/<base>...HEAD`
-  will still show the artifacts as added while it runs — harmless and unchanged from today.)
-- **PR-feedback re-entry after merge.** `main` has no `.agent/` files; a re-opened run re-runs from
-  `plan`, regenerating them on the branch (base sync is a one-sided add → no conflict), and strips them
-  again at the next approval. Consistent and idempotent.
-- **Push failure / partial strip.** The strip is one commit+push through the same seam as
-  `commitAndPush`; a failure surfaces as an effects error and escalates like any other git side effect
-  (existing `effectsError` path). No merge is involved, so the tree is never left mid-merge.
-- **Concurrent runs (M8).** During overlap neither run's artifacts are in `main` yet; a base sync only
-  pulls `main`, never a sibling's open branch, so there is nothing to conflict on until a PR merges —
-  and by then that PR was stripped.
-- **Non-default pipelines** that route a PR-bearing review stage's approval somewhere other than `done`
-  would also strip; acceptable because approval means the PR is finalized, and the gate can be tightened
-  to `code_review` specifically if a future config needs it.
+- **Ordering regression:** moving the flag-set to *after* the reclaim means a persistent
+  `dropWorkingTree` failure keeps the run in the watch set (logging one warn/tick via `checkOnce`'s
+  catch). Acceptable and intended — it's the retry that gives crash-safety; `dropWorkingTree` only throws
+  on a genuine git failure (a missing tree is already a no-op). `syncBaseBranch` stays best-effort so a
+  base-freshen network blip never blocks the stop flag.
+- **`closed` (abandoned, not merged) PRs:** unchanged — they set the stop flag with no cleanup (worktree
+  reclaim for abandoned PRs is out of scope; only `merged` triggers it, matching the acceptance criteria).
+- **On-demand `checkRun`** shares `processRun`, so a dashboard "Check now" on a merged PR performs the
+  same reclaim — consistent with a background tick (already asserted in the existing `checkRun` test,
+  which now also drops the tree).
+- **Double-fire safety:** even if two ticks race (or `checkRun` overlaps a background tick), both ops are
+  idempotent, so the worst case is a redundant no-op.
 
 ## How it will be tested
 
-- **Real-git sequential-merge test** (`github-cli.test.ts`, using the existing offline temp-repo
-  harness): create `main`; branch A, add `.agent/plan.md` + real code, call `stripAgentArtifacts`,
-  merge A into `main` — assert clean and that `main` has no `.agent/`. Then branch B off the updated
-  `main`, add its own `.agent/plan.md` + code, `stripAgentArtifacts`, merge B into `main` — assert
-  **no conflict** and no manual resolution. This directly proves acceptance criterion #1.
-- **`stripAgentArtifacts` unit tests** (real git): removes `.agent/` and commits+pushes when present;
-  returns `null` / makes no commit when already absent (idempotent); leaves non-`.agent` files
-  untouched.
-- **Runner tests** (fake adapter): `code_review` approve → strip fired once with the run's branch;
-  `code_review` `request_changes` → **no** strip; `plan_review` approve → **no** strip; a PR-feedback
-  re-entry that approves again → strip is idempotent.
-- Full `npm test` + lint to confirm no regressions in the base-sync / conflict-policy suites (which
-  stay as-is per the issue's out-of-scope note).
+Unit tests in `src/loop/pr-feedback-poller.test.ts` (Vitest, against `GitHubFake`):
 
-## Scope flags
+1. **merge → worktree reclaimed + base freshened, once.** Run to `done`; ensure a tree exists
+   (`prepareWorkingTree`); `setPrState(pr, 'merged')`; `checkOnce()` → assert the run's tree was dropped
+   (`github.droppedTrees` contains `run.id`) **and** `github.syncedBases` recorded the base. Assert the
+   stop flag is set and status stays `done`.
+2. **idempotent re-run / at-most-once.** After (1), a second `checkOnce()` is a no-op — the flagged run
+   leaves the watch set, so `droppedTrees`/`syncedBases` do not grow (count stays 1). Separately, drive
+   the reclaim twice directly (e.g. via `checkRun` before the flag lands) to show re-running is safe (no
+   throw) — a missing tree is a no-op.
+3. **`done` alone does not reclaim.** With the PR still `open`, `checkOnce()`/`checkRun()` return
+   `watching` and `droppedTrees` stays empty.
+4. **`closed` (abandoned) does not reclaim.** `setPrState(pr, 'closed')` → run flagged stopped,
+   `droppedTrees` empty, `syncedBases` empty.
+5. **reclaim failure keeps the run watched + retries.** Stub `github.dropWorkingTree` to throw once →
+   `checkOnce()` logs the warn, the stop flag is **not** set (run still watched); on the next tick (drop
+   succeeding) the reclaim completes and the flag lands. Proves crash/restart idempotency at the poller
+   level.
+6. **base-sync failure is best-effort.** Stub `syncBaseBranch` to reject → the worktree is still dropped,
+   a `post_merge_sync_error` warn is logged, and the run is still flagged stopped (a freshen miss does not
+   wedge cleanup).
 
-- `needs_backend: true` — all changes are in the Node/TS orchestrator (adapters, runner, tests, docs).
-- `needs_frontend: false` — no dashboard/UI change.
+Per-mode behavior of `dropWorkingTree` (de-register in local, rm in clone) and `syncBaseBranch` (ff on
+clean on-base, leave dirty/off-base, no-op for clone) is **already** covered by real-git tests in
+`src/integration/github-cli.test.ts`; this change relies on those and does not duplicate them. Full
+suite (`npm test`) plus lint/typecheck run before handoff.
+
+## Scope
+
+Backend only — a background poller + integration adapter + tests. No UI/frontend surface changes.
