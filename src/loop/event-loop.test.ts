@@ -64,7 +64,7 @@ describe('golden path (start → done on stubs)', () => {
     expect(sequence(repo, run.id)).toEqual(GOLDEN_PATH);
 
     // The working-tree lifecycle ran: the branch was created (at plan) and the PR opened (at tdd).
-    expect(finalRun.branch).toMatch(new RegExp(`^agent/run-${run.id}-[0-9a-f]{6}$`)); // id + unique suffix
+    expect(finalRun.branch).toMatch(/^agent\/\d{4}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]*-[0-9a-f]{6}$/); // date-slug-suffix
     expect(finalRun.prNumber).not.toBeNull();
 
     // The onTransition stream saw every transition in order.
@@ -102,7 +102,7 @@ describe('golden path (start → done on stubs)', () => {
     expect(artifacts.map((a) => a.kind)).toEqual(['plan', 'interface', 'pr']);
     // Locators carry the runner's real branch/sha enrichment and the opened PR number.
     const plan = artifacts.find((a) => a.kind === 'plan')!;
-    expect((plan.locator as { branch: string }).branch).toMatch(new RegExp(`^agent/run-${run.id}-[0-9a-f]{6}$`));
+    expect((plan.locator as { branch: string }).branch).toMatch(/^agent\/\d{4}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]*-[0-9a-f]{6}$/);
     expect(plan.locator).toHaveProperty('sha');
     expect(artifacts.find((a) => a.kind === 'pr')!.locator).toHaveProperty('number');
   });

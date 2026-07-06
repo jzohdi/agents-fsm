@@ -32,6 +32,9 @@ function newRunAt(repo: Repository, state: string) {
 /** Stand-in for the placeholder body `tdd` opens the PR with, so a body-finalization test can prove it changed. */
 const prePlaceholder = 'placeholder body opened by tdd';
 
+/** The generated working-branch shape: `agent/<date>-<issue-slug>-<rand>` (date + a `[a-z0-9-]` slug + a 6-hex suffix). */
+const BRANCH_RE = /^agent\/\d{4}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]*-[0-9a-f]{6}$/;
+
 describe('AgentRunner lifecycle — triage', () => {
   it('prepares the repo checkout (branch + tree) but makes no commit or PR (Milestone 12)', async () => {
     // triage now runs inside the target repo's working tree (so the harness can inspect the codebase to
@@ -43,7 +46,7 @@ describe('AgentRunner lifecycle — triage', () => {
     const outcome = await runner.runStage(run);
 
     expect(outcome.kind).toBe('handoff');
-    expect(repo.getRun(run.id)!.branch).toMatch(new RegExp(`^agent/run-${run.id}-[0-9a-f]{6}$`));
+    expect(repo.getRun(run.id)!.branch).toMatch(BRANCH_RE);
     expect(github.commitCount()).toBe(0);
     expect(github.listPrs()).toHaveLength(0);
   });
@@ -56,9 +59,8 @@ describe('AgentRunner lifecycle — produce stages', () => {
 
     const outcome = await runner.runStage(run);
 
-    const branchRe = new RegExp(`^agent/run-${run.id}-[0-9a-f]{6}$`); // id + a unique suffix
     const createdBranch = repo.getRun(run.id)!.branch!;
-    expect(createdBranch).toMatch(branchRe);
+    expect(createdBranch).toMatch(BRANCH_RE);
     expect(github.commitCount()).toBe(1);
     expect(outcome.kind).toBe('handoff');
     if (outcome.kind === 'handoff') {
@@ -93,7 +95,19 @@ describe('AgentRunner lifecycle — produce stages', () => {
     const branchA = repo.getRun(a.id)!.branch!;
     const branchB = repo.getRun(b.id)!.branch!;
     expect(branchA).not.toBe(branchB);
-    expect(branchA).toMatch(/^agent\/run-\d+-[0-9a-f]{6}$/);
+    expect(branchA).toMatch(BRANCH_RE);
+  });
+
+  it('names the branch from the run date and a slug of the issue title', async () => {
+    const { repo, github, runner } = setup();
+    github.seedIssue('o/r#7', { number: 7, title: 'Add CSV export to the Reports page!' });
+    const run = newRunAt(repo, 'plan');
+
+    await runner.runStage(run);
+
+    const date = repo.getRun(run.id)!.createdAt.slice(0, 10);
+    // The punctuation-heavy title becomes a clean `[a-z0-9-]` slug; the date + a unique suffix bracket it.
+    expect(repo.getRun(run.id)!.branch).toMatch(new RegExp(`^agent/${date}-add-csv-export-to-the-reports-page-[0-9a-f]{6}$`));
   });
 });
 

@@ -353,7 +353,7 @@ export class AgentRunner {
       // the issue; without a working tree the harness subprocess would inherit `process.cwd()`. No commit
       // or push happens in triage (that's only in produce stages), so creating the local branch here is
       // harmless and `plan` reuses it.
-      branch = run.branch ?? branchName(run);
+      branch = run.branch ?? branchName(run, issue.title);
       const tree = await github.prepareWorkingTree({ runId: run.id, branch, base: baseBranch });
       if (run.branch === null) this.repo.setRunBranch(run.id, branch);
       workingDir = tree.path;
@@ -473,7 +473,7 @@ export class AgentRunner {
   private async prepareTree(run: Run): Promise<{ issue: Issue; workingDir: string; branch: string }> {
     const { github, baseBranch } = this.repoContext(run);
     const issue = await github.readIssue(run.issueRef);
-    const branch = run.branch ?? branchName(run);
+    const branch = run.branch ?? branchName(run, issue.title);
     const tree = await github.prepareWorkingTree({ runId: run.id, branch, base: baseBranch });
     if (run.branch === null) this.repo.setRunBranch(run.id, branch);
     return { issue, workingDir: tree.path, branch };
@@ -1069,14 +1069,42 @@ export class AgentRunner {
 /** The effective recipe shape `recipeFor` returns. */
 type Recipe = ReturnType<typeof recipeFor>;
 
+/** How many characters of the issue-title slug a branch name keeps — long enough to recognize the issue
+ *  at a glance, short enough that the ref stays manageable. */
+const BRANCH_SLUG_MAX = 40;
+
 /**
- * The run's working-branch name, created once and persisted (so recovery reuses it). A short random
- * suffix keeps it globally unique even when the run id is reused — e.g. the operator wiped the local
- * db and ids restarted at 1 — so a fresh run never adopts a prior run's leftover remote branch + PR
- * (the collision that let a stale implementation slip onto a new run's branch).
+ * The run's working-branch name: `agent/<date>-<issue-slug>-<rand>`, e.g.
+ * `agent/2026-07-06-add-csv-export-a1b2c3`. Human-readable — the date the run started plus the issue
+ * title — where the old `agent/run-<id>-<rand>` was opaque, while keeping every property that mattered:
+ *  - **Globally unique.** The short random suffix keeps a fresh run from ever adopting a prior run's
+ *    leftover remote branch + PR — even when the run id is reused (the operator wiped the local db and
+ *    ids restarted at 1) or two runs share a title on the same day. That collision once let a stale
+ *    implementation slip onto a new run's branch, so the suffix stays.
+ *  - **Stable.** Created once and persisted (callers guard on `run.branch`), so recovery reuses it. The
+ *    date is taken from the run's own `createdAt`, not the wall clock, so a recompute before the branch
+ *    is persisted yields the same date.
+ *  - **A valid git ref.** The slug is `[a-z0-9-]` only. A title with no usable characters (empty,
+ *    all-punctuation, non-latin) falls back to `run-<id>` so the name is never `agent/<date>--<rand>`.
  */
-function branchName(run: Run): string {
-  return `agent/run-${run.id}-${randomBytes(3).toString('hex')}`;
+function branchName(run: Run, issueTitle: string): string {
+  const date = run.createdAt.slice(0, 10); // YYYY-MM-DD off the ISO-8601 timestamp
+  const slug = slugifyTitle(issueTitle) || `run-${run.id}`;
+  return `agent/${date}-${slug}-${randomBytes(3).toString('hex')}`;
+}
+
+/**
+ * Reduce an issue title to the `[a-z0-9-]` slug portion of a git branch name: lowercase, every run of
+ * non-alphanumerics collapses to a single hyphen, ends trimmed, then length-capped (re-trimming any
+ * hyphen the cut left dangling). Returns `''` when the title has no usable characters, so the caller
+ * can fall back rather than emit a bare/hyphen-only segment.
+ */
+function slugifyTitle(title: string): string {
+  const slug = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug.slice(0, BRANCH_SLUG_MAX).replace(/-+$/, '');
 }
 
 function commitMessage(run: Run, issue: Issue): string {
