@@ -62,6 +62,12 @@ export interface CliArgs {
    * an operator overrides them. Undefined here → falls back to `FLEET_COST_CEILING` or off (no ceiling).
    */
   costCeiling?: number;
+  /**
+   * Shared-secret bearer token for the `serve` daemon's API + SSE (issue #25) — `--api-token`. Undefined
+   * here → falls back to `FLEET_API_TOKEN`, then auth is disabled (the localhost-only default). Env-only
+   * in practice; never persisted to SQLite (README §9.1).
+   */
+  apiToken?: string;
 }
 
 export function parseCliArgs(argv: string[]): CliArgs {
@@ -90,6 +96,7 @@ export function parseCliArgs(argv: string[]): CliArgs {
       port: { type: 'string' },
       concurrency: { type: 'string' },
       'cost-ceiling': { type: 'string' },
+      'api-token': { type: 'string' },
     },
   });
   const mock = values.mock ?? false;
@@ -123,5 +130,6 @@ export function parseCliArgs(argv: string[]): CliArgs {
     port: values.port !== undefined ? Number(values.port) : 4319,
     ...(values.concurrency !== undefined ? { concurrency: Number(values.concurrency) } : {}),
     ...(values['cost-ceiling'] !== undefined ? { costCeiling: Number(values['cost-ceiling']) } : {}),
+    apiToken: values['api-token'],
   };
 }

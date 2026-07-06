@@ -6,27 +6,15 @@
   import Pipeline from './lib/Pipeline.svelte';
   import RunDetail from './lib/RunDetail.svelte';
   import Editor from './lib/Editor.svelte';
-  import { ui, initRouter, navigate, loadConfig, loadRuns, loadRepos, loadCost, loadModels, loadSettings, selectRun, connectStream, banner } from './lib/store.svelte';
+  import { ui, initRouter, navigate, bootstrap } from './lib/store.svelte';
+  import TokenPrompt from './lib/TokenPrompt.svelte';
   import { costStatusModel } from './lib/render';
 
   onMount(async () => {
     initRouter();
-    try {
-      await loadConfig();
-      await loadRuns();
-      await loadRepos();
-      await loadCost();
-      await loadModels();
-      await loadSettings();
-      // Open a sensible run by default so the detail view isn't empty on load: prefer a running one.
-      if (ui.selectedId === null && ui.runs.length) {
-        const first = ui.runs.find((r) => r.status === 'running') ?? ui.runs[0]!;
-        await selectRun(first.id);
-      }
-    } catch (err) {
-      banner(`Failed to load: ${(err as Error).message}`, 'err');
-    }
-    connectStream();
+    // `bootstrap` runs the mount-loads + opens the stream, and routes a 401 into `ui.authRequired`
+    // (the token prompt below). Auth-off daemons never 401, so this is the old behaviour unchanged.
+    await bootstrap();
   });
 
   const connLabel = $derived(ui.conn === 'on' ? 'Live' : ui.conn === 'off' ? 'Reconnecting' : 'Connecting');
@@ -53,6 +41,10 @@
     </div>
   </div>
 </header>
+
+{#if ui.authRequired}
+  <TokenPrompt />
+{/if}
 
 {#if ui.route === 'pipelines'}
   <RepoTabs />

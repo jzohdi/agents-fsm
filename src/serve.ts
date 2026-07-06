@@ -16,7 +16,7 @@ import type { Server } from 'node:http';
 
 import { createApiServer, DEFAULT_PUBLIC_DIR } from './api/server';
 import { stateLabelMirror } from './api/state-label-mirror';
-import { buildOrchestrator } from './build-runner';
+import { buildOrchestrator, resolveApiToken } from './build-runner';
 import type { CliArgs } from './cli-args';
 
 export async function serve(args: CliArgs): Promise<void> {
@@ -30,7 +30,11 @@ export async function serve(args: CliArgs): Promise<void> {
   broadcaster.subscribe(stateLabelMirror(resolver));
   orchestrator.recover(); // reclaim crash-stranded events and resume any queued work on startup
 
-  const server = createApiServer(orchestrator);
+  // API auth (issue #25): a resolved token gates every route except /health + static (see `requiresAuth`).
+  // Absent ⇒ auth off, the localhost-only default (byte-for-byte unchanged). Pass `{}` when unset so the
+  // server's `DEFAULT_PUBLIC_DIR` default is untouched.
+  const apiToken = resolveApiToken(args);
+  const server = createApiServer(orchestrator, apiToken ? { apiToken } : {});
   await listen(server, args.port);
   const config = orchestrator.getConfig();
   console.log(`agent-fleet daemon listening on http://localhost:${args.port} (FSM config ${config.version}${args.mock ? ', mock mode' : ', real mode'})`);
@@ -47,6 +51,11 @@ export async function serve(args: CliArgs): Promise<void> {
         : `  repos: ${repos.map((r) => r.repoRef).join(', ')} (file a run on any other repo to auto-enroll it)`,
     );
   }
+  console.log(
+    apiToken
+      ? '  auth: API token required on every route except /health (Authorization: Bearer <token>, or ?token= for the SSE stream).'
+      : '  auth: OFF — the API is open (localhost only). Set FLEET_API_TOKEN (or --api-token) to require a token before exposing it.',
+  );
   console.log('  POST /runs · GET /runs · GET /runs/:id · POST /runs/:id/{pause,resume,stop,revert,archive,unarchive,cost-override,model,effort} · GET|POST /repos · POST /repos/{watch,conflict-policy} · GET /cost · GET /models · GET /settings · PUT /settings/{default-harness,default-model} · GET|PUT /config · GET /stream');
   if (!existsSync(DEFAULT_PUBLIC_DIR)) {
     console.warn('  ⚠ dashboard not built — run `npm run build:dashboard` (or `npm run dev:dashboard` for HMR). The API works regardless.');
@@ -130,9 +139,9 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined>
 function listen(server: Server, port: number): Promise<void> {
   return new Promise((resolve, reject) => {
     server.once('error', reject);
-    // Bind to loopback only: the MVP API is unauthenticated and meant for a localhost dashboard
-    // (README §1 / Layer 7), so it must not be reachable from the LAN. Remote access is a deliberate
-    // post-MVP add-on (auth + networking), not an accident of the default bind address.
+    // Bind to loopback only. Token auth now exists (issue #25 — `FLEET_API_TOKEN`), but off-loopback
+    // binding is a deliberate, separate post-MVP add-on (issue #16: networking + TLS/hardening), not an
+    // accident of the default bind address — so the daemon stays on 127.0.0.1 until that lands.
     server.listen(port, '127.0.0.1', () => {
       server.off('error', reject);
       resolve();

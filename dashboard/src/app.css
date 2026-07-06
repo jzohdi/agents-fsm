@@ -154,6 +154,20 @@ input, textarea, button, select { font: inherit; }
 .af-banner-err { background: var(--rose-soft); color: var(--rose); }
 .af-banner-ok { background: var(--accent-soft); color: var(--accent); }
 
+/* --- token auth gate (issue #25) --- */
+.af-authgate {
+  position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center;
+  padding: 24px; background: rgba(27, 26, 22, 0.42); backdrop-filter: blur(3px);
+}
+.af-authcard {
+  width: 460px; max-width: 92vw; background: var(--paper2); border: 1px solid var(--rule2);
+  border-radius: 4px; box-shadow: 0 26px 50px -28px rgba(40, 35, 20, 0.55); padding: 26px 28px;
+}
+.af-authcard h2 { font-size: 17px; font-weight: 700; margin: 8px 0 10px; }
+.af-authcard p { color: var(--ink2); font-size: 13px; margin: 0 0 18px; }
+.af-authcard code { font-family: var(--mono); font-size: 12px; color: var(--ink); }
+.af-authcard .af-enroll { padding-bottom: 0; }
+
 /* --- section scaffolding --- */
 .af-sec { padding: 28px 0; border-bottom: 1px solid var(--rule); }
 .af-sec-h { display: flex; align-items: baseline; gap: 14px; margin-bottom: 20px; flex-wrap: wrap; }

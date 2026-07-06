@@ -11,7 +11,29 @@
  * (missing behaviour). The implementation stage fills the bodies in.
  */
 
+import { createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingHttpHeaders } from 'node:http';
+
+/** Every API path prefix that requires a token (issue #25). Anything not matching → open (static/SPA,
+ *  `/health`). A new API route added later must be added here or it ships unauthenticated. */
+const API_PREFIXES = [
+  '/runs',
+  '/repos',
+  '/config',
+  '/cost',
+  '/models',
+  '/settings',
+  '/suggestions',
+  '/scheduler',
+  '/fs',
+  '/stream',
+] as const;
+
+/** SHA-256 digest of a value (fixed 32 bytes) — hashing before comparison hides length + fixes the
+ *  equal-length requirement of `timingSafeEqual`. */
+function digest(value: string): Buffer {
+  return createHash('sha256').update(value, 'utf8').digest();
+}
 
 /**
  * Constant-time equality of a provided credential against the configured token. Returns `false`
@@ -21,9 +43,8 @@ import type { IncomingHttpHeaders } from 'node:http';
  * differing byte.
  */
 export function tokenMatches(provided: string | undefined, expected: string): boolean {
-  void provided;
-  void expected;
-  throw new Error('tokenMatches not implemented (issue #25)');
+  if (!provided) return false; // absent/empty ⇒ never a match (no need to hash)
+  return timingSafeEqual(digest(provided), digest(expected));
 }
 
 /**
@@ -33,9 +54,15 @@ export function tokenMatches(provided: string | undefined, expected: string): bo
  * value is empty.
  */
 export function extractToken(headers: IncomingHttpHeaders, url: URL): string | undefined {
-  void headers;
-  void url;
-  throw new Error('extractToken not implemented (issue #25)');
+  const auth = headers.authorization;
+  if (typeof auth === 'string') {
+    const space = auth.indexOf(' ');
+    if (space > 0 && auth.slice(0, space).toLowerCase() === 'bearer') {
+      const token = auth.slice(space + 1);
+      if (token !== '') return token;
+    }
+  }
+  return url.searchParams.get('token') || undefined; // empty '' → undefined
 }
 
 /**
@@ -44,6 +71,5 @@ export function extractToken(headers: IncomingHttpHeaders, url: URL): string | u
  * already-normalized pathname (`url.pathname.replace(/\/+$/, '') || '/'`).
  */
 export function requiresAuth(path: string): boolean {
-  void path;
-  throw new Error('requiresAuth not implemented (issue #25)');
+  return API_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`));
 }

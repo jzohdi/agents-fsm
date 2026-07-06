@@ -6,7 +6,8 @@
  * which is why transient UI state (a half-typed revert reason, scroll position) now survives updates.
  */
 
-import { request } from './api';
+import { request, AuthError } from './api';
+import { clearToken, setToken, withToken } from './auth';
 import { routeFromPath, routePath, type Route } from './render';
 import type { ChatExchange, ChatMode, LoadedConfig, LogLine, ModelCatalog, Repo, Run, RunDetail, Settings, Suggestion } from './types';
 
@@ -58,6 +59,10 @@ export const ui = $state({
   chatUnread: 0,
   // A send in flight (disables the composer so one prompt can't be posted twice).
   chatSending: false,
+  // Token auth (issue #25): true ⇒ the daemon returned a 401, so show the token prompt overlay. The
+  // static SPA is served open, so this renders even though every data load failed. Auth-off daemons
+  // never set it (no 401 is ever returned), so the prompt stays hidden by default.
+  authRequired: false,
 });
 
 /** Adopt the current pathname and follow browser back/forward. Call once at mount. */
@@ -610,7 +615,11 @@ export async function saveConfig(raw: unknown): Promise<{ ok: boolean; msg: stri
 }
 
 export function connectStream(): void {
-  const es = new EventSource('/stream');
+  // `EventSource` can't set the Authorization header, so the token rides as `?token=` (issue #25).
+  // Auth-off / no stored token ⇒ `withToken` returns '/stream' unchanged (byte-for-byte the old URL).
+  // Note: `EventSource` can't read the HTTP status, so an SSE 401 only surfaces as `onerror`
+  // (→ `ui.conn = 'off'`); the fetch mount-loads surface the 401 first and drive the token prompt.
+  const es = new EventSource(withToken('/stream'));
   es.onopen = () => { ui.conn = 'on'; };
   es.onerror = () => { ui.conn = 'off'; }; // EventSource auto-reconnects
 
@@ -635,4 +644,51 @@ export function connectStream(): void {
     if (!ui.chatOpen && (data.exchange.status === 'done' || data.exchange.status === 'error')) ui.chatUnread += 1;
     void refreshDetail();
   });
+}
+
+// --- token auth (issue #25) -----------------------------------------------------
+
+/**
+ * Run the startup mount-loads and open the live stream. The single place that routes a `401`
+ * (`AuthError`) into `ui.authRequired` so the token prompt appears; any other failure banners as a
+ * generic load error. Called on mount and after a successful (re-)authentication. An auth-off daemon
+ * never returns a 401, so `ui.authRequired` stays false and this behaves exactly as before.
+ */
+export async function bootstrap(): Promise<void> {
+  try {
+    await loadConfig(); // first, and it *throws* on 401 (the tolerant loads below swallow errors)
+    await loadRuns();
+    await loadRepos();
+    await loadCost();
+    await loadModels();
+    await loadSettings();
+    ui.authRequired = false;
+    // Open a sensible run by default so the detail view isn't empty on load: prefer a running one.
+    if (ui.selectedId === null && ui.runs.length) {
+      const first = ui.runs.find((r) => r.status === 'running') ?? ui.runs[0]!;
+      await selectRun(first.id);
+    }
+  } catch (err) {
+    if (err instanceof AuthError) {
+      ui.authRequired = true; // show the token prompt; the SPA is served open so this still renders
+      return; // don't open the stream — it would only 401 too (surfacing as a bare reconnect)
+    }
+    banner(`Failed to load: ${(err as Error).message}`, 'err');
+  }
+  connectStream();
+}
+
+/**
+ * Store a token and re-drive the whole startup (`bootstrap`), reconnecting the stream with it. A fresh
+ * `401` re-raises the prompt (handled inside `bootstrap`). The token prompt overlay calls this.
+ */
+export async function authenticate(token: string): Promise<void> {
+  setToken(token);
+  await bootstrap();
+}
+
+/** Forget the stored token and re-raise the prompt (the sign-out path). */
+export function signOut(): void {
+  clearToken();
+  ui.authRequired = true;
 }

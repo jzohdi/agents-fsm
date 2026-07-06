@@ -6,29 +6,26 @@
  * `EventSource` can't set headers — appends it as `?token=` on the SSE URL. Keeping the URL/header
  * building pure (a `token` argument, not a hidden `localStorage` read) lets a small vitest cover it
  * (mirrors `model-picker.ts`).
- *
- * TDD stage (issue #25): intentionally UNIMPLEMENTED stubs — signatures pin the contract from
- * `.agent/interface.md` so `auth.test.ts` compiles and fails for the right reason (missing
- * behaviour). The implementation stage fills the bodies in.
  */
 
 const STORAGE_KEY = 'fleet_api_token';
-void STORAGE_KEY;
 
-/** The stored token, or `null` when none is set. */
+/** The stored token, or `null` when none is set (or `localStorage` is unavailable, e.g. under SSR/tests). */
 export function getToken(): string | null {
-  throw new Error('getToken not implemented (issue #25)');
+  if (typeof localStorage === 'undefined') return null;
+  return localStorage.getItem(STORAGE_KEY) || null;
 }
 
 /** Store a token; a blank/whitespace-only value clears it instead. */
 export function setToken(token: string): void {
-  void token;
-  throw new Error('setToken not implemented (issue #25)');
+  const trimmed = token.trim();
+  if (trimmed === '') return clearToken();
+  localStorage.setItem(STORAGE_KEY, trimmed);
 }
 
 /** Remove the stored token. */
 export function clearToken(): void {
-  throw new Error('clearToken not implemented (issue #25)');
+  localStorage.removeItem(STORAGE_KEY);
 }
 
 /**
@@ -37,7 +34,8 @@ export function clearToken(): void {
  * `?`); returns `path` unchanged when there is no token.
  */
 export function withToken(path: string, token?: string | null): string {
-  void path;
-  void token;
-  throw new Error('withToken not implemented (issue #25)');
+  const tok = token === undefined ? getToken() : token;
+  if (!tok) return path;
+  const sep = path.includes('?') ? '&' : '?';
+  return `${path}${sep}token=${encodeURIComponent(tok)}`;
 }
