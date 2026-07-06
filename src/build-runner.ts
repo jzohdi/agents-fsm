@@ -146,6 +146,17 @@ export function resolveCostCeiling(args: CliArgs): number | undefined {
 }
 
 /**
+ * Resolve the daemon's API auth token (issue #25), precedence: `--api-token` flag → `FLEET_API_TOKEN`
+ * env → undefined (auth disabled). A blank/whitespace-only value is treated as unset, so
+ * `FLEET_API_TOKEN=` keeps auth off (the localhost-only default). Never read from / written to SQLite
+ * (README §9.1 — secrets in env). Gates the transport, so it's applied in `serve.ts`, not threaded
+ * through `buildOrchestrator`.
+ */
+export function resolveApiToken(args: CliArgs): string | undefined {
+  return (args.apiToken ?? process.env.FLEET_API_TOKEN)?.trim() || undefined;
+}
+
+/**
  * Resolve the harness a new run gets when the request omits one (plan §5.2), precedence: the
  * `--harness` flag → the `FLEET_HARNESS` env → the persisted `settings.default_harness` → the shipped
  * {@link DEFAULT_HARNESS}. Shared by both entry points (the daemon and the one-shot CLI) so the default

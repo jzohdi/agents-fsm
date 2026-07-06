@@ -33,6 +33,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { fileURLToPath } from 'node:url';
 
 import { ApiError, type Orchestrator } from './orchestrator';
+import { extractToken, requiresAuth, tokenMatches } from './auth';
 import { suggestDirs } from './dir-suggest';
 import { serveStatic } from './static';
 import type { RunStatus } from '../store/repository';
@@ -50,20 +51,45 @@ export const DEFAULT_PUBLIC_DIR = fileURLToPath(new URL('../../dashboard/dist/',
 export interface ApiServerOptions {
   /** Directory the dashboard's static assets are served from. Defaults to the bundled `public/`. */
   publicDir?: string;
+  /**
+   * Shared-secret bearer token gating the API + SSE surface (issue #25). Absent/empty ⇒ auth
+   * disabled (current behaviour). When set, every `requiresAuth(path)` route requires a valid
+   * credential. Env-provided only (never persisted); the server just receives the resolved value.
+   */
+  apiToken?: string;
 }
 
 /** Build the daemon's HTTP server. The caller decides when/where to `listen` (port 0 in tests). */
 export function createApiServer(orchestrator: Orchestrator, options: ApiServerOptions = {}): Server {
   const publicDir = options.publicDir ?? DEFAULT_PUBLIC_DIR;
+  const apiToken = options.apiToken;
   return createServer((req, res) => {
-    handle(orchestrator, req, res, publicDir).catch((err) => sendError(res, err));
+    handle(orchestrator, req, res, publicDir, apiToken).catch((err) => sendError(res, err));
   });
 }
 
-async function handle(orch: Orchestrator, req: IncomingMessage, res: ServerResponse, publicDir: string): Promise<void> {
+async function handle(
+  orch: Orchestrator,
+  req: IncomingMessage,
+  res: ServerResponse,
+  publicDir: string,
+  apiToken?: string,
+): Promise<void> {
   const method = req.method ?? 'GET';
   const url = new URL(req.url ?? '/', 'http://localhost');
   const path = url.pathname.replace(/\/+$/, '') || '/';
+
+  // --- auth gate (issue #25): runs before any route dispatch or body read. Absent/empty token ⇒
+  // skipped entirely (auth-off is byte-for-byte the old behaviour). `/health` + static/SPA paths are
+  // open (`requiresAuth` false) so liveness probes and the token-prompt bootstrap still work. The
+  // `/stream` branch below runs after this, so SSE is covered by the same check (a tokenless stream
+  // gets a plain 401 JSON, never a text/event-stream upgrade). ---
+  if (apiToken && requiresAuth(path)) {
+    const provided = extractToken(req.headers, url);
+    if (!tokenMatches(provided, apiToken)) {
+      throw new ApiError(401, provided === undefined ? 'authentication required' : 'invalid token');
+    }
+  }
 
   // --- stream (long-lived; handled before the JSON routes) ---
   if (method === 'GET' && path === '/stream') {

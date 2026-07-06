@@ -707,7 +707,8 @@ loopback; the dashboard is a pure client of its API (§3.3 Layer 7).
   Git/GitHub adapter shells out to it.
 - **Secrets** live in the environment, never in SQLite. Copy `.env.example` → `.env` and fill in
   `GITHUB_TOKEN` (issues / PRs / branches / comments) and, for the default Claude Code harness,
-  `ANTHROPIC_API_KEY` (see the harness bullet). `.env` is gitignored — never commit it.
+  `ANTHROPIC_API_KEY` (see the harness bullet). Optionally set `FLEET_API_TOKEN` to require a bearer
+  token on the daemon's API + SSE (§9.3 — env-only, never SQLite). `.env` is gitignored — never commit it.
 - **A harness (the agent runner).** Runs execute on a selectable harness (§9.8); install + authenticate
   the one(s) you'll run — only those you actually use need credentials:
   - **Claude Code (default):** the `claude` CLI on `PATH`, authenticated via `claude login` or
@@ -752,6 +753,19 @@ serial within a run** (two stages of one run never overlap; they share a working
 is `--concurrency <N>` or the `FLEET_CONCURRENCY` env var (default **4**); set it to `1` for fully
 serial execution. Higher parallelism means proportionally higher token spend and API rate pressure —
 the executor already retries rate-limited invocations with backoff (`--max-retries`, default 4).
+
+**API authentication (issue #25, optional).** By default the HTTP + SSE API is **open** and reachable
+only on loopback (`127.0.0.1`) — safe for a local dashboard, but nothing more. Set `FLEET_API_TOKEN`
+(or `--api-token <token>`) to require a shared-secret bearer token on **every** route except `GET
+/health` (liveness probes) and the static dashboard assets (which must load so the SPA can prompt for a
+token). Clients send `Authorization: Bearer <token>`; the SSE `/stream` also accepts `?token=<token>`
+because a browser `EventSource` can't set headers. A missing token is `401 authentication required`, a
+wrong one `401 invalid token` (constant-time comparison). The token is read from the environment only —
+**never** stored in SQLite (§9.1) — and absent/blank keeps auth off (behaviour byte-for-byte unchanged).
+The daemon still binds loopback regardless; binding off-localhost is a separate networking/TLS issue
+([#16](https://github.com/jzohdi/agents-fsm/issues/16)) that builds on this token layer. The dashboard
+prompts for the token on a `401`, stores it in `localStorage`, and attaches it to every request and the
+stream; **Forget token** clears it.
 
 **Global cost ceiling (Milestone 8 B3, optional).** `--cost-ceiling <dollars>` or `FLEET_COST_CEILING`
 (off by default) caps aggregate `cost_used` across active runs. At/over the ceiling the daemon refuses
