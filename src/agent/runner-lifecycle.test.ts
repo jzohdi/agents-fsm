@@ -29,6 +29,9 @@ function newRunAt(repo: Repository, state: string) {
   return repo.createRun({ issueRef: 'o/r#7', repoRef: 'o/r', initialState: state, fsmConfigVersion: 'v1' });
 }
 
+/** Stand-in for the placeholder body `tdd` opens the PR with, so a body-finalization test can prove it changed. */
+const prePlaceholder = 'placeholder body opened by tdd';
+
 describe('AgentRunner lifecycle — triage', () => {
   it('prepares the repo checkout (branch + tree) but makes no commit or PR (Milestone 12)', async () => {
     // triage now runs inside the target repo's working tree (so the harness can inspect the codebase to
@@ -174,6 +177,55 @@ describe('AgentRunner lifecycle — review stages', () => {
     expect(reviewInput!.diff).toBeUndefined();
     expect(github.listComments().map((c) => c.body)).toEqual(['nit: rename x', 'add a test']);
     expect(github.commitCount()).toBe(commitsBefore); // review never commits
+  });
+
+  it('finalizes the PR body from the reviewer’s prDescription on approve, keeping Closes # and provenance', async () => {
+    const description = '## How it works\nUsers can now export as CSV.\n\n## Tests added\nExport happy-path + empty case.';
+    const handler: StubHandler = (req) => {
+      if (req.stage !== 'code_review') return goldenPathHandler(req);
+      return { output: { requestedTransition: 'approve', prDescription: description } };
+    };
+    const { repo, github, runner } = setup(handler);
+    const run = newRunAt(repo, 'code_review');
+    const branch = `agent/run-${run.id}`;
+    repo.setRunBranch(run.id, branch);
+    const pr = await github.openPr({ branch, base: 'main', title: 't', body: prePlaceholder });
+    repo.setRunPr(run.id, pr.number);
+
+    let updateCalls = 0;
+    const realUpdate = github.updatePr.bind(github);
+    github.updatePr = (input) => {
+      updateCalls++;
+      return realUpdate(input);
+    };
+
+    await runner.runStage(repo.getRun(run.id)!);
+
+    const body = github.listPrs()[0]!.body;
+    expect(body).toContain('Users can now export as CSV.'); // the reviewer's write-up landed
+    expect(body).toContain('## How it works');
+    expect(body).toContain(`Closes #${repo.getRun(run.id)!.issueRef.split('#')[1]}`); // issue link preserved
+    expect(body).toContain('agent-fleet'); // provenance footer preserved
+    expect(updateCalls).toBe(1);
+
+    // A replayed approval (PR-feedback re-approve / crash-resume) must not re-write the body.
+    await runner.runStage(repo.getRun(run.id)!);
+    expect(updateCalls).toBe(1);
+  });
+
+  it('leaves the placeholder PR body untouched when an approval omits prDescription', async () => {
+    const handler: StubHandler = (req) =>
+      req.stage === 'code_review' ? { output: { requestedTransition: 'approve' } } : goldenPathHandler(req);
+    const { repo, github, runner } = setup(handler);
+    const run = newRunAt(repo, 'code_review');
+    const branch = `agent/run-${run.id}`;
+    repo.setRunBranch(run.id, branch);
+    const pr = await github.openPr({ branch, base: 'main', title: 't', body: prePlaceholder });
+    repo.setRunPr(run.id, pr.number);
+
+    await runner.runStage(repo.getRun(run.id)!);
+
+    expect(github.listPrs()[0]!.body).toBe(prePlaceholder); // unchanged — no bogus overwrite
   });
 
   it('plan_review (no PR) is not fed a diff and posts nothing', async () => {

@@ -33,6 +33,15 @@ export interface AgentEnvelope {
   /** Review comments to post on the PR (review stages). The runner posts them; agents never
    * touch GitHub directly (README §3.3 Layer 5). */
   comments?: string[];
+  /**
+   * A rich, human-facing PR description (markdown) the terminal reviewer (`code_review`) writes when it
+   * approves — how the feature works and what a user can now do, the architecture and files worth
+   * reading, the tests added, and the manual checks a reviewer should run. The runner frames it with
+   * the machine header/footer (`Closes #N`, provenance) and applies it via `updatePr`, replacing the
+   * placeholder body `tdd` opened the PR with. Ignored on non-approve transitions and by non-review
+   * stages (agents never touch GitHub directly — README §3.3 Layer 5).
+   */
+  prDescription?: string;
 }
 
 /** The verdict a self-review phase returns. */
@@ -102,6 +111,7 @@ const envelopeSchema = z
     artifacts: z.array(artifactRefSchema).optional(),
     flags: z.record(z.string(), z.boolean()).optional(),
     comments: z.array(z.string()).optional(),
+    prDescription: z.string().min(1).optional(),
   })
   .strict();
 

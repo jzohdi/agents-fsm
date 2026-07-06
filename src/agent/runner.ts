@@ -1010,6 +1010,14 @@ export class AgentRunner {
       // independently of `comments` so a zero-comment approval still strips. The adapter is naturally
       // idempotent, so re-firing on a PR-feedback re-approval is safe.
       if (envelope.requestedTransition === 'approve') {
+        // Finalize the PR description: the reviewer has seen the whole diff, so replace the placeholder
+        // body `tdd` opened with its rich write-up (how it works, architecture, tests, manual checks).
+        // Ledger-guarded so a crash mid-approval never re-writes it on replay (M7), and skipped when the
+        // reviewer returned none so a bare approval still leaves the useful placeholder in place.
+        if (envelope.prDescription) {
+          const description = envelope.prDescription;
+          await ledger.once('pr_description', () => github.updatePr({ prNumber, body: prBody(run, prep.issue, description) }));
+        }
         const ref = await github.stripAgentArtifacts(run.id, prep.branch!, `chore(run ${run.id}): remove .agent scratch artifacts before merge`);
         if (ref) {
           this.repo.recordLog({
@@ -1110,16 +1118,31 @@ function overlayScheduling(existing: SchedulingDecl, declared: TriageScheduling)
   };
 }
 
-/** A descriptive PR body: closes the issue, explains provenance, and points at the run's artifacts. */
-function prBody(run: Run, issue: Issue): string {
+/**
+ * The PR body. `tdd` opens the PR before the work exists, so it gets a placeholder body (issue link +
+ * provenance). When `code_review` approves, it returns a rich `prDescription` (how the feature works,
+ * architecture, tests, manual checks) that `description` slots in here, replacing the placeholder — see
+ * {@link applyStageEffects}. Either way the machine framing is constant: `Closes #N` (the keyword that
+ * links and closes the issue at merge — README §3.5) leads, and the provenance footer trails, so the
+ * agent's prose can never drop the issue link.
+ */
+function prBody(run: Run, issue: Issue, description?: string): string {
+  const provenance = [
+    `🤖 Opened by **agent-fleet** (run ${run.id}) via the pipeline triage → plan → plan_review →`,
+    'interface_design → tdd → frontend/backend → code_review. Merge-ready, not auto-merged: a human reviews and merges.',
+  ];
+  // The rich write-up is authored at `code_review` approval — the same moment the `.agent/` scratch is
+  // stripped from the branch — so, unlike the placeholder, it must not point at `.agent/*` files.
+  if (description) {
+    return [`Closes #${issue.number}`, '', description.trim(), '', '---', '', ...provenance].join('\n');
+  }
   return [
     `Closes #${issue.number}`,
     '',
-    `🤖 Opened by **agent-fleet** (run ${run.id}) — produced by the pipeline triage → plan → plan_review`,
-    '→ interface_design → tdd → frontend/backend → code_review.',
+    ...provenance,
     '',
     'The approach and design live on this branch as `.agent/plan.md` and `.agent/interface.md`.',
-    'This PR is merge-ready, not auto-merged: a human reviews and merges.',
+    'A fuller description of what changed and how to test it is added when the review approves this PR.',
   ].join('\n');
 }
 
