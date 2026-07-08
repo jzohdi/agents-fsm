@@ -35,6 +35,8 @@ import { fileURLToPath } from 'node:url';
 
 import { ApiError, type Orchestrator } from './orchestrator';
 import { extractToken, requiresAuth, tokenMatches } from './auth';
+import { createRateLimiter, type RateLimiter } from './rate-limit';
+import { corsHeaders, securityHeaders } from './security-headers';
 import { suggestDirs } from './dir-suggest';
 import { serveStatic } from './static';
 import type { RunStatus } from '../store/repository';
@@ -42,6 +44,11 @@ import type { StreamEvent } from './stream';
 
 /** Heartbeat so idle SSE connections aren't dropped by intermediaries (a bare comment line). */
 const SSE_HEARTBEAT_MS = 25_000;
+
+/** Generous rate-limit default (issue #27): a normal local dashboard never trips a 60-burst / 1-per-sec bucket. */
+const DEFAULT_RATE_LIMIT = { capacity: 60, refillPerSec: 1 };
+/** Default request-body cap (issue #27): 1 MiB, enough for any legitimate control-plane payload. */
+const DEFAULT_MAX_BODY_BYTES = 1_048_576;
 
 /**
  * The built dashboard assets (Layer 7) — the output of `npm run build:dashboard`. Resolved from this
@@ -67,9 +74,8 @@ export interface ApiServerOptions {
   tls?: { cert: string; key: string };
   // --- remote-access hardening (issue #27) — all optional; omit ⇒ hardened defaults ---
   /**
-   * Token-bucket config for mutating/expensive routes. Omit ⇒ a generous built-in default (e.g.
-   * capacity 60, refillPerSec 1) that a normal local dashboard never trips. (TDD stub: the type is
-   * pinned here so the tests compile; the implementation stage wires the limiter into `handle()`.)
+   * Token-bucket config for mutating/expensive routes. Omit ⇒ a generous built-in default
+   * (capacity 60, refillPerSec 1) that a normal local dashboard never trips.
    */
   rateLimit?: { capacity: number; refillPerSec: number };
   /** Max request-body bytes before `413`. Omit ⇒ default 1 MiB (1_048_576). */
@@ -80,12 +86,38 @@ export interface ApiServerOptions {
   now?: () => number;
 }
 
+/**
+ * Per-request hardening context (issue #27), assembled once in {@link createApiServer} and shared
+ * across every request: the process-lifetime rate limiter (so per-source buckets persist), the body
+ * cap, the CORS allow-list, and the injectable clock. Bundled so `handle` and its helpers thread one
+ * value instead of a growing positional list.
+ */
+interface HardeningContext {
+  publicDir: string;
+  apiToken?: string;
+  limiter: RateLimiter;
+  maxBodyBytes: number;
+  allowedOrigins: readonly string[];
+  now: () => number;
+}
+
 /** Build the daemon's HTTP server. The caller decides when/where to `listen` (port 0 in tests). */
 export function createApiServer(orchestrator: Orchestrator, options: ApiServerOptions = {}): Server {
-  const publicDir = options.publicDir ?? DEFAULT_PUBLIC_DIR;
-  const apiToken = options.apiToken;
+  // Assemble the hardening context once — the rate limiter especially must be a single per-process
+  // instance so a client's token bucket persists across its requests (per-source-key state).
+  const ctx: HardeningContext = {
+    publicDir: options.publicDir ?? DEFAULT_PUBLIC_DIR,
+    ...(options.apiToken ? { apiToken: options.apiToken } : {}),
+    limiter: createRateLimiter(options.rateLimit ?? DEFAULT_RATE_LIMIT),
+    maxBodyBytes: options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES,
+    allowedOrigins: options.allowedOrigins ?? [],
+    now: options.now ?? Date.now,
+  };
   const listener = (req: IncomingMessage, res: ServerResponse): void => {
-    handle(orchestrator, req, res, publicDir, apiToken).catch((err) => sendError(res, err));
+    // Baseline security headers ride on EVERY response — set here (before any dispatch) so even an
+    // early throw or a static/SSE writeHead carries them (writeHead merges over setHeader values).
+    for (const [k, v] of Object.entries(securityHeaders())) res.setHeader(k, v);
+    handle(orchestrator, req, res, ctx).catch((err) => sendError(res, err));
   };
   // Direct TLS termination (issue #26): when `tls` PEM strings are supplied, build an `https` server;
   // otherwise plain `http` (the unchanged default). `https.Server` shares `node:http`'s request/`listen`
@@ -99,12 +131,26 @@ async function handle(
   orch: Orchestrator,
   req: IncomingMessage,
   res: ServerResponse,
-  publicDir: string,
-  apiToken?: string,
+  ctx: HardeningContext,
 ): Promise<void> {
+  const { publicDir, apiToken } = ctx;
   const method = req.method ?? 'GET';
   const url = new URL(req.url ?? '/', 'http://localhost');
   const path = url.pathname.replace(/\/+$/, '') || '/';
+
+  // --- CORS / cross-origin (issue #27): default posture is same-origin only (the dashboard is served
+  // by this same daemon, so it needs no CORS grant). `corsHeaders` returns an ACAO **only** for an exact
+  // allow-listed origin — never a `*` wildcard — so a disallowed origin gets nothing and the browser
+  // blocks the cross-origin read. Set on the response for every method; a preflight is answered here. ---
+  for (const [k, v] of Object.entries(corsHeaders(req.headers.origin, ctx.allowedOrigins))) res.setHeader(k, v);
+  if (method === 'OPTIONS') {
+    // A locked-down preflight answer (never falls through to the SPA/404). ACAO is present only for an
+    // allow-listed origin (set above); Max-Age caches the decision. Emitting CORS never bypasses auth —
+    // OPTIONS carries no credential and drives no route.
+    res.writeHead(204, { 'Access-Control-Max-Age': '600' });
+    res.end();
+    return;
+  }
 
   // --- auth gate (issue #25): runs before any route dispatch or body read. Absent/empty token ⇒
   // skipped entirely (auth-off is byte-for-byte the old behaviour). `/health` + static/SPA paths are
@@ -115,6 +161,21 @@ async function handle(
     const provided = extractToken(req.headers, url);
     if (!tokenMatches(provided, apiToken)) {
       throw new ApiError(401, provided === undefined ? 'authentication required' : 'invalid token');
+    }
+  }
+
+  // --- rate limit (issue #27): the abuse backstop, applied to mutating/expensive routes only (see
+  // `isRateLimited`). Cheap GETs, the SSE stream, and `/health` are never throttled, so a normal local
+  // dashboard never trips it. Keyed by the client's source address — a coarse per-source-IP backstop
+  // (behind a shared-IP tunnel all clients collapse to one bucket; `X-Forwarded-For` is untrusted /
+  // spoofable and deliberately NOT consulted). Runs after auth, but a limited route still consumes a
+  // token on an auth failure, so auth itself can't be brute-forced unboundedly. ---
+  if (isRateLimited(method, path)) {
+    const key = req.socket.remoteAddress ?? 'unknown';
+    const decision = ctx.limiter.check(key, ctx.now());
+    if (!decision.ok) {
+      res.setHeader('Retry-After', String(decision.retryAfterSec ?? 1));
+      throw new ApiError(429, 'rate limit exceeded');
     }
   }
 
@@ -139,12 +200,12 @@ async function handle(
   // --- settings: the default harness + the operator's sticky pre-run model/effort selection ---
   if (method === 'GET' && path === '/settings') return sendJson(res, 200, orch.getSettings());
   if (method === 'PUT' && path === '/settings/default-harness') {
-    return sendJson(res, 200, orch.setDefaultHarness(str(await readJson(req), 'harness')));
+    return sendJson(res, 200, orch.setDefaultHarness(str(await readJson(req, ctx.maxBodyBytes), 'harness')));
   }
   if (method === 'PUT' && path === '/settings/default-model') {
     // `model`/`effort` persist the bar's pre-run pick; either may be `null` to clear (an absent field is
     // treated as null). Validated in the orchestrator against the default harness's catalog.
-    const body = await readJson(req);
+    const body = await readJson(req, ctx.maxBodyBytes);
     const model = body.model ?? null;
     const effort = body.effort ?? null;
     if (model !== null && typeof model !== 'string') return sendError(res, new ApiError(400, '"model" must be a string or null'));
@@ -167,7 +228,7 @@ async function handle(
   // repoRef (it contains a `/`, awkward in a path segment); `watch` boolean required, `label` optional
   // (string to set a custom override label, null to reset to the default, absent to leave it). ---
   if (method === 'POST' && path === '/repos/watch') {
-    const body = await readJson(req);
+    const body = await readJson(req, ctx.maxBodyBytes);
     const watch = body.watch;
     if (typeof watch !== 'boolean') return sendError(res, new ApiError(400, '"watch" (boolean) is required'));
     const label = body.label;
@@ -181,7 +242,7 @@ async function handle(
   // conflicts — 'manual' parks it needs_human; 'auto' lets a verified resolver invocation handle it.
   // Body-carried repoRef (contains a `/`), like /repos/watch. ---
   if (method === 'POST' && path === '/repos/conflict-policy') {
-    const body = await readJson(req);
+    const body = await readJson(req, ctx.maxBodyBytes);
     return sendJson(res, 200, orch.setRepoConflictPolicy({ repoRef: str(body, 'repoRef'), policy: str(body, 'policy') }));
   }
 
@@ -196,7 +257,7 @@ async function handle(
   // local directory. Body-carried repoRef (contains a `/`); `mode` ∈ clone|local; `localRepo` (absolute
   // path) required for local mode. A wrong directory is a 400 with the mismatch reason. ---
   if (method === 'POST' && path === '/repos/source') {
-    const body = await readJson(req);
+    const body = await readJson(req, ctx.maxBodyBytes);
     const mode = str(body, 'mode');
     if (mode !== 'clone' && mode !== 'local') return sendError(res, new ApiError(400, '"mode" must be "clone" or "local"'));
     return sendJson(res, 200, await orch.configureRepoSource({
@@ -210,7 +271,7 @@ async function handle(
   if (path === '/repos') {
     if (method === 'GET') return sendJson(res, 200, orch.listRepos());
     if (method === 'POST') {
-      const body = await readJson(req);
+      const body = await readJson(req, ctx.maxBodyBytes);
       return sendJson(res, 201, orch.enrollRepo({
         repoRef: str(body, 'repoRef'),
         workingRoot: optStr(body, 'workingRoot'),
@@ -229,7 +290,7 @@ async function handle(
       return sendJson(res, 200, orch.listRuns({ status: status as RunStatus | undefined, repo }));
     }
     if (method === 'POST') {
-      const body = await readJson(req);
+      const body = await readJson(req, ctx.maxBodyBytes);
       // `harness` is optional: absent/empty → the daemon default; a present-but-unknown id → 400 (in
       // `orch.start` via isHarnessId). We only transport it here, keeping validation in the orchestrator.
       return sendJson(res, 201, orch.start({
@@ -256,7 +317,7 @@ async function handle(
         return sendJson(res, 200, orch.pause(id));
       case 'resume': {
         // Optional `notes`: operator guidance for the retried stage (delivered as its re-entry context).
-        const body = await readJson(req);
+        const body = await readJson(req, ctx.maxBodyBytes);
         const raw = body.notes;
         if (raw !== undefined && typeof raw !== 'string') {
           return sendError(res, new ApiError(400, '"notes" must be a string when provided'));
@@ -276,12 +337,12 @@ async function handle(
       case 'unarchive':
         return sendJson(res, 200, orch.unarchive(id));
       case 'revert': {
-        const body = await readJson(req);
+        const body = await readJson(req, ctx.maxBodyBytes);
         return sendJson(res, 200, orch.revert(id, str(body, 'toState'), body.reason));
       }
       case 'cost-override': {
         // `mode`: 'next_step' | 'full' to let the run cross the global cost ceiling, or 'none' to clear (M8 B3).
-        const raw = str(await readJson(req), 'mode');
+        const raw = str(await readJson(req, ctx.maxBodyBytes), 'mode');
         if (raw !== 'next_step' && raw !== 'full' && raw !== 'none') {
           return sendError(res, new ApiError(400, `invalid cost-override mode "${raw}" (expected next_step | full | none)`));
         }
@@ -289,7 +350,7 @@ async function handle(
       }
       case 'model': {
         // `model`: a harness model tag to run this run under, or `null` to clear back to the daemon default.
-        const raw = (await readJson(req)).model;
+        const raw = (await readJson(req, ctx.maxBodyBytes)).model;
         if (raw !== null && typeof raw !== 'string') {
           return sendError(res, new ApiError(400, '"model" (string, or null to clear) is required'));
         }
@@ -297,7 +358,7 @@ async function handle(
       }
       case 'effort': {
         // `effort`: a reasoning-effort level to run this run under, or `null` to clear back to the default.
-        const raw = (await readJson(req)).effort;
+        const raw = (await readJson(req, ctx.maxBodyBytes)).effort;
         if (raw !== null && typeof raw !== 'string') {
           return sendError(res, new ApiError(400, '"effort" (string, or null to clear) is required'));
         }
@@ -305,7 +366,7 @@ async function handle(
       }
       case 'harness': {
         // `harness`: re-point the run at another harness from its next stage on (clears model/effort overrides).
-        return sendJson(res, 200, orch.setHarness(id, str(await readJson(req), 'harness')));
+        return sendJson(res, 200, orch.setHarness(id, str(await readJson(req, ctx.maxBodyBytes), 'harness')));
       }
       case 'resolve-conflicts':
         // Escape hatch: run the dedicated resolver on a finished run whose PR conflicts (any policy).
@@ -321,7 +382,7 @@ async function handle(
     const id = Number(chatMatch[1]);
     if (method === 'GET') return sendJson(res, 200, orch.listChat(id));
     if (method === 'POST') {
-      const body = await readJson(req);
+      const body = await readJson(req, ctx.maxBodyBytes);
       return sendJson(res, 201, orch.chat(id, { prompt: str(body, 'prompt'), mode: str(body, 'mode') }));
     }
     return sendError(res, new ApiError(405, `method ${method} not allowed on /runs/:id/chat`));
@@ -352,7 +413,7 @@ async function handle(
   // --- config ---
   if (path === '/config') {
     if (method === 'GET') return sendJson(res, 200, orch.getConfig());
-    if (method === 'PUT') return sendJson(res, 200, orch.updateConfig(await readJson(req)));
+    if (method === 'PUT') return sendJson(res, 200, orch.updateConfig(await readJson(req, ctx.maxBodyBytes)));
     return sendError(res, new ApiError(405, `method ${method} not allowed on /config`));
   }
 
@@ -408,6 +469,17 @@ function eventRunId(event: StreamEvent): number {
   return event.type === 'activity' ? event.activity.runId : event.runId;
 }
 
+/**
+ * Whether a request should be rate-limited (issue #27): every **mutating/expensive** call — any
+ * `POST`/`PUT`/`DELETE`/`PATCH` — which covers `POST /runs`, the control-plane mutations, and the
+ * on-demand poll/advise routes. Cheap reads (`GET`/`HEAD`), the SSE stream, `OPTIONS` preflights, and
+ * `/health` (liveness probes) are **never** throttled, so a normal local dashboard is unaffected.
+ */
+function isRateLimited(method: string, path: string): boolean {
+  if (path === '/health') return false;
+  return method === 'POST' || method === 'PUT' || method === 'DELETE' || method === 'PATCH';
+}
+
 // --- request/response helpers -------------------------------------------------
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -416,20 +488,42 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload);
 }
 
+/**
+ * Serialize an error to the client. An {@link ApiError} carries a deliberate, client-facing status +
+ * message (the API contract — including the new `413`/`429`). **Any other throw** (a bug, an I/O
+ * error, an unexpected failure) is sanitized to a generic `500 { error: 'internal server error' }` and
+ * the real error is logged **server-side only** — so a raw `.message`, stack, or internal filesystem
+ * path never reaches a remote caller (issue #27). Stack traces were already never sent; the change is
+ * that a non-`ApiError`'s raw message is no longer echoed. Baseline security headers ride along via the
+ * `setHeader` set in the listener; if the stream already started (SSE mid-frame) we just end the body.
+ */
 function sendError(res: ServerResponse, err: unknown): void {
   if (res.headersSent) {
     res.end();
     return;
   }
-  const status = err instanceof ApiError ? err.status : 500;
-  const message = err instanceof Error ? err.message : String(err);
-  sendJson(res, status, { error: message });
+  if (err instanceof ApiError) {
+    sendJson(res, err.status, { error: err.message });
+    return;
+  }
+  console.error('[api] unhandled error:', err); // server-side only — never surfaced to the caller
+  sendJson(res, 500, { error: 'internal server error' });
 }
 
-/** Read and JSON-parse a request body. Empty body → `{}`; malformed JSON → `400`. */
-async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+/**
+ * Read and JSON-parse a request body. Empty body → `{}`; malformed JSON → `400`. The body is capped at
+ * `maxBytes`: as soon as the cumulative bytes read **exceed** it, reading stops and a generic
+ * `413 request body too large` is thrown — an unbounded payload can't exhaust memory once the surface
+ * is remotely reachable (issue #27).
+ */
+async function readJson(req: IncomingMessage, maxBytes: number): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let total = 0;
+  for await (const chunk of req) {
+    total += (chunk as Buffer).length;
+    if (total > maxBytes) throw new ApiError(413, 'request body too large');
+    chunks.push(chunk as Buffer);
+  }
   const raw = Buffer.concat(chunks).toString('utf8').trim();
   if (raw === '') return {};
   try {

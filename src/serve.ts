@@ -17,7 +17,14 @@ import type { Server } from 'node:http';
 import { createApiServer, DEFAULT_PUBLIC_DIR } from './api/server';
 import { checkBindAllowed, isLoopbackHost } from './api/bind-guard';
 import { stateLabelMirror } from './api/state-label-mirror';
-import { buildOrchestrator, resolveApiToken, resolveHost } from './build-runner';
+import {
+  buildOrchestrator,
+  resolveAllowedOrigins,
+  resolveApiToken,
+  resolveHost,
+  resolveMaxBodyBytes,
+  resolveRateLimit,
+} from './build-runner';
 import type { CliArgs } from './cli-args';
 
 export async function serve(args: CliArgs): Promise<void> {
@@ -43,6 +50,14 @@ export async function serve(args: CliArgs): Promise<void> {
   // here (the server stays free of filesystem concerns) and pass the resolved contents through.
   const tls = resolveTls(args);
 
+  // Remote-access hardening (issue #27): per-source rate limit, request-body cap, and CORS allow-list.
+  // All default to a hardened, localhost-friendly posture (generous limits, deny-all cross-origin), so
+  // omitting every knob leaves a normal local session unchanged. Resolvers fall back to safe defaults
+  // on garbage input — a typo must never *disable* a protection.
+  const rateLimit = resolveRateLimit(args);
+  const maxBodyBytes = resolveMaxBodyBytes(args);
+  const allowedOrigins = resolveAllowedOrigins(args);
+
   // The daemon no longer needs to be pinned to a repo at startup. It boots with whatever repos are
   // already enrolled (none, on a fresh DB); you add repos from the dashboard, and filing a run on a new
   // repo auto-enrolls it (Orchestrator.start). `--repo` still works as a convenience: it bootstrap-
@@ -53,7 +68,13 @@ export async function serve(args: CliArgs): Promise<void> {
   broadcaster.subscribe(stateLabelMirror(resolver));
   orchestrator.recover(); // reclaim crash-stranded events and resume any queued work on startup
 
-  const server = createApiServer(orchestrator, { ...(apiToken ? { apiToken } : {}), ...(tls ? { tls } : {}) });
+  const server = createApiServer(orchestrator, {
+    ...(apiToken ? { apiToken } : {}),
+    ...(tls ? { tls } : {}),
+    rateLimit,
+    maxBodyBytes,
+    ...(allowedOrigins.length > 0 ? { allowedOrigins } : {}),
+  });
   await listen(server, args.port, host);
   const config = orchestrator.getConfig();
   const scheme = tls ? 'https' : 'http';
@@ -80,6 +101,12 @@ export async function serve(args: CliArgs): Promise<void> {
     apiToken
       ? '  auth: API token required on every route except /health (Authorization: Bearer <token>, or ?token= for the SSE stream).'
       : '  auth: OFF — the API is open (localhost only). Set FLEET_API_TOKEN (or --api-token) to require a token before exposing it.',
+  );
+  // Remote-access hardening (issue #27): these are always on (universal security headers + a per-source
+  // rate limit on mutating routes + a body cap), and cross-origin is deny-all unless an allow-list is set.
+  console.log(
+    `  hardening: security headers on; rate limit ${rateLimit.capacity}/burst @ ${rateLimit.refillPerSec}/s on mutating routes; body cap ${maxBodyBytes} B; ` +
+      (allowedOrigins.length > 0 ? `CORS allow-list: ${allowedOrigins.join(', ')}.` : 'cross-origin denied (same-origin only). See README §9.11 (threat model).'),
   );
   console.log('  POST /runs · GET /runs · GET /runs/:id · POST /runs/:id/{pause,resume,stop,revert,archive,unarchive,cost-override,model,effort} · GET|POST /repos · POST /repos/{watch,conflict-policy} · GET /cost · GET /models · GET /settings · PUT /settings/{default-harness,default-model} · GET|PUT /config · GET /stream');
   if (!existsSync(DEFAULT_PUBLIC_DIR)) {

@@ -81,6 +81,22 @@ export interface CliArgs {
   tlsCert?: string;
   /** PEM private-key path paired with `--tls-cert` (issue #26) — `--tls-key`. */
   tlsKey?: string;
+  /**
+   * Rate-limit burst capacity for mutating/expensive routes on the `serve` daemon (issue #27) —
+   * `--rate-limit`. Undefined here → `FLEET_RATE_LIMIT`, then a generous default (60). A garbage value
+   * falls back to the default so a typo can never *disable* the throttle. Only the daemon uses it.
+   */
+  rateLimitCapacity?: number;
+  /** Tokens replenished per second for the rate limiter (issue #27) — `--rate-limit-refill`. Env `FLEET_RATE_LIMIT_REFILL`; default 1. */
+  rateLimitRefillPerSec?: number;
+  /** Max request-body bytes before a `413` on the `serve` daemon (issue #27) — `--max-body-bytes`. Env `FLEET_MAX_BODY_BYTES`; default 1 MiB. */
+  maxBodyBytes?: number;
+  /**
+   * Exact-match CORS allow-list for the `serve` daemon (issue #27) — `--cors-origin` (repeatable or
+   * comma-separated). Env `FLEET_CORS_ORIGINS` (comma-separated). Undefined/blank → empty (deny all
+   * cross-origin, the default). Each entry is an exact origin (`https://host[:port]`).
+   */
+  allowedOrigins?: string[];
 }
 
 export function parseCliArgs(argv: string[]): CliArgs {
@@ -113,6 +129,10 @@ export function parseCliArgs(argv: string[]): CliArgs {
       host: { type: 'string' },
       'tls-cert': { type: 'string' },
       'tls-key': { type: 'string' },
+      'rate-limit': { type: 'string' },
+      'rate-limit-refill': { type: 'string' },
+      'max-body-bytes': { type: 'string' },
+      'cors-origin': { type: 'string', multiple: true },
     },
   });
   const mock = values.mock ?? false;
@@ -150,5 +170,9 @@ export function parseCliArgs(argv: string[]): CliArgs {
     host: values.host,
     tlsCert: values['tls-cert'],
     tlsKey: values['tls-key'],
+    ...(values['rate-limit'] !== undefined ? { rateLimitCapacity: Number(values['rate-limit']) } : {}),
+    ...(values['rate-limit-refill'] !== undefined ? { rateLimitRefillPerSec: Number(values['rate-limit-refill']) } : {}),
+    ...(values['max-body-bytes'] !== undefined ? { maxBodyBytes: Number(values['max-body-bytes']) } : {}),
+    ...(values['cors-origin'] !== undefined ? { allowedOrigins: values['cors-origin'] } : {}),
   };
 }
