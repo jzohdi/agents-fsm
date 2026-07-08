@@ -407,8 +407,30 @@ input, textarea, button, select { font: inherit; }
 .af-esc-resolve { display: flex; align-items: stretch; gap: 10px; margin-top: 14px; }
 .af-esc-resolve textarea { flex: 1; resize: vertical; min-height: 42px; border: 1px solid var(--rule2); background: var(--paper2); padding: 8px 10px; font-size: 13px; color: var(--ink); }
 .af-esc-resolve textarea:focus { outline: none; border-color: var(--ink3); }
-.af-esc-resolve button { border: 1px solid var(--rule2); background: var(--paper2); font-size: 13px; font-weight: 600; color: var(--ink2); padding: 9px 18px; cursor: pointer; white-space: nowrap; }
-.af-esc-resolve button:hover { background: var(--paper); color: var(--ink); }
+.af-esc-resolve button[type="submit"] { border: 1px solid var(--rule2); background: var(--paper2); font-size: 13px; font-weight: 600; color: var(--ink2); padding: 9px 18px; cursor: pointer; white-space: nowrap; }
+.af-esc-resolve button[type="submit"]:hover { background: var(--paper); color: var(--ink); }
+.af-esc-extra { display: flex; flex-direction: column; gap: 4px; font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink3); }
+.af-esc-extra input { width: 64px; border: 1px solid var(--rule2); background: var(--paper2); padding: 8px 10px; font-size: 13px; color: var(--ink); }
+.af-esc-extra input:focus { outline: none; border-color: var(--ink3); }
+
+/* Layer 3: escalation-resolution advisor — the "Suggest resolutions" button + option cards. */
+.af-adv { margin-top: 16px; }
+.af-adv-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.af-adv-bar button { border: 1px solid var(--rule2); background: var(--paper2); font-size: 13px; font-weight: 600; color: var(--ink2); padding: 8px 16px; cursor: pointer; }
+.af-adv-bar button:hover:not(:disabled) { background: var(--paper); color: var(--ink); }
+.af-adv-bar button:disabled { opacity: 0.6; cursor: progress; }
+.af-adv-hint { color: var(--ink3); font-size: 12px; }
+.af-adv-summary { margin: 12px 0 0; color: var(--ink2); font-size: 13.5px; line-height: 1.5; }
+.af-adv-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-top: 12px; }
+.af-adv-card { display: flex; flex-direction: column; gap: 6px; text-align: left; border: 1px solid var(--rule2); background: var(--paper2); padding: 12px 14px; cursor: pointer; }
+.af-adv-card:hover { border-color: var(--ink3); background: var(--paper); }
+.af-adv-card.rec { border-left: 3px solid var(--rose); }
+.af-adv-badges { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.af-adv-act { font-family: var(--mono); font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink3); }
+.af-adv-act.af-adv-revert { color: var(--rose); }
+.af-adv-rec { font-family: var(--mono); font-size: 9.5px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--rose); }
+.af-adv-label { font-size: 13.5px; font-weight: 600; color: var(--ink); line-height: 1.4; }
+.af-adv-rationale { font-size: 12.5px; color: var(--ink2); line-height: 1.5; }
 
 /* --- state machine (stepper + back-edge arcs) --- */
 .af-sm-wrap { position: relative; margin-top: 36px; padding-top: 58px; overflow-x: auto; }

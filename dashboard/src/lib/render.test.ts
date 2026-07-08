@@ -623,7 +623,7 @@ describe('adviceCards (escalation-resolution option cards)', () => {
   });
 
   it('humanizes a revert target state and keeps the raw state for pre-selecting the revert form', () => {
-    const [card] = adviceCards(advice([{ label: 'Back', rationale: 'r', action: 'revert', toState: 'plan_review' }]));
+    const card = adviceCards(advice([{ label: 'Back', rationale: 'r', action: 'revert', toState: 'plan_review' }]))[0]!;
     expect(card.action).toBe('revert');
     expect(card.toState).toBe('plan_review');
     expect(card.toStateLabel).toBe(humanizeState('plan_review'));

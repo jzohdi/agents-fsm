@@ -9,7 +9,7 @@
 import { request, AuthError } from './api';
 import { clearToken, setToken, withToken } from './auth';
 import { routeFromPath, routePath, type Route } from './render';
-import type { ChatExchange, ChatMode, LoadedConfig, LogLine, ModelCatalog, Repo, Run, RunDetail, Settings, Suggestion } from './types';
+import type { Advice, ChatExchange, ChatMode, LoadedConfig, LogLine, ModelCatalog, Repo, Run, RunDetail, Settings, Suggestion } from './types';
 
 export const ui = $state({
   runs: [] as Run[], // newest first
@@ -59,6 +59,10 @@ export const ui = $state({
   chatUnread: 0,
   // A send in flight (disables the composer so one prompt can't be posted twice).
   chatSending: false,
+  // The escalation-resolution advisor (Layer 3): true while a "Suggest resolutions" request is in
+  // flight, so the button shows a loading state and can't be double-clicked. The result itself lands
+  // on `detail.advice`.
+  advising: false,
   // Token auth (issue #25): true ⇒ the daemon returned a 401, so show the token prompt overlay. The
   // static SPA is served open, so this renders even though every data load failed. Auth-off daemons
   // never set it (no 401 is ever returned), so the prompt stays hidden by default.
@@ -468,14 +472,43 @@ export async function refreshDetail(): Promise<void> {
 }
 
 /** Run-control command. `notes` (resume of a needs_human run only): operator guidance the daemon
- *  records on the resume transition and delivers to the retried stage as its re-entry context. */
-export async function control(action: 'pause' | 'resume' | 'stop', notes?: string): Promise<void> {
+ *  records on the resume transition and delivers to the retried stage as its re-entry context.
+ *  `extraRounds` (resume of an `internal_review_cap` escalation only): bump the review cap for that
+ *  visit only, for when the loop was converging and just needs more budget. */
+export async function control(
+  action: 'pause' | 'resume' | 'stop',
+  notes?: string,
+  extraRounds?: number,
+): Promise<void> {
   if (ui.selectedId === null) return;
+  const body: { notes?: string; extraRounds?: number } = {};
+  if (notes?.trim()) body.notes = notes.trim();
+  if (extraRounds !== undefined) body.extraRounds = extraRounds;
   try {
-    await request('POST', `/runs/${ui.selectedId}/${action}`, notes?.trim() ? { notes: notes.trim() } : undefined);
+    await request('POST', `/runs/${ui.selectedId}/${action}`, Object.keys(body).length ? body : undefined);
     await refreshDetail();
   } catch (err) {
     banner(`${action} failed: ${(err as Error).message}`, 'err');
+  }
+}
+
+/**
+ * On-demand escalation-resolution advisor (the "Suggest resolutions" button, Layer 3). Runs the
+ * read-only advisor over the selected `needs_human` run (`POST /runs/:id/advise`), then upserts the
+ * returned advice into the cached detail so the option cards render immediately and survive a reload
+ * (the daemon also returns it in `getRunDetail`).
+ */
+export async function requestAdvice(): Promise<void> {
+  if (ui.selectedId === null) return;
+  const id = ui.selectedId;
+  ui.advising = true;
+  try {
+    const advice = await request<Advice>('POST', `/runs/${id}/advise`);
+    if (ui.detail && ui.detail.run.id === id) ui.detail.advice = advice;
+  } catch (err) {
+    banner(`Suggest resolutions failed: ${(err as Error).message}`, 'err');
+  } finally {
+    ui.advising = false;
   }
 }
 

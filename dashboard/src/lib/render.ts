@@ -7,7 +7,7 @@
  * is what lets the reactive view layer stay thin.
  */
 
-import type { AgentRunRecord, FsmConfig, Repo, Run, RunStatus, Transition } from './types';
+import type { Advice, AgentRunRecord, FsmConfig, Repo, Run, RunStatus, Transition } from './types';
 
 // --- formatting ---------------------------------------------------------------
 
@@ -862,5 +862,43 @@ export function formatChatReply(text: string): string {
     .map((p) => (/^@@AF_CODE_\d+@@$/.test(p) ? p : `<p>${p.replace(/\n/g, '<br>')}</p>`))
     .join('');
   return html.replace(/@@AF_CODE_(\d+)@@/g, (_m, i: string) => blocks[Number(i)]!);
+}
+
+// --- escalation-resolution advisor (Layer 3) ----------------------------------
+
+/** A card view-model for one advisor option (pure; unit-tested in render.test.ts). */
+export interface AdviceCard {
+  label: string;
+  rationale: string;
+  /** 'resume' | 'revert' — drives the action badge. */
+  action: 'resume' | 'revert';
+  /** Present for revert cards: the humanized target-state label (via {@link humanizeState}). */
+  toStateLabel?: string;
+  /** Raw target state (for pre-selecting the revert form). */
+  toState?: string;
+  /** Notes to pre-fill into the guidance box when the card is selected (defaults to ''). */
+  suggestedNotes: string;
+  /** True for the first option (the recommended one). */
+  recommended: boolean;
+}
+
+/** Map a persisted {@link Advice} to card view-models (recommended = first; humanized revert
+ *  targets). Returns [] when advice is absent/empty. */
+export function adviceCards(advice: Advice | undefined): AdviceCard[] {
+  if (!advice || !Array.isArray(advice.options)) return [];
+  return advice.options.map((opt, i) => {
+    const card: AdviceCard = {
+      label: opt.label,
+      rationale: opt.rationale,
+      action: opt.action,
+      suggestedNotes: opt.suggestedNotes ?? '',
+      recommended: i === 0,
+    };
+    if (opt.action === 'revert' && opt.toState) {
+      card.toState = opt.toState;
+      card.toStateLabel = humanizeState(opt.toState);
+    }
+    return card;
+  });
 }
 
