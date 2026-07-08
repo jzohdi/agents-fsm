@@ -35,6 +35,20 @@ describe('parseCliArgs', () => {
     expect(args.costCeiling).toBe(25);
   });
 
+  it('reads the remote-access flags (--host / --tls-cert / --tls-key), both --key value and --key=value', () => {
+    const args = parseCliArgs(['serve', '--host', '0.0.0.0', '--tls-cert=/etc/af/cert.pem', '--tls-key', '/etc/af/key.pem']);
+    expect(args.host).toBe('0.0.0.0');
+    expect(args.tlsCert).toBe('/etc/af/cert.pem');
+    expect(args.tlsKey).toBe('/etc/af/key.pem');
+  });
+
+  it('leaves the remote-access flags undefined when unset (the resolver owns the loopback default)', () => {
+    const args = parseCliArgs(['serve']);
+    expect(args.host).toBeUndefined(); // NOT defaulted to 127.0.0.1 here — resolveHost does that
+    expect(args.tlsCert).toBeUndefined();
+    expect(args.tlsKey).toBeUndefined();
+  });
+
   it('reads the reply-poll overrides', () => {
     const args = parseCliArgs(['owner/repo#1', '--poll-timeout', '5', '--poll-interval=30']);
     expect(args.pollTimeoutMinutes).toBe(5);

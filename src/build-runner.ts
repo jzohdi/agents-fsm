@@ -157,6 +157,21 @@ export function resolveApiToken(args: CliArgs): string | undefined {
 }
 
 /**
+ * Resolve the `serve` daemon's bind host (issue #26), precedence: `--host` flag → `FLEET_HOST` env →
+ * `'127.0.0.1'` (loopback, the unchanged default). A blank/whitespace-only value at either level is
+ * treated as **unset** (mirrors {@link resolveApiToken}'s `.trim() || undefined`), so `FLEET_HOST=`
+ * keeps the loopback default. Always returns a non-empty string — the default guarantees it. The whole
+ * security default rests on this: no `--host` and no `FLEET_HOST` ⇒ exactly `'127.0.0.1'`. Off-loopback
+ * exposure is separately gated by the bind guard (`src/api/bind-guard.ts`) in `serve.ts`.
+ *
+ * TDD stage (issue #26): intentionally UNIMPLEMENTED — the signature pins the contract so
+ * `build-runner.test.ts` compiles and fails for the right reason. The implementation stage fills it in.
+ */
+export function resolveHost(args: CliArgs): string {
+  throw new Error(`resolveHost not implemented (issue #26): ${args.host}`);
+}
+
+/**
  * Resolve the harness a new run gets when the request omits one (plan §5.2), precedence: the
  * `--harness` flag → the `FLEET_HARNESS` env → the persisted `settings.default_harness` → the shipped
  * {@link DEFAULT_HARNESS}. Shared by both entry points (the daemon and the one-shot CLI) so the default

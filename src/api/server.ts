@@ -57,6 +57,13 @@ export interface ApiServerOptions {
    * credential. Env-provided only (never persisted); the server just receives the resolved value.
    */
   apiToken?: string;
+  /**
+   * Direct TLS termination (issue #26). When set, the server is built with `https.createServer` using
+   * these already-read PEM strings; absent ⇒ plain `http.createServer` (the unchanged default).
+   * `serve.ts` reads the files and passes resolved PEM contents — the server stays free of filesystem
+   * concerns. TLS is transport confidentiality only; it does **not** exempt the bind-token guard.
+   */
+  tls?: { cert: string; key: string };
 }
 
 /** Build the daemon's HTTP server. The caller decides when/where to `listen` (port 0 in tests). */
