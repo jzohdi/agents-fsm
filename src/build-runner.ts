@@ -164,11 +164,9 @@ export function resolveApiToken(args: CliArgs): string | undefined {
  * security default rests on this: no `--host` and no `FLEET_HOST` ⇒ exactly `'127.0.0.1'`. Off-loopback
  * exposure is separately gated by the bind guard (`src/api/bind-guard.ts`) in `serve.ts`.
  *
- * TDD stage (issue #26): intentionally UNIMPLEMENTED — the signature pins the contract so
- * `build-runner.test.ts` compiles and fails for the right reason. The implementation stage fills it in.
  */
 export function resolveHost(args: CliArgs): string {
-  throw new Error(`resolveHost not implemented (issue #26): ${args.host}`);
+  return (args.host ?? process.env.FLEET_HOST)?.trim() || '127.0.0.1';
 }
 
 /**

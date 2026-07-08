@@ -30,6 +30,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
 import { fileURLToPath } from 'node:url';
 
 import { ApiError, type Orchestrator } from './orchestrator';
@@ -70,9 +71,15 @@ export interface ApiServerOptions {
 export function createApiServer(orchestrator: Orchestrator, options: ApiServerOptions = {}): Server {
   const publicDir = options.publicDir ?? DEFAULT_PUBLIC_DIR;
   const apiToken = options.apiToken;
-  return createServer((req, res) => {
+  const listener = (req: IncomingMessage, res: ServerResponse): void => {
     handle(orchestrator, req, res, publicDir, apiToken).catch((err) => sendError(res, err));
-  });
+  };
+  // Direct TLS termination (issue #26): when `tls` PEM strings are supplied, build an `https` server;
+  // otherwise plain `http` (the unchanged default). `https.Server` shares `node:http`'s request/`listen`
+  // surface and the same `handle(...)` routing serves both — TLS is transport confidentiality only.
+  return options.tls
+    ? createHttpsServer({ cert: options.tls.cert, key: options.tls.key }, listener)
+    : createServer(listener);
 }
 
 async function handle(

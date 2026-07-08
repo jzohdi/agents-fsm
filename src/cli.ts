@@ -17,6 +17,7 @@
  *   tsx src/cli.ts <issueRef> --mock [--db <path>]                           # start (no tokens / no network)
  *   tsx src/cli.ts resume <runId> [--repo o/r ...] [--mock] [--db <path>]    # resume a needs_human run
  *   tsx src/cli.ts serve [--port 4319] [--db <path>] [--config <path>] [--mock]  # run the daemon (HTTP API + live stream, M5)
+ *                  [--host 127.0.0.1] [--tls-cert <pem>] [--tls-key <pem>]     # remote access (issue #26)
  *
  * With no `--db` it uses an in-memory database (nothing persists); `resume` across processes needs a
  * file path. `--cheap`

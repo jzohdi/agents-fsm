@@ -8,13 +8,30 @@
  * the decision pure lets `bind-guard.test.ts` exercise the loopback classification + the allow/refuse
  * verdict directly (no DNS, no I/O — `localhost` is classified by literal string, never resolved).
  *
- * TDD stage (issue #26): these are intentionally UNIMPLEMENTED stubs — the signatures pin the contract
- * from `.agent/interface.md` so `bind-guard.test.ts` compiles and fails for the right reason (missing
- * behaviour, not an import/compile error). The implementation stage fills the bodies in.
+ * TDD stage (issue #26): the signatures pin the contract from `.agent/interface.md`; the bodies below
+ * satisfy `bind-guard.test.ts`.
  */
 
 /** The bind decision: allowed, or refused with an actionable reason to surface (throw + non-zero exit). */
 export type BindVerdict = { ok: true } | { ok: false; reason: string };
+
+/**
+ * True iff `s` is a dotted-quad IPv4 whose first octet is `127` (the whole `127.0.0.0/8` loopback
+ * block). Parsed **numerically**: exactly four octets, each a run of digits in `0..255` with no
+ * surprises, so near-misses a loose `startsWith('127.')` would wave through — `127.foo`,
+ * `1270.0.0.1`, `127.0.0.1.5`, `127.0.0.256` — all return `false`.
+ */
+function isLoopbackIpv4(s: string): boolean {
+  const parts = s.split('.');
+  if (parts.length !== 4) return false;
+  for (const part of parts) {
+    // Digits only (rejects `foo`, empty, signs, whitespace); `Number` gives the value for the range check.
+    if (!/^\d+$/.test(part)) return false;
+    const n = Number(part);
+    if (n > 255) return false;
+  }
+  return Number(parts[0]) === 127;
+}
 
 /**
  * Classify a bind host as loopback (`true`) or not (`false`). Normalizes first: trims surrounding
@@ -33,7 +50,17 @@ export type BindVerdict = { ok: true } | { ok: false; reason: string };
  * the daemon (unsafe), so ambiguity must resolve to non-loopback.
  */
 export function isLoopbackHost(host: string): boolean {
-  throw new Error(`isLoopbackHost not implemented (issue #26): ${host}`);
+  // Normalize: trim, lowercase, and strip one pair of surrounding brackets (`[::1]` → `::1`).
+  let h = host.trim().toLowerCase();
+  if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
+
+  if (h === '') return false; // empty / whitespace-only → non-loopback (fail safe)
+  if (h === 'localhost') return true; // literal only — never DNS-resolved
+  if (h === '::1') return true; // IPv6 loopback
+  // IPv6-mapped IPv4 loopback (`::ffff:127.x.x.x`): the mapped tail must itself be 127/8.
+  if (h.startsWith('::ffff:')) return isLoopbackIpv4(h.slice('::ffff:'.length));
+  // The entire IPv4 `127.0.0.0/8` block, parsed numerically (not `startsWith('127.')`).
+  return isLoopbackIpv4(h);
 }
 
 /**
@@ -49,5 +76,13 @@ export function isLoopbackHost(host: string): boolean {
  * default), and points at the README remote-access section.
  */
 export function checkBindAllowed(host: string, hasToken: boolean): BindVerdict {
-  throw new Error(`checkBindAllowed not implemented (issue #26): ${host} hasToken=${hasToken}`);
+  if (isLoopbackHost(host)) return { ok: true }; // loopback is always allowed (the unchanged default path)
+  if (hasToken) return { ok: true }; // off-loopback is fine once a token gates the API surface
+  return {
+    ok: false,
+    reason:
+      `refusing to bind to a non-loopback host (${host}) without an API token — set FLEET_API_TOKEN ` +
+      `(or --api-token) before exposing the daemon off localhost, or bind 127.0.0.1 (the default). ` +
+      `See README §9 "Remote access (off-localhost)".`,
+  };
 }

@@ -147,5 +147,8 @@ export function parseCliArgs(argv: string[]): CliArgs {
     ...(values.concurrency !== undefined ? { concurrency: Number(values.concurrency) } : {}),
     ...(values['cost-ceiling'] !== undefined ? { costCeiling: Number(values['cost-ceiling']) } : {}),
     apiToken: values['api-token'],
+    host: values.host,
+    tlsCert: values['tls-cert'],
+    tlsKey: values['tls-key'],
   };
 }

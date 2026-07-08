@@ -11,12 +11,13 @@
  * KISS: a single long-lived process. Stop it with Ctrl-C (SIGINT/SIGTERM → graceful close).
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import type { Server } from 'node:http';
 
 import { createApiServer, DEFAULT_PUBLIC_DIR } from './api/server';
+import { checkBindAllowed, isLoopbackHost } from './api/bind-guard';
 import { stateLabelMirror } from './api/state-label-mirror';
-import { buildOrchestrator, resolveApiToken } from './build-runner';
+import { buildOrchestrator, resolveApiToken, resolveHost } from './build-runner';
 import type { CliArgs } from './cli-args';
 
 export async function serve(args: CliArgs): Promise<void> {
@@ -34,10 +35,29 @@ export async function serve(args: CliArgs): Promise<void> {
   // Absent ⇒ auth off, the localhost-only default (byte-for-byte unchanged). Pass `{}` when unset so the
   // server's `DEFAULT_PUBLIC_DIR` default is untouched.
   const apiToken = resolveApiToken(args);
-  const server = createApiServer(orchestrator, apiToken ? { apiToken } : {});
-  await listen(server, args.port);
+
+  // Bind host (issue #26): `--host` → `FLEET_HOST` → `127.0.0.1` (loopback, the unchanged default).
+  const host = resolveHost(args);
+  // Bind guard, fail-fast BEFORE the server binds: refuse a non-loopback bind unless a token gates the
+  // API surface. Throwing surfaces it like other boot failures (a non-zero exit) — TLS does NOT exempt
+  // this (transport confidentiality is not authn; the guard is unconditional on a non-loopback host).
+  const verdict = checkBindAllowed(host, Boolean(apiToken));
+  if (!verdict.ok) throw new Error(verdict.reason);
+
+  // Direct TLS termination (issue #26): `--tls-cert` / `--tls-key`, both-or-neither. Read the PEM files
+  // here (the server stays free of filesystem concerns) and pass the resolved contents through.
+  const tls = resolveTls(args);
+
+  const server = createApiServer(orchestrator, { ...(apiToken ? { apiToken } : {}), ...(tls ? { tls } : {}) });
+  await listen(server, args.port, host);
   const config = orchestrator.getConfig();
-  console.log(`agent-fleet daemon listening on http://localhost:${args.port} (FSM config ${config.version}${args.mock ? ', mock mode' : ', real mode'})`);
+  const scheme = tls ? 'https' : 'http';
+  // Wildcard binds (`0.0.0.0` / `::`) aren't a reachable address — show a hint instead of the literal.
+  const shownHost = host === '0.0.0.0' || host === '::' ? '<this-host>' : host;
+  console.log(`agent-fleet daemon listening on ${scheme}://${shownHost}:${args.port} (FSM config ${config.version}${args.mock ? ', mock mode' : ', real mode'})`);
+  if (!isLoopbackHost(host)) {
+    console.log(`  🌐 reachable off-localhost (bound ${host}) — auth is required (guaranteed by the bind guard).${tls ? '' : ' Front it with a tunnel or TLS; see README §9.'}`);
+  }
   console.log(
     args.db === ':memory:'
       ? '  ⚠ state: in-memory — runs are LOST on shutdown. Pass --db <path> to persist across restarts.'
@@ -136,17 +156,40 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined>
   ]);
 }
 
-function listen(server: Server, port: number): Promise<void> {
+function listen(server: Server, port: number, host: string): Promise<void> {
   return new Promise((resolve, reject) => {
     server.once('error', reject);
-    // Bind to loopback only. Token auth now exists (issue #25 — `FLEET_API_TOKEN`), but off-loopback
-    // binding is a deliberate, separate post-MVP add-on (issue #16: networking + TLS/hardening), not an
-    // accident of the default bind address — so the daemon stays on 127.0.0.1 until that lands.
-    server.listen(port, '127.0.0.1', () => {
+    // Bind to the resolved `host` (issue #26). The default is loopback (`127.0.0.1`); binding off-loopback
+    // is now supported but gated by the bind guard (`checkBindAllowed` in `serve()`), which refuses a
+    // non-loopback bind unless an API token is configured — so exposure is deliberate, never accidental.
+    server.listen(port, host, () => {
       server.off('error', reject);
       resolve();
     });
   });
+}
+
+/**
+ * Assemble the optional direct-TLS config (issue #26) from `--tls-cert` / `--tls-key`. Both-or-neither:
+ * exactly one set is operator error (a clear throw). When both are set, read each PEM file here so the
+ * server receives resolved contents (kept free of filesystem concerns); an unreadable path throws an
+ * actionable error naming it. Neither set ⇒ `undefined` (plain HTTP, the unchanged default).
+ */
+function resolveTls(args: CliArgs): { cert: string; key: string } | undefined {
+  const { tlsCert, tlsKey } = args;
+  if (!tlsCert && !tlsKey) return undefined;
+  if (!tlsCert || !tlsKey) {
+    throw new Error('direct TLS requires both --tls-cert and --tls-key (only one was given) — pass both PEM paths, or neither for plain HTTP.');
+  }
+  return { cert: readPem(tlsCert, '--tls-cert'), key: readPem(tlsKey, '--tls-key') };
+}
+
+function readPem(path: string, flag: string): string {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch (err) {
+    throw new Error(`could not read ${flag} PEM file at ${path}: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 /**

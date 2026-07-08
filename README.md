@@ -277,7 +277,7 @@ A browser app served by the daemon on localhost. It is a pure client of Layer 6.
 | Telemetry, insights, logging | Everything passes through the daemon boundary (Layers 1 + 6), where it is recorded and streamed — impossible to achieve with CI-scattered triggers. |
 | Configurable FSM + dashboard | FSM is config-driven (Layer 2); the dashboard (Layer 7) reads/writes that config and renders the live graph. |
 | Start/stop control | First-class API commands (Layer 6) backed by the run status in the store. |
-| Future remote/phone access | The dashboard is already a web client over HTTP/WS; remote access becomes an auth + networking add-on, not a redesign. |
+| Remote/phone access | The dashboard is a web client over HTTP/SSE, so remote access was a networking add-on, not a redesign: `--host`/`FLEET_HOST` binds a routable address, gated on the API token (§9.11) and reachable via a tunnel or direct TLS. |
 
 ### 3.5 Encoding state in issues and PRs
 
@@ -762,10 +762,9 @@ token). Clients send `Authorization: Bearer <token>`; the SSE `/stream` also acc
 because a browser `EventSource` can't set headers. A missing token is `401 authentication required`, a
 wrong one `401 invalid token` (constant-time comparison). The token is read from the environment only —
 **never** stored in SQLite (§9.1) — and absent/blank keeps auth off (behaviour byte-for-byte unchanged).
-The daemon still binds loopback regardless; binding off-localhost is a separate networking/TLS issue
-([#16](https://github.com/jzohdi/agents-fsm/issues/16)) that builds on this token layer. The dashboard
-prompts for the token on a `401`, stores it in `localStorage`, and attaches it to every request and the
-stream; **Forget token** clears it.
+By default the daemon binds loopback (`127.0.0.1`); reaching it from another device is now supported
+(§9.11) and builds on this token layer. The dashboard prompts for the token on a `401`, stores it in
+`localStorage`, and attaches it to every request and the stream; **Forget token** clears it.
 
 **Global cost ceiling (Milestone 8 B3, optional).** `--cost-ceiling <dollars>` or `FLEET_COST_CEILING`
 (off by default) caps aggregate `cost_used` across active runs. At/over the ceiling the daemon refuses
@@ -986,4 +985,54 @@ opts in — by adding the **`agent help wanted`** label (configurable per repo v
 same `POST /runs` admission as a manual run — the one-active-run-per-issue guard, the global cost
 ceiling, and enrollment all still apply — so continuous mode is admission control, not a bypass. It
 **never auto-merges**: a human still reviews and merges every PR. Needs the **daemon** (§9.3).
+
+### 9.11 Remote access (reach the dashboard off-localhost)
+
+By default the daemon binds loopback (`127.0.0.1`) — safe for a local dashboard, unreachable from
+anything else. To reach it from another device (e.g. your phone), bind a routable address with `--host`
+(or `FLEET_HOST`) and put a secure channel in front.
+
+**Prerequisite — API auth (already available).** Off-localhost exposure is gated on the token layer from
+§9.3: the daemon **refuses to bind a non-loopback host without an API token** and fails fast at boot
+with an actionable message. So set `FLEET_API_TOKEN` (or `--api-token`) first — the bind guard
+(`checkBindAllowed`) is unconditional on a non-loopback host, and **TLS does not exempt it** (TLS is
+transport confidentiality; the token is authentication). Binding loopback needs no token — the default
+is byte-for-byte unchanged.
+
+**Option A — tunnel (recommended).** The lowest-friction path: keep the daemon on loopback (or bind a
+private interface) and reach it over a tunnel that handles encryption and identity for you, so there is
+no cert to manage:
+
+- **Tailscale** — join both devices to your tailnet, then browse to `http://<daemon-host>:4319` over the
+  private WireGuard mesh (nothing is exposed to the public internet).
+- **Cloudflare Tunnel** — `cloudflared tunnel --url http://127.0.0.1:4319` gives an HTTPS URL fronted by
+  Cloudflare.
+- **SSH port-forward** — `ssh -L 4319:127.0.0.1:4319 you@daemon-host`, then open
+  `http://127.0.0.1:4319` on the local device. The daemon can stay on its loopback default.
+
+Set `FLEET_API_TOKEN` regardless — a tunnel controls who can reach the socket, the token controls who
+can drive the API.
+
+**Option B — direct TLS.** If you'd rather terminate TLS in the daemon itself, pass a cert/key pair and
+bind a routable host:
+
+```
+FLEET_API_TOKEN=$(openssl rand -hex 32) \
+  npm start -- serve --host 0.0.0.0 --tls-cert ./cert.pem --tls-key ./key.pem
+# open https://<this-host>:4319 from the other device
+```
+
+Both `--tls-cert` and `--tls-key` must be given together (one without the other is a fail-fast error);
+absent ⇒ plain HTTP (unchanged). The banner reflects the real scheme + host, and notes when the daemon
+is reachable off-localhost. For a LAN test you can generate a self-signed pair with `openssl req -x509
+-newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 365 -subj '/CN=<host>'` (browsers will warn
+on the self-signed cert; a tunnel avoids that). Public-facing deployments should use a real certificate.
+
+**Bind-guard cheat sheet** — the daemon's boot-time decision (`host` × token):
+
+| `--host` / `FLEET_HOST` | API token | result |
+|-------------------------|-----------|--------|
+| unset → `127.0.0.1` (or any loopback) | any | binds (the default) |
+| non-loopback (`0.0.0.0`, a LAN/public IP) | set | binds — reachable off-localhost |
+| non-loopback | **unset** | **refuses to start** (actionable error naming the host + `FLEET_API_TOKEN`) |
 
