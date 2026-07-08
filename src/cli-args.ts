@@ -68,6 +68,19 @@ export interface CliArgs {
    * in practice; never persisted to SQLite (README §9.1).
    */
   apiToken?: string;
+  /**
+   * Bind address for the `serve` daemon (issue #26) — `--host`. Undefined here → falls back to
+   * `FLEET_HOST`, then `127.0.0.1` (loopback, the unchanged default). Binding off-loopback requires an
+   * API token (the bind guard, `src/api/bind-guard.ts`), else the daemon fails fast at boot.
+   */
+  host?: string;
+  /**
+   * PEM cert path for direct TLS termination on the `serve` daemon (issue #26) — `--tls-cert`. Both
+   * `--tls-cert` and `--tls-key` must be given together; absent ⇒ plain HTTP (the unchanged default).
+   */
+  tlsCert?: string;
+  /** PEM private-key path paired with `--tls-cert` (issue #26) — `--tls-key`. */
+  tlsKey?: string;
 }
 
 export function parseCliArgs(argv: string[]): CliArgs {
@@ -97,6 +110,9 @@ export function parseCliArgs(argv: string[]): CliArgs {
       concurrency: { type: 'string' },
       'cost-ceiling': { type: 'string' },
       'api-token': { type: 'string' },
+      host: { type: 'string' },
+      'tls-cert': { type: 'string' },
+      'tls-key': { type: 'string' },
     },
   });
   const mock = values.mock ?? false;
@@ -131,5 +147,8 @@ export function parseCliArgs(argv: string[]): CliArgs {
     ...(values.concurrency !== undefined ? { concurrency: Number(values.concurrency) } : {}),
     ...(values['cost-ceiling'] !== undefined ? { costCeiling: Number(values['cost-ceiling']) } : {}),
     apiToken: values['api-token'],
+    host: values.host,
+    tlsCert: values['tls-cert'],
+    tlsKey: values['tls-key'],
   };
 }

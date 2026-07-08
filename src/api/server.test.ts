@@ -7,6 +7,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -29,7 +30,7 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((s) => new Promise<void>((r) => s.close(() => r()))));
 });
 
-async function start(opts: { publicDir?: string; handler?: StubHandler; apiToken?: string } = {}): Promise<{ base: string; orchestrator: Orchestrator; repo: Repository; github: FakeGitHub }> {
+async function start(opts: { publicDir?: string; handler?: StubHandler; apiToken?: string; tls?: { cert: string; key: string } } = {}): Promise<{ base: string; orchestrator: Orchestrator; repo: Repository; github: FakeGitHub }> {
   const loaded = loadDefaultConfig();
   const repo = new Repository(openDb(':memory:'));
   const github = new FakeGitHub({ autoSeedIssues: true });
@@ -56,11 +57,12 @@ async function start(opts: { publicDir?: string; handler?: StubHandler; apiToken
   const server = createApiServer(orchestrator, {
     ...(opts.publicDir ? { publicDir: opts.publicDir } : {}),
     ...(opts.apiToken ? { apiToken: opts.apiToken } : {}),
+    ...(opts.tls ? { tls: opts.tls } : {}),
   });
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const { port } = server.address() as AddressInfo;
-  return { base: `http://127.0.0.1:${port}`, orchestrator, repo, github };
+  return { base: `${opts.tls ? 'https' : 'http'}://127.0.0.1:${port}`, orchestrator, repo, github };
 }
 
 /** A throwaway dashboard dir so the static-serving test doesn't depend on a real `build:dashboard`. */
@@ -691,6 +693,89 @@ describe('HTTP API — auth (issue #25)', () => {
   it('auth-on leaves /health open (liveness probes) even with no token supplied', async () => {
     const { base } = await start({ apiToken: TOKEN });
     expect((await fetch(`${base}/health`)).status).toBe(200);
+  });
+});
+
+describe('HTTP API — direct TLS termination (issue #26)', () => {
+  // A throwaway self-signed cert/key for `localhost`, held as inline PEM strings so the transport smoke
+  // test needs no `openssl` at test time and writes nothing under the repo (working-tree hygiene). The
+  // client below trusts it via `rejectUnauthorized: false` — never used to bind anything real.
+  const TEST_TLS_CERT = `-----BEGIN CERTIFICATE-----
+MIIDCzCCAfOgAwIBAgIUNERBzT9cHwMvLzsltp2xEK0/THcwDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDcwODE2NTU1M1oYDzIxMjYw
+NjE0MTY1NTUzWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQCJHVB3G47jcjgkkObm9AqC4dJPPTh8JxImc5y23zFY
+pP2dgnsO7uwhfiCnR+HW1tqwOF+yiiFbajXlEebu9jkwxMQ/wF0Rmzjo7u5LbQfj
+ELwx+ZVbgIJJU5wugYI6dwNkjSD8Qg64dDTy4bUgXCEN6X92u3ZFdSQ5axjdbBWF
+NOw/h+Rjg/e34AE+I3CNkBaP2yQ29XjcybWaBruUwySYkZlAt5wgnYzGhRKOPlLf
+5tKLBemFs6BfWTOoUa17S2hwJzYvcD+tyEyibdRZZz2mF48puRm/IKifprzzOPkJ
+nLWwZXiu84Mwd4k/Byjcw3OFw5jnQQxvQBsY9naAVM+DAgMBAAGjUzBRMB0GA1Ud
+DgQWBBRyxfGmoZkvCs6IUWnmmIjhAoZsyjAfBgNVHSMEGDAWgBRyxfGmoZkvCs6I
+UWnmmIjhAoZsyjAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQAY
+2PnPSCoEZ73PWagM18HWcf39TD4gWfV51nI37ufsePzlhDkD1aedou0+YGqwoV+v
+ozODgZ4Sbz0dYiAajz6+7qBqTzTeJ2Zj9f8xrZ3YqW780eH1CtVU9S3t31aNtE+o
+MjEEaKaD2MafFUZUEIHeKfTQVWOnM0LFEp9Awae6lThEvGvh2V2f6pFlp65wscGy
+oqqoJGEnQB6YJmLxAZF540JdsdK1V4PWcGKIKT0GF2sq3DE+xb0hlImZsJNk30ag
+5lle78LbC7B1sMOluDT98K9uLLEKCPmMxoMHRJjyGsoeoUSqWNxnpiyX31S+uFLy
+2Vfo+OGn7DgiMO6ZwbVe
+-----END CERTIFICATE-----
+`;
+  const TEST_TLS_KEY = `-----BEGIN PRIVATE KEY-----
+MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQCJHVB3G47jcjgk
+kObm9AqC4dJPPTh8JxImc5y23zFYpP2dgnsO7uwhfiCnR+HW1tqwOF+yiiFbajXl
+Eebu9jkwxMQ/wF0Rmzjo7u5LbQfjELwx+ZVbgIJJU5wugYI6dwNkjSD8Qg64dDTy
+4bUgXCEN6X92u3ZFdSQ5axjdbBWFNOw/h+Rjg/e34AE+I3CNkBaP2yQ29XjcybWa
+BruUwySYkZlAt5wgnYzGhRKOPlLf5tKLBemFs6BfWTOoUa17S2hwJzYvcD+tyEyi
+bdRZZz2mF48puRm/IKifprzzOPkJnLWwZXiu84Mwd4k/Byjcw3OFw5jnQQxvQBsY
+9naAVM+DAgMBAAECggEAB9XOAFBp1ON1A9nn5/CwHRSMcQy9ipKs/deDcAvHBRrA
+h1yqbYsHoU5UzVpVNHKoooNGLKyqBVBHbiScvrEBSaEk2cPDTbtCAEWPBm5fkgEl
+z/FEMKtiRpBpj1rFN1QPtJI//UpFDxNM50gwkn3RQbtDFmTV+FgeTs2o6RZBEJCF
+OSdaGWYhZKuDvC/EtyGG/rJLin2mztnRujiEPJSIN6slgjjw/a2TQlXxstT/UDEA
+gcQgLXeMkY+JwlOfP70ZbR0hGuNHbOhXO4oJt0+H3D2xWdG6ZhaM8OyhOmfLmNS7
+1uhjGLILPQVgn8dTifYe7lt8bhFB60rueY67i6E06QKBgQC+onFfuG5f1yy7wt+Z
+bScHA7A1UUaRbSx8fKyg3PGezIDDBPFBkD2/XQqpO6qN9m9ChMR15oIblwJ6R3cw
++o6BEzFkrDvLijEa2bX2h0RAHzw+BDzUxmHFI/Z+MhB+3tRUsu1xu1JThWX0ah/Q
+AfdGyXiO75CtnMNn7P64QML+rQKBgQC4IPqt57O4FoERr8w4ixmwT083B4HV+Gxx
+x9HWAwchBiUgg2IO6vpdGzHQJeRaZcnRUm5vV9i4Lh3Cnap1tfb/IxdvfHrFvtjg
+ckujfOCr7FSLFC99GyIS5Bmkd/H+8YttHSvgUukr53Rzdl5EmeGCfewavuesO+ey
+HOozhoq87wKBgQCq9ZkBA7AQSTL3y6KkwEuwsbETj6jegG7V0SUrOhmBlNqgik0l
+xApsFC+cZ0Lj/y32FITvSuJBheKV8INGrFyiCqlQJFmXhn3VG4tg5Bvj+V8YKsq2
+8pX5qu/Canl6nbEDqFbimOASwN4XHBkdfLXaiJGSdetkluJy0An7CTEWHQKBgQCp
+S2FRPkWGz+IyQeHSZ0riSbl6zkM5WeVTpDaxwCzw1zaRs1sYfkJeEt/1ErHnz8kE
+1fbGFw4jIfuo8dBF1F3abghhMCGt6XB8xXn4QpxMVsnQ6mlTbPwiRGmzR7lQAASC
++Zxa78CF5pSyiLXZ+2ZV1bOdT8OxH49Du8Q2RdEQLwKBgQCwWSvMfBY1YW8PVlP8
+m3M/ryBWz6Eb9oX9+TTnKm2kwpSYrT/sq3z5hGeVpDD9zRsSwgxc3jLSJiIOJvbO
+HkAd++ivfplXhBSVTUoPkh+Gb50s4lHGzKMem5UuJrVNMXJKT9cm3fHOfiA+MgtR
+uPuM5Z8MrdV2HddJ7V9u4t1TMQ==
+-----END PRIVATE KEY-----
+`;
+
+  /** GET `url` over HTTPS, trusting the self-signed cert (`rejectUnauthorized: false`); resolves the
+   *  status + parsed JSON body. A short socket timeout keeps a mis-negotiated handshake from hanging. */
+  function getHttps(url: string): Promise<{ status: number; json: unknown }> {
+    return new Promise((resolve, reject) => {
+      const req = httpsRequest(url, { rejectUnauthorized: false }, (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => (body += chunk));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, json: body ? JSON.parse(body) : undefined }));
+      });
+      req.on('error', reject);
+      req.setTimeout(3000, () => req.destroy(new Error('TLS request timed out — server is not serving HTTPS')));
+      req.end();
+    });
+  }
+
+  it('serves over HTTPS when a `tls` option (cert/key PEMs) is provided', async () => {
+    const { base } = await start({ tls: { cert: TEST_TLS_CERT, key: TEST_TLS_KEY } });
+    expect(base.startsWith('https://')).toBe(true);
+
+    // The transport branch is exercised end-to-end: a real TLS handshake + an HTTPS request to /health.
+    // TLS is transport confidentiality only — the same `handle()` routing serves it, so /health answers
+    // 200 { ok: true } exactly as over plain HTTP.
+    const health = await getHttps(`${base}/health`);
+    expect(health.status).toBe(200);
+    expect(health.json).toEqual({ ok: true });
   });
 });
 

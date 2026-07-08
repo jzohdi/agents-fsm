@@ -19,6 +19,7 @@ import {
   resolveConcurrency,
   resolveCostCeiling,
   resolveDefaultHarness,
+  resolveHost,
 } from './build-runner';
 import { openDb } from './store/db';
 import { Repository } from './store/repository';
@@ -212,6 +213,43 @@ describe('resolveDefaultHarness (default harness: --harness → FLEET_HARNESS �
     expect(() => resolveDefaultHarness(argsWith('gemini'), repo())).toThrow(/invalid --harness/);
     process.env.FLEET_HARNESS = 'nonsense';
     expect(() => resolveDefaultHarness(argsWith(), repo())).toThrow(/invalid --harness/);
+  });
+});
+
+describe('resolveHost (bind address: --host → FLEET_HOST → 127.0.0.1, issue #26)', () => {
+  const originalEnv = process.env.FLEET_HOST;
+  afterEach(() => {
+    if (originalEnv === undefined) delete process.env.FLEET_HOST;
+    else process.env.FLEET_HOST = originalEnv;
+  });
+
+  const argsWith = (host?: string): ReturnType<typeof parseCliArgs> => ({
+    ...parseCliArgs(['serve']),
+    ...(host !== undefined ? { host } : {}),
+  });
+
+  it('defaults to loopback (127.0.0.1) when neither the flag nor the env var is set — the security default', () => {
+    delete process.env.FLEET_HOST;
+    expect(resolveHost(argsWith())).toBe('127.0.0.1');
+  });
+
+  it('prefers the --host flag over the env var', () => {
+    process.env.FLEET_HOST = '10.0.0.1';
+    expect(resolveHost(argsWith('0.0.0.0'))).toBe('0.0.0.0');
+  });
+
+  it('falls back to FLEET_HOST when the flag is absent', () => {
+    process.env.FLEET_HOST = '192.168.1.20';
+    expect(resolveHost(argsWith())).toBe('192.168.1.20');
+  });
+
+  it('treats a blank / whitespace-only flag or env value as unset (keeps the loopback default)', () => {
+    delete process.env.FLEET_HOST;
+    expect(resolveHost(argsWith('   '))).toBe('127.0.0.1'); // blank flag → unset
+    process.env.FLEET_HOST = '   ';
+    expect(resolveHost(argsWith())).toBe('127.0.0.1'); // blank env → unset
+    process.env.FLEET_HOST = ''; // FLEET_HOST= keeps the default
+    expect(resolveHost(argsWith())).toBe('127.0.0.1');
   });
 });
 

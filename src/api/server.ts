@@ -30,6 +30,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
 import { fileURLToPath } from 'node:url';
 
 import { ApiError, type Orchestrator } from './orchestrator';
@@ -57,15 +58,28 @@ export interface ApiServerOptions {
    * credential. Env-provided only (never persisted); the server just receives the resolved value.
    */
   apiToken?: string;
+  /**
+   * Direct TLS termination (issue #26). When set, the server is built with `https.createServer` using
+   * these already-read PEM strings; absent ⇒ plain `http.createServer` (the unchanged default).
+   * `serve.ts` reads the files and passes resolved PEM contents — the server stays free of filesystem
+   * concerns. TLS is transport confidentiality only; it does **not** exempt the bind-token guard.
+   */
+  tls?: { cert: string; key: string };
 }
 
 /** Build the daemon's HTTP server. The caller decides when/where to `listen` (port 0 in tests). */
 export function createApiServer(orchestrator: Orchestrator, options: ApiServerOptions = {}): Server {
   const publicDir = options.publicDir ?? DEFAULT_PUBLIC_DIR;
   const apiToken = options.apiToken;
-  return createServer((req, res) => {
+  const listener = (req: IncomingMessage, res: ServerResponse): void => {
     handle(orchestrator, req, res, publicDir, apiToken).catch((err) => sendError(res, err));
-  });
+  };
+  // Direct TLS termination (issue #26): when `tls` PEM strings are supplied, build an `https` server;
+  // otherwise plain `http` (the unchanged default). `https.Server` shares `node:http`'s request/`listen`
+  // surface and the same `handle(...)` routing serves both — TLS is transport confidentiality only.
+  return options.tls
+    ? createHttpsServer({ cert: options.tls.cert, key: options.tls.key }, listener)
+    : createServer(listener);
 }
 
 async function handle(
