@@ -65,6 +65,19 @@ export interface ApiServerOptions {
    * concerns. TLS is transport confidentiality only; it does **not** exempt the bind-token guard.
    */
   tls?: { cert: string; key: string };
+  // --- remote-access hardening (issue #27) — all optional; omit ⇒ hardened defaults ---
+  /**
+   * Token-bucket config for mutating/expensive routes. Omit ⇒ a generous built-in default (e.g.
+   * capacity 60, refillPerSec 1) that a normal local dashboard never trips. (TDD stub: the type is
+   * pinned here so the tests compile; the implementation stage wires the limiter into `handle()`.)
+   */
+  rateLimit?: { capacity: number; refillPerSec: number };
+  /** Max request-body bytes before `413`. Omit ⇒ default 1 MiB (1_048_576). */
+  maxBodyBytes?: number;
+  /** Exact-match CORS allow-list. Omit/empty ⇒ deny all cross-origin (the default). */
+  allowedOrigins?: string[];
+  /** Injectable clock (epoch ms) for the rate limiter, for deterministic tests. Omit ⇒ `Date.now`. */
+  now?: () => number;
 }
 
 /** Build the daemon's HTTP server. The caller decides when/where to `listen` (port 0 in tests). */
