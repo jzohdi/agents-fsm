@@ -1036,3 +1036,28 @@ on the self-signed cert; a tunnel avoids that). Public-facing deployments should
 | non-loopback (`0.0.0.0`, a LAN/public IP) | set | binds — reachable off-localhost |
 | non-loopback | **unset** | **refuses to start** (actionable error naming the host + `FLEET_API_TOKEN`) |
 
+**Hardening the exposed surface (issue #27).** Once the daemon is reachable off-localhost, a set of
+always-on protections defends the HTTP/SSE surface against the threats that only matter when it is no
+longer loopback-only. These need no configuration — they are the hardened default — and a full
+write-up of what an off-localhost attacker can and cannot do lives in
+[`plans/remote-access-threat-model.md`](plans/remote-access-threat-model.md):
+
+- **Security response headers** on every response: `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and a locked-down `Content-Security-Policy`
+  on the SPA document. (No HSTS from the app — that's the TLS terminator's job; see the threat model.)
+- **Rate limiting** on mutating/expensive routes (`POST`/`PUT`/`DELETE`) — a per-source-IP token bucket
+  so an exposed daemon can't be trivially flooded. Cheap `GET`s, the SSE stream, and `/health` are never
+  throttled, so a normal local dashboard never trips it. Tune with `--rate-limit` (burst, default 60) /
+  `--rate-limit-refill` (per second, default 1), or `FLEET_RATE_LIMIT` / `FLEET_RATE_LIMIT_REFILL`.
+- **Request-body cap** (`--max-body-bytes` / `FLEET_MAX_BODY_BYTES`, default 1 MiB) → a `413` before an
+  unbounded payload can exhaust memory.
+- **Cross-origin: deny-all by default.** No `Access-Control-Allow-Origin` is emitted unless you opt in
+  with an exact allow-list (`--cors-origin`, repeatable or comma-separated, or `FLEET_CORS_ORIGINS`); a
+  wildcard is never sent. Auth is a bearer token (never a cookie), so classic CSRF does not apply.
+- **Error sanitization.** Unexpected internal errors return a generic `500` (no stack trace, raw message,
+  or filesystem path); only deliberate client-facing `ApiError` messages are surfaced.
+
+**Token rotation.** There is a single shared token by design (multi-user/RBAC is out of scope — §1). To
+rotate it, restart the daemon with a new `FLEET_API_TOKEN` (or `--api-token`); every client re-prompts on
+the next `401`. The token is env-only — never written to SQLite, logs, SSE frames, or error bodies.
+

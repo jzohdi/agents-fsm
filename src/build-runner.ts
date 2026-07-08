@@ -169,6 +169,50 @@ export function resolveHost(args: CliArgs): string {
   return (args.host ?? process.env.FLEET_HOST)?.trim() || '127.0.0.1';
 }
 
+/** Generous rate-limit defaults (issue #27): a normal local dashboard never trips a 60-burst / 1-per-sec bucket. */
+const DEFAULT_RATE_LIMIT = { capacity: 60, refillPerSec: 1 };
+/** Default request-body cap (issue #27): 1 MiB — enough for any legitimate control-plane payload. */
+const DEFAULT_MAX_BODY_BYTES = 1_048_576;
+
+/**
+ * Resolve the daemon's per-source rate-limit config (issue #27), precedence per field: the
+ * `--rate-limit` / `--rate-limit-refill` flag → `FLEET_RATE_LIMIT` / `FLEET_RATE_LIMIT_REFILL` env →
+ * {@link DEFAULT_RATE_LIMIT}. A non-finite / non-positive value falls back to the default per field, so
+ * a typo can never *disable* the throttle (which would be a security regression, not just a nuisance).
+ */
+export function resolveRateLimit(args: CliArgs): { capacity: number; refillPerSec: number } {
+  const envNum = (name: string): number | undefined =>
+    process.env[name] !== undefined ? Number(process.env[name]) : undefined;
+  const capCandidate = args.rateLimitCapacity ?? envNum('FLEET_RATE_LIMIT');
+  const refillCandidate = args.rateLimitRefillPerSec ?? envNum('FLEET_RATE_LIMIT_REFILL');
+  return {
+    capacity: capCandidate !== undefined && Number.isFinite(capCandidate) && capCandidate >= 1 ? Math.floor(capCandidate) : DEFAULT_RATE_LIMIT.capacity,
+    refillPerSec: refillCandidate !== undefined && Number.isFinite(refillCandidate) && refillCandidate > 0 ? refillCandidate : DEFAULT_RATE_LIMIT.refillPerSec,
+  };
+}
+
+/**
+ * Resolve the daemon's request-body cap in bytes (issue #27), precedence: `--max-body-bytes` →
+ * `FLEET_MAX_BODY_BYTES` → {@link DEFAULT_MAX_BODY_BYTES} (1 MiB). A non-finite / non-positive value
+ * falls back to the default, so a typo never removes the memory-exhaustion backstop.
+ */
+export function resolveMaxBodyBytes(args: CliArgs): number {
+  const fromEnv = process.env.FLEET_MAX_BODY_BYTES !== undefined ? Number(process.env.FLEET_MAX_BODY_BYTES) : undefined;
+  const candidate = args.maxBodyBytes ?? fromEnv;
+  return candidate !== undefined && Number.isFinite(candidate) && candidate >= 1 ? Math.floor(candidate) : DEFAULT_MAX_BODY_BYTES;
+}
+
+/**
+ * Resolve the daemon's exact-match CORS allow-list (issue #27), precedence: `--cors-origin` (repeatable
+ * or comma-separated) → `FLEET_CORS_ORIGINS` (comma-separated) → `[]` (deny all cross-origin, the
+ * hardened default). Entries are trimmed; blanks are dropped, so a stray comma / empty value can't
+ * widen the policy. Each surviving entry is an exact origin string (`https://host[:port]`).
+ */
+export function resolveAllowedOrigins(args: CliArgs): string[] {
+  const raw = args.allowedOrigins ?? (process.env.FLEET_CORS_ORIGINS !== undefined ? [process.env.FLEET_CORS_ORIGINS] : []);
+  return raw.flatMap((entry) => entry.split(',')).map((o) => o.trim()).filter((o) => o !== '');
+}
+
 /**
  * Resolve the harness a new run gets when the request omits one (plan §5.2), precedence: the
  * `--harness` flag → the `FLEET_HARNESS` env → the persisted `settings.default_harness` → the shipped

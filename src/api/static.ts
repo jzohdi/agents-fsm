@@ -11,6 +11,8 @@ import { readFile } from 'node:fs/promises';
 import type { ServerResponse } from 'node:http';
 import { basename, extname, resolve, sep } from 'node:path';
 
+import { CONTENT_SECURITY_POLICY } from './security-headers';
+
 const CONTENT_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -71,7 +73,14 @@ export async function serveStatic(res: ServerResponse, publicDir: string, pathna
   }
   try {
     const body = await readFile(filePath);
-    res.writeHead(200, { 'Content-Type': contentTypeFor(filePath) });
+    const contentType = contentTypeFor(filePath);
+    // The baseline security headers ride on every response via the server's `setHeader` (issue #27).
+    // Add the SPA Content-Security-Policy on HTML documents *only* — it's meaningless (and needlessly
+    // restrictive) on JS/CSS/SVG assets, which just inherit the baseline set.
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      ...(contentType.startsWith('text/html') ? { 'Content-Security-Policy': CONTENT_SECURITY_POLICY } : {}),
+    });
     res.end(body);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT' || (err as NodeJS.ErrnoException).code === 'EISDIR') {

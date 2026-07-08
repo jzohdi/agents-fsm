@@ -29,7 +29,47 @@ describe('resolveStaticPath', () => {
   it('decodes percent-encoded paths before resolving', () => {
     expect(resolveStaticPath(PUBLIC, '/a%2Fb.js')).toBe(`${PUBLIC}${sep}a${sep}b.js`);
   });
+
+  // Remote-exposure hardening (issue #27): re-verify the traversal guard against the trickier vectors
+  // an off-localhost attacker would try. The security invariant is that no input EVER resolves outside
+  // `publicDir` — the guard returns either `null` (rejected) or a path strictly within the base dir.
+  describe('never escapes the public dir under remote-exposure edge cases (issue #27)', () => {
+    /** The true security property: rejected (null) or confined to `PUBLIC` — never a sibling/parent. */
+    const staysInBase = (pathname: string): void => {
+      const got = resolveStaticPath(PUBLIC, pathname);
+      if (got !== null) {
+        expect(got === PUBLIC || got.startsWith(`${PUBLIC}${sep}`)).toBe(true);
+      }
+    };
+
+    it('confines backslash separators, NUL bytes, and double-encoded traversal to the base', () => {
+      staysInBase('/..\\..\\etc\\passwd'); // backslash is not a POSIX separator — must not escape
+      staysInBase('/foo%00.js'); // embedded NUL byte
+      staysInBase('/%252e%252e/%252e%252e/etc/passwd'); // doubly-encoded `../../`
+      staysInBase('/..%2f..%2f..%2fetc%2fpasswd'); // encoded slashes around `..`
+    });
+
+    it('rejects (or confines) absolute-path smuggling and encoded traversal', () => {
+      // A leading slash / encoded leading slashes must not smuggle in an absolute path.
+      staysInBase('/etc/passwd');
+      staysInBase('//etc/passwd');
+      staysInBase('/%2Fetc%2Fpasswd');
+      // Classic dot-dot traversal (encoded) must be rejected outright.
+      expect(resolveStaticPath(PUBLIC, '/%2e%2e/%2e%2e/etc/passwd')).toBeNull();
+    });
+
+    it('refuses a sibling directory that merely shares the public-dir prefix', () => {
+      // `…/public` must not grant access to `…/public-evil` or `…/publicXYZ`.
+      expect(resolveStaticPath(PUBLIC, '/../public-evil/secret')).toBeNull();
+      expect(resolveStaticPath(PUBLIC, `/../${basenamePlus()}`)).toBeNull();
+    });
+  });
 });
+
+/** The public dir's own leaf name with a suffix, to probe the sibling-prefix escape (`publicXYZ`). */
+function basenamePlus(): string {
+  return `${PUBLIC.split(sep).pop()}XYZ`;
+}
 
 describe('isSpaRoute', () => {
   it('treats extension-less paths as client routes and extensioned paths as assets', () => {

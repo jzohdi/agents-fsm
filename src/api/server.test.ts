@@ -19,6 +19,7 @@ import { AgentRunner } from '../agent/runner';
 import { StubExecutor, goldenPathHandler, type StubHandler } from '../agent/executor';
 import { catalogForHarness } from '../agent/harness-models';
 import { FakeGitHub } from '../integration/github-fake';
+import type { SuggestionSource } from '../integration/github-account';
 import { singleRepoResolver } from '../integration/github-resolver';
 import { Orchestrator } from './orchestrator';
 import { Broadcaster } from './stream';
@@ -30,7 +31,25 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((s) => new Promise<void>((r) => s.close(() => r()))));
 });
 
-async function start(opts: { publicDir?: string; handler?: StubHandler; apiToken?: string; tls?: { cert: string; key: string } } = {}): Promise<{ base: string; orchestrator: Orchestrator; repo: Repository; github: FakeGitHub }> {
+interface StartOpts {
+  publicDir?: string;
+  handler?: StubHandler;
+  apiToken?: string;
+  tls?: { cert: string; key: string };
+  // --- remote-access hardening (issue #27) ---
+  /** Token-bucket config threaded into `createApiServer` (mutating/expensive routes). */
+  rateLimit?: { capacity: number; refillPerSec: number };
+  /** Max request-body bytes before a `413`. */
+  maxBodyBytes?: number;
+  /** Exact-match CORS allow-list (empty/omitted ⇒ deny all cross-origin). */
+  allowedOrigins?: string[];
+  /** Injected clock (epoch ms) so the rate limiter is deterministic in tests. */
+  now?: () => number;
+  /** Override the autocomplete suggestion source — used to force a non-`ApiError` internal throw. */
+  suggestionSource?: SuggestionSource;
+}
+
+async function start(opts: StartOpts = {}): Promise<{ base: string; orchestrator: Orchestrator; repo: Repository; github: FakeGitHub }> {
   const loaded = loadDefaultConfig();
   const repo = new Repository(openDb(':memory:'));
   const github = new FakeGitHub({ autoSeedIssues: true });
@@ -44,7 +63,7 @@ async function start(opts: { publicDir?: string; handler?: StubHandler; apiToken
     runner,
     config: loaded,
     broadcaster,
-    suggestionSource: { suggest: (q: string) => github.suggestIssues(q) },
+    suggestionSource: opts.suggestionSource ?? { suggest: (q: string) => github.suggestIssues(q) },
     resolver,
     defaultWorkingRoot: './w',
     catalogFor: catalogForHarness,
@@ -58,6 +77,10 @@ async function start(opts: { publicDir?: string; handler?: StubHandler; apiToken
     ...(opts.publicDir ? { publicDir: opts.publicDir } : {}),
     ...(opts.apiToken ? { apiToken: opts.apiToken } : {}),
     ...(opts.tls ? { tls: opts.tls } : {}),
+    ...(opts.rateLimit ? { rateLimit: opts.rateLimit } : {}),
+    ...(opts.maxBodyBytes !== undefined ? { maxBodyBytes: opts.maxBodyBytes } : {}),
+    ...(opts.allowedOrigins ? { allowedOrigins: opts.allowedOrigins } : {}),
+    ...(opts.now ? { now: opts.now } : {}),
   });
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -920,5 +943,194 @@ describe('resolution advisor route + per-resume extraRounds validation (Layer 3)
     await orchestrator.settle();
     const resumeT = repo.listTransitions(run.id).find((t) => t.trigger === 'resume')!;
     expect(resumeT.reason).toEqual({ kind: 'operator_resume', notes: 'more room', extraRounds: 3 });
+  });
+});
+
+describe('HTTP API — remote-access hardening (issue #27)', () => {
+  /** Assert the baseline security headers ride on any response (JSON, static, SSE, error). */
+  const assertBaseline = (res: Response): void => {
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(res.headers.get('x-frame-options')).toBe('DENY');
+    expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+    // No HSTS from the app — TLS termination is the tunnel/proxy's job (documented in the threat model).
+    expect(res.headers.get('strict-transport-security')).toBeNull();
+  };
+
+  it('throttles mutating routes past the limit with 429 + Retry-After, never throttling GET / health', async () => {
+    // A tiny bucket + a frozen clock (no refill) makes the throttle deterministic. The mutating route
+    // 404s on an unknown run — the point is the first `capacity` calls are admitted and the next is not.
+    const NOW = 5_000_000;
+    const { base } = await start({ rateLimit: { capacity: 2, refillPerSec: 1 }, now: () => NOW });
+    const hit = (): Promise<Response> => fetch(`${base}/runs/999999/pause`, { method: 'POST' });
+
+    expect((await hit()).status).toBe(404); // token 1 consumed — admitted
+    expect((await hit()).status).toBe(404); // token 2 consumed — admitted
+    const limited = await hit(); // bucket empty at the same instant → throttled
+    expect(limited.status).toBe(429);
+    expect(((await limited.json()) as { error: string }).error).toBe('rate limit exceeded');
+    expect(Number(limited.headers.get('retry-after'))).toBeGreaterThanOrEqual(1);
+
+    // Cheap GETs and the liveness probe are never throttled, even after the mutating bucket is drained.
+    for (let i = 0; i < 5; i++) {
+      expect((await fetch(`${base}/health`)).status).toBe(200);
+      expect((await fetch(`${base}/runs`)).status).toBe(200);
+    }
+  });
+
+  it('rejects an oversized request body with 413 (and still accepts a normal small body)', async () => {
+    const { base } = await start({ maxBodyBytes: 512 });
+
+    // A body past the cap is refused inside `readJson` (during the read, before the body is validated)
+    // — a generic, non-leaking 413. Uses the route's real (PUT) method so the body-reading handler runs;
+    // the missing-`harness` field never matters because the cap trips first.
+    const big = await fetch(`${base}/settings/default-harness`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pad: 'x'.repeat(5000) }),
+    });
+    expect(big.status).toBe(413);
+    expect(((await big.json()) as { error: string }).error).toBe('request body too large');
+
+    // A normal, small, valid body is unaffected by the cap.
+    const ok = await fetch(`${base}/settings/default-harness`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ harness: 'cursor' }),
+    });
+    expect(ok.status).toBe(200);
+  });
+
+  it('sanitizes a non-ApiError internal failure to a generic 500 (no path / raw-message leak)', async () => {
+    // Force an unexpected throw deep in a route: the suggestion source raises a raw Error whose message
+    // embeds an internal filesystem path — exactly the kind of detail that must NOT reach a remote caller.
+    const INTERNAL = "ENOENT: no such file or directory, open '/Users/secret-operator/app/.env'";
+    const { base } = await start({ suggestionSource: { suggest() { throw new Error(INTERNAL); } } });
+
+    const res = await fetch(`${base}/suggestions?q=x`);
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error: string };
+    expect(body).toEqual({ error: 'internal server error' });
+    const raw = JSON.stringify(body);
+    expect(raw).not.toContain('/Users/secret-operator');
+    expect(raw).not.toContain('ENOENT');
+
+    // A deliberate ApiError still surfaces its client-facing message verbatim (the API contract).
+    const bad = await fetch(`${base}/runs`, { method: 'POST', body: '{}' });
+    expect(bad.status).toBe(400);
+    expect(((await bad.json()) as { error: string }).error).toMatch(/issueRef/);
+  });
+
+  it('carries the baseline security headers on every response — JSON, static asset, 404, and SSE', async () => {
+    const { base } = await start({ publicDir: fixturePublicDir() });
+
+    assertBaseline(await fetch(`${base}/health`)); // JSON
+    assertBaseline(await fetch(`${base}/app.js`)); // static asset
+    assertBaseline(await fetch(`${base}/missing-asset.js`)); // 404
+
+    const controller = new AbortController();
+    const sse = await fetch(`${base}/stream`, { signal: controller.signal });
+    expect(sse.headers.get('content-type')).toBe('text/event-stream'); // unchanged SSE content-type
+    assertBaseline(sse);
+    controller.abort();
+  });
+
+  it('adds the CSP to HTML documents only (not JSON or SSE)', async () => {
+    const { base } = await start({ publicDir: fixturePublicDir() });
+
+    // The SPA shell (index.html) carries a locked-down CSP.
+    const html = await fetch(`${base}/`);
+    expect(html.headers.get('content-type')).toContain('text/html');
+    const csp = html.headers.get('content-security-policy');
+    expect(csp).toContain("default-src 'self'");
+    expect(csp).toContain("frame-ancestors 'none'");
+
+    // JSON responses do NOT get a CSP (it only makes sense for an HTML document).
+    expect((await fetch(`${base}/health`)).headers.get('content-security-policy')).toBeNull();
+
+    // Neither does the SSE stream.
+    const controller = new AbortController();
+    const sse = await fetch(`${base}/stream`, { signal: controller.signal });
+    expect(sse.headers.get('content-security-policy')).toBeNull();
+    controller.abort();
+  });
+
+  it('denies cross-origin by default: an OPTIONS preflight gets a locked-down 204 with no wildcard ACAO', async () => {
+    const { base } = await start(); // no allow-list ⇒ deny all cross-origin
+
+    const pre = await fetch(`${base}/runs`, {
+      method: 'OPTIONS',
+      headers: { Origin: 'https://evil.example', 'Access-Control-Request-Method': 'POST' },
+    });
+    expect(pre.status).toBe(204); // preflight is answered, not fallen through to the SPA/404
+    expect(pre.headers.get('access-control-allow-origin')).not.toBe('*');
+    expect(pre.headers.get('access-control-allow-origin')).toBeNull(); // disallowed → no ACAO at all
+
+    // A simple cross-origin GET from a disallowed origin still runs, but hands back no ACAO, so the
+    // browser blocks the response read (the default same-origin-only posture).
+    const simple = await fetch(`${base}/health`, { headers: { Origin: 'https://evil.example' } });
+    expect(simple.status).toBe(200);
+    expect(simple.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
+  it('echoes an explicitly allow-listed origin on the preflight (never a wildcard)', async () => {
+    const { base } = await start({ allowedOrigins: ['https://ops.example'] });
+
+    const pre = await fetch(`${base}/runs`, {
+      method: 'OPTIONS',
+      headers: { Origin: 'https://ops.example', 'Access-Control-Request-Method': 'POST' },
+    });
+    expect(pre.status).toBe(204);
+    expect(pre.headers.get('access-control-allow-origin')).toBe('https://ops.example');
+    expect(pre.headers.get('vary')).toContain('Origin');
+
+    // An origin NOT on the list is still denied even when a list is configured.
+    const denied = await fetch(`${base}/runs`, {
+      method: 'OPTIONS',
+      headers: { Origin: 'https://other.example', 'Access-Control-Request-Method': 'POST' },
+    });
+    expect(denied.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
+  it('never leaks configured secrets in GET /config or an SSE frame (pins the non-gap)', async () => {
+    const SECRET_GH = 'ghp_SENTINEL_do_not_leak_1234567890';
+    const SECRET_ANTHROPIC = 'sk-ant-SENTINEL-do-not-leak';
+    const prevGh = process.env.GITHUB_TOKEN;
+    const prevAnth = process.env.ANTHROPIC_API_KEY;
+    process.env.GITHUB_TOKEN = SECRET_GH;
+    process.env.ANTHROPIC_API_KEY = SECRET_ANTHROPIC;
+    try {
+      const { base, orchestrator } = await start();
+      const controller = new AbortController();
+      const sse = await fetch(`${base}/stream`, { signal: controller.signal });
+      const reader = sse.body!.getReader();
+
+      const cfgText = await (await fetch(`${base}/config`)).text();
+      expect(cfgText).not.toContain(SECRET_GH);
+      expect(cfgText).not.toContain(SECRET_ANTHROPIC);
+
+      // Drive a transition so at least one SSE frame is emitted, then confirm no secret rode along.
+      await fetch(`${base}/runs`, { method: 'POST', body: JSON.stringify({ issueRef: 'o/r#1' }) });
+      await orchestrator.settle();
+      const frames = await readUntil(reader, (acc) => acc.includes('event: transition'));
+      expect(frames).not.toContain(SECRET_GH);
+      expect(frames).not.toContain(SECRET_ANTHROPIC);
+
+      await reader.cancel();
+      controller.abort();
+    } finally {
+      if (prevGh === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = prevGh;
+      if (prevAnth === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = prevAnth;
+    }
+  });
+
+  it('never puts the API token in an error body (auth-on) — pins the non-gap', async () => {
+    const TOKEN = 'super-secret-fleet-token-xyz';
+    const { base } = await start({ apiToken: TOKEN });
+
+    const denied = await fetch(`${base}/runs`, { headers: { Authorization: 'Bearer wrong' } });
+    expect(denied.status).toBe(401);
+    expect(await denied.text()).not.toContain(TOKEN);
   });
 });
