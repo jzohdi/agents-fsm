@@ -19,14 +19,18 @@ export type BindVerdict = { ok: true } | { ok: false; reason: string };
  * True iff `s` is a dotted-quad IPv4 whose first octet is `127` (the whole `127.0.0.0/8` loopback
  * block). Parsed **numerically**: exactly four octets, each a run of digits in `0..255` with no
  * surprises, so near-misses a loose `startsWith('127.')` would wave through — `127.foo`,
- * `1270.0.0.1`, `127.0.0.1.5`, `127.0.0.256` — all return `false`.
+ * `1270.0.0.1`, `127.0.0.1.5`, `127.0.0.256` — all return `false`. Leading-zero octets
+ * (`0127.0.0.1`, `127.0.0.01`) are rejected too: resolvers with `inet_aton` semantics parse them as
+ * **octal** (`0127` ⇒ 87), so the OS could bind a different address than the one this decimal parse
+ * classified — that ambiguity must resolve to non-loopback (the fail-safe invariant).
  */
 function isLoopbackIpv4(s: string): boolean {
   const parts = s.split('.');
   if (parts.length !== 4) return false;
   for (const part of parts) {
-    // Digits only (rejects `foo`, empty, signs, whitespace); `Number` gives the value for the range check.
-    if (!/^\d+$/.test(part)) return false;
+    // Decimal digits with no leading zero (rejects `foo`, empty, signs, whitespace, and the
+    // octal-ambiguous `01` forms); `Number` gives the value for the range check.
+    if (!/^(0|[1-9]\d*)$/.test(part)) return false;
     const n = Number(part);
     if (n > 255) return false;
   }
@@ -83,6 +87,6 @@ export function checkBindAllowed(host: string, hasToken: boolean): BindVerdict {
     reason:
       `refusing to bind to a non-loopback host (${host}) without an API token — set FLEET_API_TOKEN ` +
       `(or --api-token) before exposing the daemon off localhost, or bind 127.0.0.1 (the default). ` +
-      `See README §9 "Remote access (off-localhost)".`,
+      `See README §9.11 "Remote access (reach the dashboard off-localhost)".`,
   };
 }

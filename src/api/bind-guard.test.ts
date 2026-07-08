@@ -57,6 +57,11 @@ describe('isLoopbackHost (bind-address classification)', () => {
     expect(isLoopbackHost('1270.0.0.1')).toBe(false);
     expect(isLoopbackHost('127.0.0.1.5')).toBe(false);
     expect(isLoopbackHost('127.0.0.256')).toBe(false); // octet out of range
+    // Leading-zero octets are octal to `inet_aton`-style resolvers (`0127` ⇒ 87 — the OS could bind
+    // 87.0.0.1 while a decimal parse read 127.0.0.1), so the ambiguity must fail safe → non-loopback.
+    expect(isLoopbackHost('0127.0.0.1')).toBe(false);
+    expect(isLoopbackHost('127.0.0.01')).toBe(false);
+    expect(isLoopbackHost('::ffff:0127.0.0.1')).toBe(false); // same rule for the mapped tail
     // Empty / bogus input must not be classified loopback (would expose the daemon).
     expect(isLoopbackHost('')).toBe(false);
     expect(isLoopbackHost('   ')).toBe(false);

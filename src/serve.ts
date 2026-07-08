@@ -21,15 +21,10 @@ import { buildOrchestrator, resolveApiToken, resolveHost } from './build-runner'
 import type { CliArgs } from './cli-args';
 
 export async function serve(args: CliArgs): Promise<void> {
-  // The daemon no longer needs to be pinned to a repo at startup. It boots with whatever repos are
-  // already enrolled (none, on a fresh DB); you add repos from the dashboard, and filing a run on a new
-  // repo auto-enrolls it (Orchestrator.start). `--repo` still works as a convenience: it bootstrap-
-  // enrolls that one repo. The autocomplete is user-scoped (the logged-in `gh` account), not repo-bound.
-  const { orchestrator, resolver, broadcaster } = buildOrchestrator(args);
-  // Mirror each run's FSM state onto its PR as an `af:<state>` label (README §3.5 — a derived view,
-  // best-effort by contract; a failure logs and the next transition retries naturally).
-  broadcaster.subscribe(stateLabelMirror(resolver));
-  orchestrator.recover(); // reclaim crash-stranded events and resume any queued work on startup
+  // --- boot-config validation, BEFORE any side effect. `recover()` below kicks a background drain
+  // that dispatches queued stages (real harness children); a config refusal after that would leave
+  // work running headless — no API bound, no shutdown handlers — until it settles. So resolve and
+  // validate everything refusable first, then boot the orchestrator. ---
 
   // API auth (issue #25): a resolved token gates every route except /health + static (see `requiresAuth`).
   // Absent ⇒ auth off, the localhost-only default (byte-for-byte unchanged). Pass `{}` when unset so the
@@ -47,6 +42,16 @@ export async function serve(args: CliArgs): Promise<void> {
   // Direct TLS termination (issue #26): `--tls-cert` / `--tls-key`, both-or-neither. Read the PEM files
   // here (the server stays free of filesystem concerns) and pass the resolved contents through.
   const tls = resolveTls(args);
+
+  // The daemon no longer needs to be pinned to a repo at startup. It boots with whatever repos are
+  // already enrolled (none, on a fresh DB); you add repos from the dashboard, and filing a run on a new
+  // repo auto-enrolls it (Orchestrator.start). `--repo` still works as a convenience: it bootstrap-
+  // enrolls that one repo. The autocomplete is user-scoped (the logged-in `gh` account), not repo-bound.
+  const { orchestrator, resolver, broadcaster } = buildOrchestrator(args);
+  // Mirror each run's FSM state onto its PR as an `af:<state>` label (README §3.5 — a derived view,
+  // best-effort by contract; a failure logs and the next transition retries naturally).
+  broadcaster.subscribe(stateLabelMirror(resolver));
+  orchestrator.recover(); // reclaim crash-stranded events and resume any queued work on startup
 
   const server = createApiServer(orchestrator, { ...(apiToken ? { apiToken } : {}), ...(tls ? { tls } : {}) });
   await listen(server, args.port, host);
