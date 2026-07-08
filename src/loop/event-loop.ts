@@ -222,7 +222,7 @@ export class EventLoop {
    * Part of the M5 control surface alongside {@link pauseRun} / {@link stopRun} / {@link revertRun}.
    * Returns the updated run; the caller (`Orchestrator`) kicks the drain pump.
    */
-  resumeRun(runId: number, options: { notes?: string } = {}): Run {
+  resumeRun(runId: number, options: { notes?: string; extraRounds?: number } = {}): Run {
     const run = this.repo.getRun(runId);
     if (!run) throw new Error(`resumeRun: run ${runId} not found`);
     if (run.status !== 'needs_human') throw new Error(`resumeRun: run ${runId} is "${run.status}", not needs_human`);
@@ -231,6 +231,12 @@ export class EventLoop {
     if (!escalation) throw new Error(`resumeRun: run ${runId} has no escalation transition to resume from`);
     const target = escalation.fromState;
     const notes = options.notes?.trim();
+    // Optional per-resume review-cap bump (Layer 3): rides on this resume transition's reason and is
+    // read back by the runner as an effective-cap override for the resumed visit only.
+    const extraRounds = options.extraRounds;
+    // A notes-less resume used to record no reason; a resume carrying just extraRounds still needs one,
+    // so the reason is recorded whenever either is present (never an empty {kind} object).
+    const reason = notes || extraRounds ? { kind: 'operator_resume', ...(notes ? { notes } : {}), ...(extraRounds ? { extraRounds } : {}) } : undefined;
 
     const transition = this.repo.transaction(() => {
       const t = this.repo.commitTransition({
@@ -238,7 +244,7 @@ export class EventLoop {
         fromState: this.fsm.escalationState,
         toState: target,
         trigger: RESUME_TRIGGER,
-        ...(notes ? { reason: { kind: 'operator_resume', notes } } : {}),
+        ...(reason ? { reason } : {}),
         isReset: true, // reset round counters → a fresh budget of rounds for the resumed loop
         status: 'running',
         eventId: null, // a manual operator transition, not driven by an event

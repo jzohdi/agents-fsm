@@ -778,3 +778,62 @@ describe('HTTP API — run chat', () => {
     expect((await fetch(`${base}/runs/${run.id}/chat`, { method: 'PUT' })).status).toBe(405);
   });
 });
+
+describe('resolution advisor route + per-resume extraRounds validation (Layer 3)', () => {
+  const advice = { summary: 'stuck', options: [{ label: 'Retry', rationale: 'transient', action: 'resume', suggestedNotes: 'retry' }] };
+
+  /** Fail plan produce once (→ needs_human), answer the advise pseudo-stage with canned advice. */
+  function stuckHandler(): StubHandler {
+    let failed = false;
+    return (req) => {
+      if (req.stage === 'advise') return { output: advice, tokens: 4 };
+      if (req.stage === 'plan' && req.phase === 'produce' && !failed) {
+        failed = true;
+        throw new Error('transient harness failure');
+      }
+      return goldenPathHandler(req);
+    };
+  }
+
+  it('routes POST /runs/:id/advise to the advisor (200 + shape) for a needs_human run, 404 unknown', async () => {
+    const { base, orchestrator, repo } = await start({ handler: stuckHandler() });
+    const run = (await (await fetch(`${base}/runs`, { method: 'POST', body: JSON.stringify({ issueRef: 'o/r#1' }) })).json()) as { id: number };
+    await orchestrator.settle();
+    expect(repo.getRun(run.id)!.status).toBe('needs_human');
+
+    const res = await fetch(`${base}/runs/${run.id}/advise`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { runId: number; summary: string; options: unknown[] };
+    expect(body).toMatchObject({ runId: run.id, summary: 'stuck' });
+    expect(body.options).toHaveLength(1);
+
+    expect((await fetch(`${base}/runs/99999/advise`, { method: 'POST' })).status).toBe(404);
+  });
+
+  it('409s an advise request on a run that is not needs_human', async () => {
+    const { base, orchestrator, repo } = await start();
+    const run = (await (await fetch(`${base}/runs`, { method: 'POST', body: JSON.stringify({ issueRef: 'o/r#1' }) })).json()) as { id: number };
+    await orchestrator.settle();
+    expect(repo.getRun(run.id)!.status).toBe('done');
+
+    expect((await fetch(`${base}/runs/${run.id}/advise`, { method: 'POST' })).status).toBe(409);
+  });
+
+  it('validates extraRounds on POST /runs/:id/resume (integer 1..10) and records a valid one', async () => {
+    const { base, orchestrator, repo } = await start({ handler: stuckHandler() });
+    const run = (await (await fetch(`${base}/runs`, { method: 'POST', body: JSON.stringify({ issueRef: 'o/r#1' }) })).json()) as { id: number };
+    await orchestrator.settle();
+    expect(repo.getRun(run.id)!.status).toBe('needs_human');
+
+    for (const bad of [0, -1, 1.5, 11, 'two']) {
+      const r = await fetch(`${base}/runs/${run.id}/resume`, { method: 'POST', body: JSON.stringify({ extraRounds: bad }) });
+      expect(r.status).toBe(400);
+    }
+
+    const ok = await fetch(`${base}/runs/${run.id}/resume`, { method: 'POST', body: JSON.stringify({ notes: 'more room', extraRounds: 3 }) });
+    expect(ok.status).toBe(200);
+    await orchestrator.settle();
+    const resumeT = repo.listTransitions(run.id).find((t) => t.trigger === 'resume')!;
+    expect(resumeT.reason).toEqual({ kind: 'operator_resume', notes: 'more room', extraRounds: 3 });
+  });
+});

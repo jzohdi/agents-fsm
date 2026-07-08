@@ -183,6 +183,25 @@ export const MIGRATIONS: Migration[] = [
          CREATE INDEX IF NOT EXISTS idx_run_chat_run ON run_chat(run_id, id);`,
       ),
   },
+  {
+    version: 14,
+    name: 'create run_advice',
+    // Persisted escalation-resolution advice (Layer 3). Mirrors schema.sql; `CREATE TABLE IF NOT
+    // EXISTS` makes this a no-op on a fresh DB the baseline already provisioned and a retrofit on a
+    // pre-existing one.
+    apply: (db) =>
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS run_advice (
+           id         INTEGER PRIMARY KEY AUTOINCREMENT,
+           run_id     INTEGER NOT NULL REFERENCES runs(id),
+           summary    TEXT    NOT NULL,
+           options    TEXT    NOT NULL,
+           tokens     INTEGER NOT NULL DEFAULT 0,
+           created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         );
+         CREATE INDEX IF NOT EXISTS idx_run_advice_run ON run_advice(run_id, id);`,
+      ),
+  },
 ];
 
 // Guard the invariants the runner relies on: versions a gap-free, strictly increasing 1..N sequence

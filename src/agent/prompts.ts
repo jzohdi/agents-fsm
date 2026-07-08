@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 
 import { RESOLVE_CONFLICTS_STATE } from '../loop/event-loop';
-import { CHAT_STAGE, type SystemPromptFn } from './runner';
+import { ADVISE_STAGE, CHAT_STAGE, type SystemPromptFn } from './runner';
 
 /** The bundled prompts directory (resolved next to this module, so it works under tsx and vitest). */
 const DEFAULT_PROMPTS_DIR = fileURLToPath(new URL('./prompts/', import.meta.url));
@@ -52,6 +52,7 @@ export function createSystemPromptFn(options: SystemPromptOptions = {}): SystemP
   const simplify = read(dir, join('phases', 'simplify.md'));
   const resolveConflicts = read(dir, join('phases', 'resolve_conflicts.md'));
   const chat = read(dir, join('phases', 'chat.md'));
+  const advise = read(dir, join('phases', 'advise.md'));
   const stages = loadStages(join(dir, 'stages'));
 
   return (stage, phase) => {
@@ -63,6 +64,10 @@ export function createSystemPromptFn(options: SystemPromptOptions = {}): SystemP
     // own section carries the chat output contract ({ "response": … }), which overrides base's
     // envelope instruction — so no shared contract file is appended.
     if (stage === CHAT_STAGE) return [base, chat].join(SECTION_SEPARATOR);
+    // The escalation-resolution advisor (Layer 3) is likewise not an FSM stage: a read-only,
+    // operator-initiated pass over a needs_human run. Its section carries its own output contract
+    // ({ "summary", "options" }), which overrides base's envelope instruction — no shared contract file.
+    if (stage === ADVISE_STAGE) return [base, advise].join(SECTION_SEPARATOR);
     const role = stages.get(stage);
     if (role === undefined) {
       throw new Error(`No stage prompt for "${stage}" (expected ${join(dir, 'stages', `${stage}.md`)})`);

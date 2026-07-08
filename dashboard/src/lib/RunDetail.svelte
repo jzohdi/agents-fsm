@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { ui, control, revertRun, resolveConflicts, overrideCost, setModel, setEffort, setHarness, loadCatalog, checkPrFeedback, checkReply } from './store.svelte';
+  import { ui, control, revertRun, resolveConflicts, overrideCost, setModel, setEffort, setHarness, loadCatalog, checkPrFeedback, checkReply, requestAdvice } from './store.svelte';
   import ModelPicker from './ModelPicker.svelte';
   import EffortSelect from './EffortSelect.svelte';
-  import { telemetryModel, escalationModel, activityLane, costStatusModel, issueUrl, prUrl, branchUrl, isWatchingPrFeedback, fmtRunCost, fmtDuration, fmtTokens, escapeHtml, humanizeState, humanizeHarness, schedulingLabel } from './render';
+  import { telemetryModel, escalationModel, activityLane, costStatusModel, issueUrl, prUrl, branchUrl, isWatchingPrFeedback, fmtRunCost, fmtDuration, fmtTokens, escapeHtml, humanizeState, humanizeHarness, schedulingLabel, adviceCards, type AdviceCard } from './render';
   import StateMachine from './StateMachine.svelte';
   import ScrollArea from './ScrollArea.svelte';
   import RunChat from './RunChat.svelte';
@@ -59,12 +59,34 @@
   // Operator guidance typed into the escalation panel; sent with resume and delivered to the
   // retried stage as its `reentry.operatorNotes` (so a guided resume changes the retry's behavior).
   let guidance = $state('');
+  // Per-visit review-cap bump for an `internal_review_cap` escalation — sent alongside the resume
+  // notes when the loop was converging and just needs more budget (blank = none). Cleared per run.
+  let extraRounds = $state('');
+
+  // The escalation-resolution advisor (Layer 3): the last advice for this run and its option cards.
+  // Selecting a card pre-fills the guidance box (resume) or the revert form (revert) below — the
+  // free-text box stays the implicit "Other" path.
+  const adviceModel = $derived(detail?.advice);
+  const cards = $derived(adviceCards(adviceModel));
+  // Only an `internal_review_cap` escalation gets the extra-rounds budget knob.
+  const showExtraRounds = $derived(escalation?.trigger === 'internal_review_cap');
+
+  function selectCard(card: AdviceCard) {
+    if (card.action === 'revert') {
+      if (card.toState) revertTo = card.toState;
+      revertReason = card.suggestedNotes;
+      revertOpen = true;
+    } else {
+      guidance = card.suggestedNotes;
+    }
+  }
   $effect(() => {
     if (revertable.length && !revertable.includes(revertTo)) revertTo = revertable[0]!;
   });
   $effect(() => {
     void run?.id;
     revertOpen = false;
+    extraRounds = '';
   });
 
   // Split the one activity stream into two non-redundant feeds: the agent's actions (tool calls) go to
@@ -104,8 +126,10 @@
 
   async function submitGuidedResume(e: SubmitEvent) {
     e.preventDefault();
-    await control('resume', guidance);
+    const bump = showExtraRounds && extraRounds.trim() ? Number(extraRounds) : undefined;
+    await control('resume', guidance, Number.isFinite(bump) ? bump : undefined);
     guidance = '';
+    extraRounds = '';
   }
 </script>
 
@@ -282,6 +306,36 @@
           <pre class="af-esc-reason">{reasonText(escalation.reason)}</pre>
         {/if}
       {/if}
+
+      <!-- Layer 3: on-demand resolution advisor. A read-only agent reads the run's artifacts + this
+           escalation and proposes 1–3 pick-and-go options. On-demand only (a button) so idle
+           escalations stay free; the free-text box below stays the implicit "Other" path. -->
+      <div class="af-adv">
+        <div class="af-adv-bar">
+          <button type="button" class="af-ghostact" onclick={() => requestAdvice()} disabled={ui.advising}>
+            {ui.advising ? 'Thinking…' : cards.length ? 'Suggest resolutions again' : 'Suggest resolutions'}
+          </button>
+          <span class="af-adv-hint">Reads the run's artifacts and proposes fixes — nothing runs until you pick one.</span>
+        </div>
+        {#if adviceModel}
+          <p class="af-adv-summary">{adviceModel.summary}</p>
+          {#if cards.length}
+            <div class="af-adv-cards">
+              {#each cards as card, i (i)}
+                <button type="button" class="af-adv-card" class:rec={card.recommended} onclick={() => selectCard(card)}>
+                  <span class="af-adv-badges">
+                    <span class="af-adv-act af-adv-{card.action}">{card.action === 'revert' && card.toStateLabel ? `revert → ${card.toStateLabel}` : card.action}</span>
+                    {#if card.recommended}<span class="af-adv-rec">recommended</span>{/if}
+                  </span>
+                  <span class="af-adv-label">{card.label}</span>
+                  <span class="af-adv-rationale">{card.rationale}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+        {/if}
+      </div>
+
       <form class="af-esc-resolve" onsubmit={submitGuidedResume}>
         <textarea
           bind:value={guidance}
@@ -289,6 +343,21 @@
           placeholder="Guidance for the retry — what should the stage do differently? (optional; delivered to the agent)"
           aria-label="resume guidance"
         ></textarea>
+        {#if showExtraRounds}
+          <!-- The loop hit its review cap; if it was converging, give this visit more rounds. -->
+          <label class="af-esc-extra">
+            <span>extra review rounds</span>
+            <input
+              type="number"
+              min="1"
+              max="10"
+              step="1"
+              bind:value={extraRounds}
+              placeholder="0"
+              aria-label="extra review rounds"
+            />
+          </label>
+        {/if}
         <button type="submit">{guidance.trim() ? 'Resume with guidance' : 'Resume'}</button>
       </form>
     </div>

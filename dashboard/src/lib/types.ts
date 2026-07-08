@@ -123,6 +123,31 @@ export interface ChatExchange {
   finishedAt: string | null;
 }
 
+/** One suggested resolution the escalation-resolution advisor (Layer 3) proposes for a stuck run. */
+export interface AdviceOption {
+  /** Short imperative label for the card, e.g. "Accept the reviewer's findings and retry". */
+  label: string;
+  /** Why this option resolves the escalation — one or two sentences. */
+  rationale: string;
+  /** The control action this card maps to: `resume` retries the escalated-from state; `revert`
+   *  sends the run back to an earlier state. */
+  action: 'resume' | 'revert';
+  /** For `revert`, the target state to revert to. Omitted for `resume`. */
+  toState?: string;
+  /** Operator guidance pre-filled into the guidance box when this card is selected. */
+  suggestedNotes?: string;
+}
+
+/** A persisted advisor result for a run (`POST /runs/:id/advise`). */
+export interface Advice {
+  id: number;
+  runId: number;
+  summary: string;
+  options: AdviceOption[];
+  tokens: number;
+  createdAt: string;
+}
+
 export interface RunDetail {
   run: Run;
   transitions: Transition[];
@@ -131,6 +156,8 @@ export interface RunDetail {
   logs: LogRecord[];
   /** The run's chat thread, oldest first. Absent on an older daemon without the chat routes. */
   chat?: ChatExchange[];
+  /** The latest escalation-resolution advice for this run, or undefined if none requested yet. */
+  advice?: Advice;
 }
 
 export interface TransitionDef {

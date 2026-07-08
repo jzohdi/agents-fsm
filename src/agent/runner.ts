@@ -19,6 +19,8 @@
 
 import { randomBytes } from 'node:crypto';
 
+import { z } from 'zod';
+
 import { recipeFor, type AgentsConfig, type StageIo } from '../fsm/config';
 import { ADDRESSING_PR_FEEDBACK_FLAG, MERGE_CONFLICT_TRIGGER, RESOLVE_CONFLICTS_STATE, RESUME_TRIGGER, REVERT_TRIGGER } from '../loop/event-loop';
 import type { BaseSync, GitHub, Issue, IssueComment, PullRequest } from '../integration/github';
@@ -102,6 +104,21 @@ export const CHAT_READ_TOOLS = ['Read', 'Grep', 'Glob', 'Bash(git diff:*)', 'Bas
  *  since a write chat only ever runs while the pipeline is parked (no stage to race). */
 export const CHAT_WRITE_TOOLS = ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash'];
 
+/**
+ * The pseudo-stage label an escalation-resolution advisor invocation runs under (the dashboard's
+ * "Suggest resolutions" button — Layer 3, see README §9.5). Like {@link CHAT_STAGE} it is NOT an FSM
+ * state — the advisor is an operator-initiated, read-only side operation the engine never sees — but
+ * it is the `agent_runs.stage` telemetry label and the prompt-composition key.
+ */
+export const ADVISE_STAGE = 'advise';
+
+/**
+ * Tools the advisor is granted: inspect-only, identical shape to {@link CHAT_READ_TOOLS} — the
+ * advisor reads the run's artifacts + tree + the escalation reason and proposes resolutions; it never
+ * mutates. (Cursor ignores allow-lists; the read-only rule is carried by the advise prompt there.)
+ */
+export const ADVISE_READ_TOOLS = ['Read', 'Grep', 'Glob', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)', 'Bash(git status:*)'];
+
 /** How many prior completed exchanges ride along as the chat's conversation context. */
 const CHAT_HISTORY_LIMIT = 10;
 
@@ -111,6 +128,28 @@ export interface ChatResult {
   response: string;
   tokens: number;
   commitSha?: string;
+}
+
+/** One suggested resolution the advisor proposes for a stuck (needs_human) run (Layer 3). */
+export interface AdviceOption {
+  /** Short imperative label for the card, e.g. "Accept the reviewer's findings and retry". */
+  label: string;
+  /** Why this option resolves the escalation — one or two sentences. */
+  rationale: string;
+  /** The control action this card maps to. `resume` retries the escalated-from state;
+   *  `revert` sends the run back to an earlier state. */
+  action: 'resume' | 'revert';
+  /** For `revert`, the target state to revert to. Omitted for `resume` (which always returns to the
+   *  escalated-from state, derived by the loop itself). */
+  toState?: string;
+  /** Operator guidance pre-filled into the guidance box when this card is selected. */
+  suggestedNotes?: string;
+}
+
+/** What one advisor invocation produced: a plain-English summary + 1–3 options (first = recommended). */
+export interface AdviceResult {
+  summary: string;
+  options: AdviceOption[];
 }
 
 /** Default base branch a run's working branch is cut from and diffed against. */
@@ -192,6 +231,28 @@ function operatorResumeNotes(reason: unknown): string | undefined {
   if (reason && typeof reason === 'object' && typeof (reason as { notes?: unknown }).notes === 'string') {
     return (reason as { notes: string }).notes;
   }
+  return undefined;
+}
+
+/**
+ * The per-visit review-cap bump an operator attached to the resume that re-entered this stage (0 when
+ * none). Parsed from the latest resume transition's `{ kind: 'operator_resume', extraRounds }` reason
+ * — so it applies only to the resumed re-run and expires once the run advances (Layer 3,
+ * `internal_review_cap` escalations). Pure and exported so the parse is unit-tested directly.
+ */
+export function operatorResumeExtraRounds(reason: unknown): number {
+  if (reason && typeof reason === 'object') {
+    const extra = (reason as { extraRounds?: unknown }).extraRounds;
+    if (typeof extra === 'number' && Number.isInteger(extra) && extra > 0) return extra;
+  }
+  return 0;
+}
+
+/** The reason of the latest transition that re-entered `currentState` via an operator resume (else
+ *  undefined) — the record a per-visit `extraRounds` bump rides on. */
+function latestResumeReason(transitions: readonly Transition[], currentState: string): unknown {
+  const last = transitions[transitions.length - 1];
+  if (last && last.toState === currentState && last.trigger === RESUME_TRIGGER) return last.reason;
   return undefined;
 }
 
@@ -757,6 +818,90 @@ export class AgentRunner {
   }
 
   /**
+   * One read-only advisor invocation over a `needs_human` run (Layer 3 — the dashboard's "Suggest
+   * resolutions" button). Reads the run's artifacts + the escalation trigger/reason and returns a
+   * plain-English summary + 1–3 resolution options. Modeled exactly on {@link runChat} (read mode):
+   * prepareTree, same model/effort override precedence, record telemetry via `recordAgentRun` (stage
+   * `advise`, phase `produce`), add usage via `addRunUsage` WITHOUT bumping `agentRuns` (operator-
+   * initiated work must not eat the pipeline budget — cost still counts toward the global ceiling).
+   * Read-only: leaves the tree untouched (no commit/push). Malformed output degrades to a graceful
+   * fallback (advisory, never load-bearing); an executor failure is recorded then rethrown.
+   */
+  async runAdvisor(run: Run): Promise<AdviceResult & { tokens: number }> {
+    const { baseBranch } = this.repoContext(run);
+    const prep = await this.prepareTree(run);
+
+    // The escalation this advisor is reasoning about: the latest transition into the run's current
+    // (escalation) state — located structurally, the same way resumeRun/escalationModel do, so no
+    // `src/fsm/` import is needed here.
+    const escalation = [...this.repo.listTransitions(run.id)].reverse().find((t) => t.toState === run.currentState);
+
+    // Same model/effort override precedence as any produce phase / chat — the advisor reasons about
+    // the run, so it runs on the run's picked model.
+    const model = phaseModel(DEFAULT_MODELS.produce, run.modelOverride);
+    const effort = run.effortOverride && DEFAULT_MODELS.produce === OVERRIDE_ROLE ? run.effortOverride : undefined;
+    const input = {
+      issueRef: run.issueRef,
+      repoRef: run.repoRef,
+      stage: ADVISE_STAGE,
+      phase: 'produce',
+      issue: prep.issue,
+      base: baseBranch,
+      artifacts: this.repo.listArtifacts(run.id),
+      run: { state: run.currentState, status: run.status },
+      escalation: { trigger: escalation?.trigger ?? null, reason: escalation?.reason ?? null },
+      ...(run.prNumber !== null ? { pullRequest: { number: run.prNumber, branch: prep.branch } } : {}),
+    };
+
+    const startedAt = Date.now();
+    let result: AgentRunResult;
+    try {
+      const executor = this.harnesses.for(run.harness);
+      result = await executor.run({
+        runId: run.id,
+        stage: ADVISE_STAGE,
+        phase: 'produce',
+        model,
+        ...(effort ? { effort } : {}),
+        system: this.systemPrompt(ADVISE_STAGE, 'produce'),
+        input,
+        onActivity: (activity) => this.handleActivity(run.id, ADVISE_STAGE, 'produce', activity),
+        allowedTools: ADVISE_READ_TOOLS,
+        workingDir: prep.workingDir,
+      });
+    } catch (err) {
+      // Same telemetry contract as invokePhase/runChat: record the failed invocation, then propagate.
+      this.repo.recordAgentRun({
+        runId: run.id,
+        stage: ADVISE_STAGE,
+        phase: 'produce',
+        model,
+        input,
+        output: { error: String(err) },
+        tokens: 0,
+        durationMs: Date.now() - startedAt,
+        success: false,
+      });
+      throw err;
+    }
+    this.repo.recordAgentRun({
+      runId: run.id,
+      stage: ADVISE_STAGE,
+      phase: 'produce',
+      model,
+      input,
+      output: result.output,
+      tokens: result.usage.tokens,
+      durationMs: Date.now() - startedAt,
+      success: true,
+    });
+    // No `agentRuns: 1` — operator-initiated advice must not eat the pipeline budget (like chat).
+    this.repo.addRunUsage(run.id, { tokens: result.usage.tokens, cost: result.usage.cost });
+
+    return { ...parseAdvice(result.output), tokens: result.usage.tokens };
+  }
+
+  /**
    * One conflict-resolver harness invocation over the working tree's in-progress merge. Telemetry is
    * recorded under the {@link RESOLVE_CONFLICTS_STATE} pseudo-stage (phase `produce` — the column's
    * CHECK set is closed; the stage label carries the meaning). The agent's *text output is ignored*:
@@ -834,11 +979,19 @@ export class AgentRunner {
     // Pure review stages (no self-review configured): hand off the produced envelope.
     if (!recipe.phases.includes('self_review')) return { kind: 'handoff', envelope };
 
+    // Per-resume review-budget override (Layer 3): an operator resuming an `internal_review_cap`
+    // escalation can attach `extraRounds` to give the loop more room *for this visit only*. It rides
+    // on the same latest resume transition the re-entry context reads, so it naturally expires once
+    // the run advances (a later escalation → a fresh resume without it → back to recipe.reviewCap).
+    const extraRounds = operatorResumeExtraRounds(latestResumeReason(this.repo.listTransitions(run.id), run.currentState));
+    const effectiveCap = recipe.reviewCap + extraRounds;
+
     let lastNotes: unknown;
-    for (let round = 0; round < recipe.reviewCap; round++) {
+    for (let round = 0; round < effectiveCap; round++) {
       // Round context: the reviewer verifies the previous round's findings were resolved (rather
-      // than re-reviewing cold), and both phases know how much round budget remains.
-      const reviewRound = { round: round + 1, cap: recipe.reviewCap, ...(round > 0 ? { previousNotes: lastNotes } : {}) };
+      // than re-reviewing cold), and both phases know how much round budget remains (the effective,
+      // possibly-bumped cap — so the reviewer/fixer see the real budget).
+      const reviewRound = { round: round + 1, cap: effectiveCap, ...(round > 0 ? { previousNotes: lastNotes } : {}) };
       const verdict = await this.invokeParsed(run, 'self_review', recipe, prep, { producedEnvelope: envelope, reviewRound }, parseReviewVerdict);
       if (!verdict.ok) return malformed('self_review', verdict.error, verdict.raw);
       if (verdict.value.acceptable) return { kind: 'handoff', envelope };
@@ -858,8 +1011,10 @@ export class AgentRunner {
       }
     }
 
-    // Cap hit while the review still reports blocking issues: escalate (README §2 guards).
-    return { kind: 'escalate', trigger: 'internal_review_cap', reason: { kind: 'internal_review_cap', cap: recipe.reviewCap, notes: lastNotes } };
+    // Cap hit while the review still reports blocking issues: escalate (README §2 guards). The reported
+    // cap is the effective one (recipe + any per-resume extraRounds), so a re-hit after a budget bump
+    // shows the real ceiling.
+    return { kind: 'escalate', trigger: 'internal_review_cap', reason: { kind: 'internal_review_cap', cap: effectiveCap, notes: lastNotes } };
   }
 
   /**
@@ -1131,6 +1286,47 @@ export function chatResponseText(output: unknown): string {
   }
   if (typeof output === 'string') return output.trim();
   return JSON.stringify(output, null, 2);
+}
+
+/** The advisor's structured contract: a summary + 1–3 options, each a resume/revert control action. */
+const adviceOptionSchema = z
+  .object({
+    label: z.string().min(1),
+    rationale: z.string().min(1),
+    action: z.enum(['resume', 'revert']),
+    toState: z.string().min(1).optional(),
+    suggestedNotes: z.string().optional(),
+  })
+  .strict();
+
+const adviceSchema = z
+  .object({
+    summary: z.string().min(1),
+    options: z.array(adviceOptionSchema).min(1).max(3),
+  })
+  .strict();
+
+/** A graceful fallback shown when the advisor's output can't be parsed — advisory, never load-bearing:
+ *  the escalation UX (and the free-text "Other" box) must never break on a malformed suggestion. */
+const ADVICE_FALLBACK_SUMMARY =
+  'The resolution advisor could not produce suggestions this time. Review the escalation details below and resume or revert the run manually, or try again.';
+
+/**
+ * Parse an advisor invocation's raw output into an {@link AdviceResult}. Accepts
+ * `{ summary, options: AdviceOption[] }` with 1–3 options. Unlike {@link parseEnvelope} it never
+ * signals failure to the caller: on malformed/empty output it returns a minimal
+ * `{ summary: <fallback>, options: [] }` so the panel always renders something and the operator can
+ * still resolve the escalation by hand. Pure and exported so the fallback is unit-tested directly.
+ */
+export function parseAdvice(raw: unknown): AdviceResult {
+  const r = adviceSchema.safeParse(raw);
+  if (r.success) return { summary: r.data.summary, options: r.data.options as AdviceOption[] };
+  // Preserve a usable summary when the model at least produced one, otherwise the fallback prose.
+  const summary =
+    raw && typeof raw === 'object' && typeof (raw as { summary?: unknown }).summary === 'string' && (raw as { summary: string }).summary.trim()
+      ? (raw as { summary: string }).summary.trim()
+      : ADVICE_FALLBACK_SUMMARY;
+  return { summary, options: [] };
 }
 
 /**

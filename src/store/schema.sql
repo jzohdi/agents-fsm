@@ -198,6 +198,20 @@ CREATE TABLE IF NOT EXISTS run_chat (
 );
 CREATE INDEX IF NOT EXISTS idx_run_chat_run ON run_chat(run_id, id);
 
+-- Persisted escalation-resolution advice (Layer 3 — the dashboard's "Suggest resolutions" button).
+-- One row per on-demand advisor invocation over a needs_human run; the latest is what the escalation
+-- panel shows, so a page reload keeps the last suggestions. Advice is *content* (unlike artifacts,
+-- which are references), so it lives in its own small table rather than the artifacts table.
+CREATE TABLE IF NOT EXISTS run_advice (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id     INTEGER NOT NULL REFERENCES runs(id),
+  summary    TEXT    NOT NULL,
+  options    TEXT    NOT NULL,                       -- JSON-encoded AdviceOption[]
+  tokens     INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_run_advice_run ON run_advice(run_id, id);
+
 -- A tiny key/value store for daemon-level settings that must survive restarts (multi-harness support).
 -- One row today: `default_harness` — the harness a new run gets when the request omits one, remembered
 -- across boots (the dashboard's harness selector writes it; `resolveDefaultHarness` reads it). Kept

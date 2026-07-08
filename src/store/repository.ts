@@ -8,6 +8,7 @@
  * them from the append-only `transitions` log, so there is a single source of truth.
  */
 
+import type { AdviceOption } from '../agent/runner';
 import type { Db } from './db';
 
 const NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
@@ -92,6 +93,17 @@ export interface ChatExchange {
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+}
+
+/** A persisted advisor result for a run (the escalation-resolution advisor, Layer 3). */
+export interface Advice {
+  id: number;
+  runId: number;
+  summary: string;
+  /** Parsed from the stored JSON — 1–3 resume/revert options, first = recommended. */
+  options: AdviceOption[];
+  tokens: number;
+  createdAt: string;
 }
 
 /**
@@ -333,6 +345,15 @@ interface ChatRow {
   finished_at: string | null;
 }
 
+interface AdviceRow {
+  id: number;
+  run_id: number;
+  summary: string;
+  options: string;
+  tokens: number;
+  created_at: string;
+}
+
 interface RepoRow {
   id: number;
   repo_ref: string;
@@ -429,6 +450,17 @@ function mapChat(r: ChatRow): ChatExchange {
     createdAt: r.created_at,
     startedAt: r.started_at,
     finishedAt: r.finished_at,
+  };
+}
+
+function mapAdvice(r: AdviceRow): Advice {
+  return {
+    id: r.id,
+    runId: r.run_id,
+    summary: r.summary,
+    options: JSON.parse(r.options) as AdviceOption[],
+    tokens: r.tokens,
+    createdAt: r.created_at,
   };
 }
 
@@ -1074,6 +1106,24 @@ export class Repository {
       .prepare(`UPDATE run_chat SET status = 'queued', started_at = NULL WHERE status = 'running'`)
       .run();
     return info.changes;
+  }
+
+  // --- run advice (the escalation-resolution advisor, Layer 3) -------------------
+
+  /** Insert one advisor result; returns the stored row (options round-tripped through JSON). */
+  insertAdvice(input: { runId: number; summary: string; options: AdviceOption[]; tokens: number }): Advice {
+    const info = this.db
+      .prepare(`INSERT INTO run_advice (run_id, summary, options, tokens) VALUES (?, ?, ?, ?)`)
+      .run(input.runId, input.summary, JSON.stringify(input.options), input.tokens);
+    const row = this.db.prepare('SELECT * FROM run_advice WHERE id = ?').get(Number(info.lastInsertRowid)) as AdviceRow;
+    return mapAdvice(row);
+  }
+
+  /** The most recent advisor result for a run, or undefined if none. Powers `getRunDetail.advice` so a
+   *  page reload keeps the last advice. */
+  getLatestAdvice(runId: number): Advice | undefined {
+    const row = this.db.prepare('SELECT * FROM run_advice WHERE run_id = ? ORDER BY id DESC LIMIT 1').get(runId) as AdviceRow | undefined;
+    return row ? mapAdvice(row) : undefined;
   }
 
   // --- agent runs --------------------------------------------------------------
