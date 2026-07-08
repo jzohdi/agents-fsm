@@ -808,6 +808,27 @@ rule, end to end). On the wire it is `POST /runs/:id/resume` with an optional `{
 body, recorded on the resume transition as `{ kind: "operator_resume", notes }` (audit trail and
 delivery are the same record).
 
+**Resolution advisor (pick-and-go, Layer 3).** Instead of writing guidance from scratch, click
+**Suggest resolutions** on the escalation panel. That runs an on-demand, **read-only advisor** agent
+(`POST /runs/:id/advise` → `Orchestrator.advise` → `AgentRunner.runAdvisor`, a pseudo-stage like
+run-chat — it never touches `src/fsm/`) over the run's artifacts + the escalation trigger/reason, and
+returns a plain-English `summary` plus **1–3 option cards** (first = recommended). Each card maps to a
+real control action — **resume** (retry the escalated-from stage) or **revert `<state>`** — and
+selecting it pre-fills the guidance box (and, for a revert, the target state) so resolving is
+pick-and-go; the free-text box remains the implicit "Other". The advisor is **advisory, never
+load-bearing**: malformed output degrades to a fallback summary with no cards, and its token/cost is
+charged to the run but **not** the pipeline's `agentRuns` budget (like chat). It is on-demand only — an
+idle escalation costs nothing — and the result is persisted (`run_advice` table), so a page reload
+keeps the last suggestions (`getRunDetail.advice`).
+
+**More review budget (`internal_review_cap`).** When a run escalated because the self-review → fix
+loop hit its cap while still converging, a resume can carry an optional **`extraRounds`** (an integer
+`1..10`) alongside `notes`: `POST /runs/:id/resume` with `{ "notes": "…", "extraRounds": 2 }`. It is
+recorded on the resume transition reason (`{ kind: "operator_resume", notes?, extraRounds? }`) and the
+Agent Runner applies it as an **effective-cap override for that resumed visit only** (`recipe.reviewCap
++ extraRounds`) — it expires automatically once the run advances (a later escalation → a fresh resume
+without it → back to the recipe cap). No FSM/config change; the recipe cap stays read-only input.
+
 ### 9.6 Crash recovery
 Just restart the daemon (`serve`). On startup it reclaims events stranded `processing` by the crash
 and re-drains them; idempotent, event-keyed transitions and the transactional outbox (§8 / risk

@@ -24,6 +24,7 @@ import { IssueIntakePoller, type IntakePass } from '../loop/issue-intake-poller'
 import { ReplyPoller, type ReplyCheck } from '../loop/reply-poller';
 import type { AgentRunner } from '../agent/runner';
 import type {
+  Advice,
   AgentRunRecord,
   Artifact,
   ChatExchange,
@@ -74,6 +75,8 @@ export interface RunDetail {
   logs: LogRecord[];
   /** The run's operator ↔ agent chat thread, oldest first (the "general chat" side channel). */
   chat: ChatExchange[];
+  /** The latest escalation-resolution advice for this run, or undefined if none requested yet (Layer 3). */
+  advice?: Advice;
 }
 
 export interface OrchestratorOptions {
@@ -385,8 +388,10 @@ export class Orchestrator {
    * Optional `notes` (needs_human only — a paused/stopped run re-runs a stage that already has its
    * context, so there is nothing extra to guide) are the operator's guidance for the retried stage; the
    * loop records them on the resume transition and the Agent Runner delivers them as re-entry context.
+   * Optional `extraRounds` (needs_human only) bumps the review cap for the resumed visit — for an
+   * `internal_review_cap` escalation that was converging and just needs more budget (Layer 3).
    */
-  resume(runId: number, notes?: string): Run {
+  resume(runId: number, notes?: string, extraRounds?: number): Run {
     const existing = this.requireRun(runId);
     if (existing.status === 'paused') {
       const run = this.loop.resumePausedRun(runId);
@@ -395,7 +400,9 @@ export class Orchestrator {
       return run;
     }
     if (existing.status === 'needs_human') {
-      const run = this.conflictOnThrow(() => this.loop.resumeRun(runId, notes !== undefined ? { notes } : {})); // emits its own transition event
+      const run = this.conflictOnThrow(() =>
+        this.loop.resumeRun(runId, { ...(notes !== undefined ? { notes } : {}), ...(extraRounds !== undefined ? { extraRounds } : {}) }),
+      ); // emits its own transition event
       this.kick();
       return run;
     }
@@ -575,6 +582,25 @@ export class Orchestrator {
     const run = this.requireRun(runId);
     if (result !== 'resumed') this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
     return { run, result };
+  }
+
+  /**
+   * On-demand escalation-resolution advisor (Layer 3 — the dashboard's "Suggest resolutions" button).
+   * Runs the read-only advisor over a `needs_human` run, persists the result, and returns it. 404 for
+   * an unknown run; 409 when the run is not `needs_human` (advising a non-escalated run is meaningless).
+   * Synchronous request/response shape like {@link checkPrFeedback}: awaits the runner, then returns
+   * the stored advice. On-demand only — an idle escalation costs nothing until the operator asks.
+   * Publishes a `status` event so connected dashboards refresh their detail (and pick up the advice).
+   */
+  async advise(runId: number): Promise<Advice> {
+    const run = this.requireRun(runId); // 404 if missing
+    if (run.status !== 'needs_human') {
+      throw new ApiError(409, `cannot advise a "${run.status}" run — the resolution advisor is only for a needs_human escalation`);
+    }
+    const result = await this.runner.runAdvisor(run);
+    const stored = this.repo.insertAdvice({ runId, summary: result.summary, options: result.options, tokens: result.tokens });
+    this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
+    return stored;
   }
 
   /**
@@ -785,6 +811,7 @@ export class Orchestrator {
       artifacts: this.repo.listArtifacts(runId),
       logs: this.repo.listLogs(runId),
       chat: this.repo.listChatExchanges(runId),
+      advice: this.repo.getLatestAdvice(runId),
     };
   }
 

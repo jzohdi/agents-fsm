@@ -229,11 +229,18 @@ async function handle(
         return sendJson(res, 200, orch.pause(id));
       case 'resume': {
         // Optional `notes`: operator guidance for the retried stage (delivered as its re-entry context).
-        const raw = (await readJson(req)).notes;
+        const body = await readJson(req);
+        const raw = body.notes;
         if (raw !== undefined && typeof raw !== 'string') {
           return sendError(res, new ApiError(400, '"notes" must be a string when provided'));
         }
-        return sendJson(res, 200, orch.resume(id, raw));
+        // Optional `extraRounds` (Layer 3): a per-resume review-cap bump for an `internal_review_cap`
+        // escalation that was converging — an integer 1..10.
+        const extra = body.extraRounds;
+        if (extra !== undefined && (typeof extra !== 'number' || !Number.isInteger(extra) || extra <= 0 || extra > 10)) {
+          return sendError(res, new ApiError(400, '"extraRounds" must be an integer between 1 and 10 when provided'));
+        }
+        return sendJson(res, 200, orch.resume(id, raw, extra));
       }
       case 'stop':
         return sendJson(res, 200, orch.stop(id));
@@ -307,6 +314,12 @@ async function handle(
   const replyMatch = /^\/runs\/(\d+)\/check-reply$/.exec(path);
   if (replyMatch && method === 'POST') {
     return sendJson(res, 200, await orch.checkReply(Number(replyMatch[1])));
+  }
+
+  // --- on-demand resolution advisor: suggest how to resolve a needs_human escalation (Layer 3) ---
+  const adviseMatch = /^\/runs\/(\d+)\/advise$/.exec(path);
+  if (adviseMatch && method === 'POST') {
+    return sendJson(res, 200, await orch.advise(Number(adviseMatch[1])));
   }
 
   // --- config ---
