@@ -74,6 +74,16 @@ describe('createSystemPromptFn — composition', () => {
     expect(prompt).not.toContain(VERDICT_CONTRACT);
   });
 
+  it('composes advise as base + the advise phase, with its own inline contract (no envelope/verdict)', () => {
+    const prompt = systemPrompt('advise', 'produce');
+    expect(prompt).toContain(BASE);
+    expect(prompt).toMatch(/advisor/i); // the read-only escalation-resolution advisor role
+    expect(prompt).toContain('"summary"');
+    expect(prompt).toContain('"options"');
+    expect(prompt).not.toContain(ENVELOPE_CONTRACT);
+    expect(prompt).not.toContain(VERDICT_CONTRACT);
+  });
+
   it('throws for a stage with no role prompt (fail fast, never a half-formed prompt)', () => {
     expect(() => systemPrompt('no_such_stage', 'produce')).toThrowError(/No stage prompt for "no_such_stage"/);
   });

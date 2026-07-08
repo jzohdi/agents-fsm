@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  adviceCards,
   chatSchedulingHint,
   chatWriteRunsNow,
   formatChatReply,
@@ -603,5 +604,34 @@ describe('run chat helpers', () => {
     );
     // Inline rules never reach inside a fenced block.
     expect(formatChatReply('```\n**not bold** `not code`\n```')).toBe('<pre><code>**not bold** `not code`</code></pre>');
+  });
+});
+
+describe('adviceCards (escalation-resolution option cards)', () => {
+  const advice = (options: unknown[]) =>
+    ({ id: 1, runId: 1, summary: 'stuck', options, tokens: 0, createdAt: '' }) as never;
+
+  it('marks the first option recommended and the rest not, carrying label/action/notes through', () => {
+    const cards = adviceCards(
+      advice([
+        { label: 'Accept and retry', rationale: 'r1', action: 'resume', suggestedNotes: 'n1' },
+        { label: 'Revert to plan', rationale: 'r2', action: 'revert', toState: 'plan', suggestedNotes: 'n2' },
+      ]),
+    );
+    expect(cards.map((c) => c.recommended)).toEqual([true, false]);
+    expect(cards[0]).toMatchObject({ label: 'Accept and retry', rationale: 'r1', action: 'resume', suggestedNotes: 'n1', recommended: true });
+  });
+
+  it('humanizes a revert target state and keeps the raw state for pre-selecting the revert form', () => {
+    const [card] = adviceCards(advice([{ label: 'Back', rationale: 'r', action: 'revert', toState: 'plan_review' }]));
+    expect(card.action).toBe('revert');
+    expect(card.toState).toBe('plan_review');
+    expect(card.toStateLabel).toBe(humanizeState('plan_review'));
+    expect(card.suggestedNotes).toBe(''); // omitted → empty, so selecting it clears the box
+  });
+
+  it('returns [] for absent or empty advice', () => {
+    expect(adviceCards(undefined)).toEqual([]);
+    expect(adviceCards(advice([]))).toEqual([]);
   });
 });

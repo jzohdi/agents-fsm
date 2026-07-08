@@ -1540,3 +1540,60 @@ describe('Orchestrator — run chat (the operator side channel)', () => {
     await orchestrator.settle();
   });
 });
+
+describe('Orchestrator — resolution advisor (advise) + per-resume extraRounds', () => {
+  const advice = {
+    summary: 'The plan stage kept failing its harness call.',
+    options: [{ label: 'Retry the stage', rationale: 'The failure looked transient.', action: 'resume', suggestedNotes: 'just retry' }],
+  };
+
+  /** Fail plan produce once (→ needs_human), answer the advise pseudo-stage with canned advice. */
+  function stuckThenAdvise(): StubHandler {
+    let failed = false;
+    return (req) => {
+      if (req.stage === 'advise') return { output: advice, tokens: 9, cost: 0.04 };
+      if (req.stage === 'plan' && req.phase === 'produce' && !failed) {
+        failed = true;
+        throw new Error('transient harness failure');
+      }
+      return goldenPathHandler(req);
+    };
+  }
+
+  it('runs the advisor over a needs_human run, persisting and returning the advice (kept on run detail)', async () => {
+    const { orchestrator, repo } = setup({ handler: stuckThenAdvise() });
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle();
+    expect(repo.getRun(run.id)!.status).toBe('needs_human');
+
+    const stored = await orchestrator.advise(run.id);
+
+    expect(stored).toMatchObject({ runId: run.id, summary: advice.summary, options: advice.options, tokens: 9 });
+    expect(typeof stored.id).toBe('number');
+    // A page reload keeps the last advice: getRunDetail carries it.
+    expect(orchestrator.getRunDetail(run.id).advice).toEqual(stored);
+  });
+
+  it('refuses to advise a run that is not needs_human (409), and 404s an unknown run', async () => {
+    const { orchestrator } = setup(); // golden path → run reaches done
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle();
+
+    await expect(orchestrator.advise(run.id)).rejects.toMatchObject({ status: 409 });
+    await expect(orchestrator.advise(999)).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it('threads a per-resume extraRounds override onto the resume transition reason', async () => {
+    const { orchestrator, repo } = setup({ handler: stuckThenAdvise() });
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+    await orchestrator.settle();
+    expect(repo.getRun(run.id)!.status).toBe('needs_human');
+
+    orchestrator.resume(run.id, 'give it more room', 3);
+    await orchestrator.settle();
+
+    const resumeT = repo.listTransitions(run.id).find((t) => t.trigger === 'resume')!;
+    expect(resumeT.reason).toEqual({ kind: 'operator_resume', notes: 'give it more room', extraRounds: 3 });
+    expect(repo.getRun(run.id)!.status).toBe('done');
+  });
+});

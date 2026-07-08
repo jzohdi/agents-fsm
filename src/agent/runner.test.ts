@@ -14,7 +14,7 @@ import { openDb } from '../store/db';
 import { Repository, type Run, type Transition } from '../store/repository';
 import { StubExecutor, goldenPathHandler, type AgentRunRequest, type StageExecutor, type StubHandler } from './executor';
 import { HarnessRegistry } from './harness';
-import { AgentRunner, chatCommitMessage, chatResponseText, phaseModel, reentryContext, type AgentRunnerOptions } from './runner';
+import { AgentRunner, chatCommitMessage, chatResponseText, operatorResumeExtraRounds, parseAdvice, phaseModel, reentryContext, type AgentRunnerOptions } from './runner';
 import { ADDRESSING_PR_FEEDBACK_FLAG } from '../loop/event-loop';
 
 describe('phaseModel', () => {
@@ -985,5 +985,166 @@ describe('chatResponseText + chatCommitMessage (pure)', () => {
     expect(chatCommitMessage('fix the build\nand more detail')).toBe('[agent] chat: fix the build');
     const long = 'x'.repeat(100);
     expect(chatCommitMessage(long)).toBe(`[agent] chat: ${'x'.repeat(71)}…`);
+  });
+});
+
+describe('AgentRunner — resolution advisor (runAdvisor, Layer 3)', () => {
+  // The read-only tool grant the advisor runs under (identical shape to CHAT_READ_TOOLS).
+  const ADVISE_TOOLS = ['Read', 'Grep', 'Glob', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)', 'Bash(git status:*)'];
+  const adviceOutput = {
+    summary: 'The self-review loop never converged on the naming findings.',
+    options: [
+      { label: 'Accept the findings and retry', rationale: 'The findings are cosmetic.', action: 'resume', suggestedNotes: 'accept the review' },
+      { label: 'Revert to plan', rationale: 'The plan scoped too much.', action: 'revert', toState: 'plan', suggestedNotes: 'narrow the scope' },
+    ],
+  };
+
+  /** Park a fresh run in needs_human with an internal_review_cap escalation, and return the reloaded run. */
+  function escalate(repo: Repository, run: Run): Run {
+    repo.commitTransition({
+      runId: run.id,
+      fromState: 'plan',
+      toState: 'needs_human',
+      trigger: 'internal_review_cap',
+      reason: { kind: 'internal_review_cap', cap: 2, notes: { issues: ['naming'] } },
+      status: 'needs_human',
+    });
+    return repo.getRun(run.id)!;
+  }
+
+  it('invokes the executor read-only under the advise stage, carrying the escalation context', async () => {
+    const requests: AgentRunRequest[] = [];
+    const { repo, runner, run } = setup((req) => {
+      requests.push(req);
+      return { output: adviceOutput, tokens: 11, cost: 0.03 };
+    });
+
+    const result = await runner.runAdvisor(escalate(repo, run));
+
+    expect(result).toEqual({ ...adviceOutput, tokens: 11 });
+    const req = requests[0]!;
+    expect(req.stage).toBe('advise');
+    expect(req.phase).toBe('produce');
+    expect(req.allowedTools).toEqual(ADVISE_TOOLS);
+    expect(req.workingDir).toBeTruthy(); // runs in the run tree, never the daemon cwd
+    expect((req.input as { escalation: { trigger: string; reason: unknown } }).escalation).toMatchObject({
+      trigger: 'internal_review_cap',
+      reason: { kind: 'internal_review_cap', cap: 2 },
+    });
+  });
+
+  it('charges tokens/cost but never the run budget (agentRuns), recording advise telemetry', async () => {
+    const { repo, runner, run } = setup(() => ({ output: adviceOutput, tokens: 8, cost: 0.05 }));
+
+    await runner.runAdvisor(escalate(repo, run));
+
+    expect(repo.listAgentRuns(run.id).at(-1)).toMatchObject({ stage: 'advise', phase: 'produce', tokens: 8, success: true });
+    const after = repo.getRun(run.id)!;
+    expect(after.tokensUsed).toBe(8);
+    expect(after.costUsed).toBeCloseTo(0.05);
+    expect(after.agentRunsCount).toBe(0); // operator-initiated advice must not eat the pipeline budget
+  });
+
+  it('records a failed invocation and rethrows so the caller can surface it', async () => {
+    const { repo, runner, run } = setup(() => {
+      throw new Error('advisor exploded');
+    });
+
+    await expect(runner.runAdvisor(escalate(repo, run))).rejects.toThrow('advisor exploded');
+    expect(repo.listAgentRuns(run.id).at(-1)).toMatchObject({ stage: 'advise', success: false });
+  });
+});
+
+describe('parseAdvice (pure — advisory, never load-bearing)', () => {
+  it('accepts a well-formed payload with 1–3 options', () => {
+    const raw = {
+      summary: 'stuck in review',
+      options: [{ label: 'Retry', rationale: 'transient', action: 'resume', suggestedNotes: 'retry' }],
+    };
+    expect(parseAdvice(raw)).toEqual(raw);
+  });
+
+  it('accepts a revert option carrying a target state', () => {
+    const parsed = parseAdvice({ summary: 's', options: [{ label: 'Back', rationale: 'r', action: 'revert', toState: 'plan' }] });
+    expect(parsed.options[0]).toMatchObject({ action: 'revert', toState: 'plan' });
+  });
+
+  it('falls back to an empty option list on malformed output, never throwing', () => {
+    const malformed: unknown[] = [
+      null,
+      'nonsense',
+      {},
+      { summary: 's' }, // no options
+      { summary: 's', options: 'x' }, // options not an array
+      { summary: 's', options: [{ label: 'a', rationale: 'b', action: 'delete' }] }, // bad action enum
+      { options: [{ label: 'a', rationale: 'b', action: 'resume' }] }, // no summary
+    ];
+    for (const bad of malformed) {
+      const parsed = parseAdvice(bad);
+      expect(parsed.options).toEqual([]);
+      expect(typeof parsed.summary).toBe('string');
+      expect(parsed.summary.length).toBeGreaterThan(0); // a graceful fallback message, so the UX never breaks
+    }
+  });
+});
+
+describe('operatorResumeExtraRounds (pure)', () => {
+  it('reads the per-visit review-cap bump an operator attached to a resume', () => {
+    expect(operatorResumeExtraRounds({ kind: 'operator_resume', extraRounds: 3 })).toBe(3);
+    expect(operatorResumeExtraRounds({ kind: 'operator_resume', notes: 'x', extraRounds: 2 })).toBe(2);
+  });
+
+  it('is 0 when no extraRounds is present or the reason is not a resume payload', () => {
+    expect(operatorResumeExtraRounds({ kind: 'operator_resume', notes: 'x' })).toBe(0);
+    expect(operatorResumeExtraRounds({ kind: 'operator_resume', extraRounds: 0 })).toBe(0);
+    expect(operatorResumeExtraRounds(undefined)).toBe(0);
+    expect(operatorResumeExtraRounds(null)).toBe(0);
+    expect(operatorResumeExtraRounds('nope')).toBe(0);
+  });
+});
+
+describe('AgentRunner — per-resume extraRounds cap override (internal_review_cap)', () => {
+  /** A run whose self-review never accepts, so the review loop always runs to its cap. */
+  function neverAccepts() {
+    return setup(
+      (req) => (req.phase === 'self_review' ? { output: { acceptable: false, notes: 'still wrong' } } : { output: { requestedTransition: 'proceed' } }),
+      { plan: { phases: ['produce', 'self_review', 'simplify'], reviewCap: 2 } },
+    );
+  }
+
+  it('bumps the effective review cap for the resumed visit that carried extraRounds', async () => {
+    const caps: unknown[] = [];
+    const { repo, runner, run } = setup(
+      (req) => {
+        if (req.phase === 'self_review') {
+          caps.push((req.input as { reviewRound: { cap: number } }).reviewRound.cap);
+          return { output: { acceptable: false, notes: 'still wrong' } };
+        }
+        return { output: { requestedTransition: 'proceed' } };
+      },
+      { plan: { phases: ['produce', 'self_review', 'simplify'], reviewCap: 2 } },
+    );
+    repo.commitTransition({ runId: run.id, fromState: 'plan', toState: 'needs_human', trigger: 'internal_review_cap', reason: { kind: 'internal_review_cap', cap: 2 }, status: 'needs_human' });
+    repo.commitTransition({ runId: run.id, fromState: 'needs_human', toState: 'plan', trigger: 'resume', reason: { kind: 'operator_resume', extraRounds: 2 }, isReset: true, status: 'running' });
+
+    const outcome = await runner.runStage(repo.getRun(run.id)!);
+
+    expect(outcome.kind).toBe('escalate');
+    if (outcome.kind === 'escalate') expect(outcome.reason).toMatchObject({ kind: 'internal_review_cap', cap: 4 });
+    // reviewCap 2 + extraRounds 2 = 4 review rounds before the cap trips again.
+    expect(repo.listAgentRuns(run.id).filter((r) => r.phase === 'self_review')).toHaveLength(4);
+    expect(caps).toEqual([4, 4, 4, 4]); // the reviewer sees the real (bumped) budget
+  });
+
+  it('stays at the recipe cap when the resume carried no extraRounds (the bump expires with the visit)', async () => {
+    const { repo, runner, run } = neverAccepts();
+    repo.commitTransition({ runId: run.id, fromState: 'plan', toState: 'needs_human', trigger: 'internal_review_cap', reason: { kind: 'internal_review_cap', cap: 2 }, status: 'needs_human' });
+    repo.commitTransition({ runId: run.id, fromState: 'needs_human', toState: 'plan', trigger: 'resume', reason: { kind: 'operator_resume', notes: 'just retry' }, isReset: true, status: 'running' });
+
+    const outcome = await runner.runStage(repo.getRun(run.id)!);
+
+    expect(outcome.kind).toBe('escalate');
+    if (outcome.kind === 'escalate') expect(outcome.reason).toMatchObject({ cap: 2 });
+    expect(repo.listAgentRuns(run.id).filter((r) => r.phase === 'self_review')).toHaveLength(2);
   });
 });

@@ -909,3 +909,32 @@ describe('run chat (the per-run operator ↔ agent side channel)', () => {
     expect(repo.claimNextChatExchange()?.id).toBe(chat.id); // claimable again
   });
 });
+
+describe('run advice (the escalation-resolution advisor, Layer 3)', () => {
+  it('inserts an advisor result and reads the latest back, round-tripping the options JSON', () => {
+    const run = newRun();
+    const options = [
+      { label: 'Accept and retry', rationale: 'The findings are cosmetic.', action: 'resume' as const, suggestedNotes: 'accept' },
+      { label: 'Revert to plan', rationale: 'The plan scoped too much.', action: 'revert' as const, toState: 'plan', suggestedNotes: 'narrow' },
+    ];
+
+    const stored = repo.insertAdvice({ runId: run.id, summary: 'stuck in the review loop', options, tokens: 12 });
+
+    expect(stored).toMatchObject({ runId: run.id, summary: 'stuck in the review loop', options, tokens: 12 });
+    expect(typeof stored.id).toBe('number');
+    expect(stored.createdAt).toBeTruthy();
+    expect(repo.getLatestAdvice(run.id)).toEqual(stored);
+  });
+
+  it('returns the most recent advice when several exist for a run', () => {
+    const run = newRun();
+    repo.insertAdvice({ runId: run.id, summary: 'first pass', options: [], tokens: 1 });
+    const second = repo.insertAdvice({ runId: run.id, summary: 'second pass', options: [{ label: 'a', rationale: 'b', action: 'resume' as const }], tokens: 2 });
+
+    expect(repo.getLatestAdvice(run.id)).toEqual(second);
+  });
+
+  it('is undefined for a run with no advice yet', () => {
+    expect(repo.getLatestAdvice(newRun().id)).toBeUndefined();
+  });
+});
