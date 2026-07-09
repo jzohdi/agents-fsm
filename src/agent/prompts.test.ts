@@ -96,3 +96,64 @@ describe('createSystemPromptFn — composition', () => {
     }
   });
 });
+
+// Operator-provided context injection (jzohdi/agents-fsm#5). `createSystemPromptFn` takes an optional
+// trailing `operatorContext` string — an already-labeled block from `composeOperatorContext`. When
+// non-empty it is spliced in as its own section positioned so the load-bearing output contract stays
+// LAST (INV-CONTRACT-LAST); when absent/empty the composed prompt is byte-identical to today
+// (INV-STABLE-PROMPTS). `prompts.ts` treats the arg as an opaque section, so the tests pass a marker.
+describe('createSystemPromptFn — operator-context injection (agents-fsm#5)', () => {
+  const systemPrompt = createSystemPromptFn();
+  // A stand-in for `composeOperatorContext`'s output: heading + delimited body. prompts.ts is agnostic
+  // to the exact text, so a distinctive marker is enough to assert placement.
+  const OP = '## Operator-provided context\n\nOPERATOR_MARKER standing guidance';
+
+  it('splices operator context as a delimited section BEFORE the envelope contract for a real stage', () => {
+    const prompt = systemPrompt('plan', 'produce', OP);
+    expect(prompt).toContain('OPERATOR_MARKER');
+    expect(prompt).toContain(ENVELOPE_CONTRACT);
+    // The contract remains the final load-bearing instruction: operator text sits before it.
+    expect(prompt.indexOf('OPERATOR_MARKER')).toBeLessThan(prompt.indexOf(ENVELOPE_CONTRACT));
+    // And after the base + role, so it reads as an extension of the role, not a preamble.
+    expect(prompt.indexOf('## Your stage: plan')).toBeLessThan(prompt.indexOf('OPERATOR_MARKER'));
+    // It is its own section, fenced by the section separator (a horizontal rule).
+    expect(prompt).toContain('\n\n---\n\n## Operator-provided context');
+  });
+
+  it('keeps the verdict contract last for a self_review phase, operator text before it', () => {
+    const prompt = systemPrompt('plan', 'self_review', OP);
+    expect(prompt).toContain('OPERATOR_MARKER');
+    expect(prompt).toContain(VERDICT_CONTRACT);
+    expect(prompt.indexOf('OPERATOR_MARKER')).toBeLessThan(prompt.indexOf(VERDICT_CONTRACT));
+  });
+
+  it('keeps triage’s own decision contract last, operator text before it', () => {
+    const prompt = systemPrompt('triage', 'produce', OP);
+    expect(prompt).toContain('OPERATOR_MARKER');
+    expect(prompt).toContain(TRIAGE_CONTRACT);
+    expect(prompt.indexOf('OPERATOR_MARKER')).toBeLessThan(prompt.indexOf(TRIAGE_CONTRACT));
+  });
+
+  it('injects into chat BEFORE its inline contract (the phase section carries its own contract)', () => {
+    const prompt = systemPrompt('chat', 'produce', OP);
+    expect(prompt).toContain('OPERATOR_MARKER');
+    expect(prompt).toContain('"response"');
+    // chat/advise carry their own output contract inside the phase section — operator text goes before it.
+    expect(prompt.indexOf('OPERATOR_MARKER')).toBeLessThan(prompt.indexOf('Phase: operator chat'));
+  });
+
+  it('appends operator context to resolve_conflicts (no output contract — degrades to last)', () => {
+    const prompt = systemPrompt('resolve_conflicts', 'produce', OP);
+    expect(prompt).toContain('OPERATOR_MARKER');
+    // No envelope/verdict contract here, so "before the contract" becomes "at the very end".
+    expect(prompt.trimEnd().endsWith('OPERATOR_MARKER standing guidance')).toBe(true);
+  });
+
+  it('is byte-identical to today when operator context is absent or empty (INV-STABLE-PROMPTS)', () => {
+    for (const stage of ['plan', 'triage', 'chat', 'advise', 'resolve_conflicts']) {
+      const baseline = systemPrompt(stage, 'produce');
+      expect(systemPrompt(stage, 'produce', undefined)).toBe(baseline);
+      expect(systemPrompt(stage, 'produce', '')).toBe(baseline);
+    }
+  });
+});

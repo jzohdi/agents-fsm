@@ -162,6 +162,28 @@ describe('migrate', () => {
     db.close();
   });
 
+  it('retrofits a database created before runs.issue_context existed (agents-fsm#5)', () => {
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, flags TEXT NOT NULL DEFAULT '{}', archived_at TEXT)`);
+    expect(columnExists(db, 'runs', 'issue_context')).toBe(false);
+
+    runMigrations(db); // the issue_context migration adds the per-run operator-context column on a pre-existing DB
+
+    expect(columnExists(db, 'runs', 'issue_context')).toBe(true);
+    expect(appliedMigrations(db)).toEqual(ALL_MIGRATION_NAMES);
+    // Drift guard: the retrofitted `runs` table stays column-identical to a fresh DB's (schema.sql parity).
+    const fresh = openDb();
+    expect(columns(db, 'runs')).toEqual(columns(fresh, 'runs'));
+    fresh.close();
+    db.close();
+  });
+
+  it('provisions runs.issue_context on a fresh database (agents-fsm#5)', () => {
+    const db = openDb();
+    expect(columnExists(db, 'runs', 'issue_context')).toBe(true); // baseline (schema.sql) provisions it
+    db.close();
+  });
+
   it('retrofits a database created before runs.harness existed, backfilling to claude-code', () => {
     const db = new Database(':memory:');
     db.exec(`CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, flags TEXT NOT NULL DEFAULT '{}', archived_at TEXT)`);
