@@ -416,8 +416,7 @@
         {/if}
         <!-- Merge-conflict policy toggle: when a run's branch conflicts with base (the between-stage
              sync, or a finished run's PR turning CONFLICTING), 'auto' lets a resolver agent handle it;
-             'manual' parks the run for you. Labeled "Auto-resolve conflicts" (not "Auto-merge") so it
-             cannot be read as the PR auto-merge toggle beside it (agents-fsm#15 naming guard). -->
+             'manual' parks the run for you. -->
         <button
           type="button"
           class="af-hwatch af-hconflict"
@@ -430,11 +429,11 @@
               : 'Merge conflicts wait for you — click to let an agent auto-resolve them'}
           onclick={() => setRepoConflictPolicy(row.repoRef, row.conflictPolicy === 'auto' ? 'manual' : 'auto')}
         >
-          <span class="pip"></span>{row.conflictPolicy === 'auto' ? 'Auto-resolve conflicts' : 'Conflicts: manual'}
+          <span class="pip"></span>{row.conflictPolicy === 'auto' ? 'Conflicts: auto' : 'Conflicts: manual'}
         </button>
-        <!-- Opt-in auto-merge (agents-fsm#15): a run reaching the terminal `done` state merges its own
-             PR into base. Never forced — a non-mergeable PR escalates needs_human with the PR left open.
-             Same enrollment gating as the conflict-policy control. -->
+        <!-- Auto-merge toggle (agents-fsm#15): when on, a run reaching the terminal `done` state merges
+             its approved PR into base instead of parking merge-ready for you. Gated on exactly the same
+             approved signal `done` already requires — no new approval bypass. Off by default. -->
         <button
           type="button"
           class="af-hwatch af-hautomerge"
@@ -443,11 +442,11 @@
           title={!row.enrolled
             ? 'Re-enroll this repo to configure auto-merge'
             : row.autoMerge
-              ? 'Approved runs merge their own PRs into base (never forced) — click to keep merges manual'
-              : 'Finished PRs wait for you to merge — click to let approved runs merge their own PRs'}
+              ? 'Approved PRs auto-merge into base — click to require a human merge instead'
+              : 'Approved PRs wait for you to merge — click to auto-merge them on approval'}
           onclick={() => setRepoAutoMerge(row.repoRef, !row.autoMerge)}
         >
-          <span class="pip"></span>{row.autoMerge ? 'Auto-merging PRs' : 'Auto-merge PRs'}
+          <span class="pip"></span>{row.autoMerge ? 'Auto-merge PRs' : 'Merge on approve: off'}
         </button>
         </div>
       </div>

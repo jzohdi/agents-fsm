@@ -935,10 +935,11 @@ export class Orchestrator {
   }
 
   /**
-   * Set an enrolled repo's auto-merge flag (`POST /repos/auto-merge`, agents-fsm#15): when on, a run
-   * reaching the terminal `done` state merges its own PR into base (never forced — a non-mergeable PR
-   * escalates). 404 if the repo is not enrolled. Takes effect from each run's next terminal decision —
-   * the runner reads the flag fresh at dispatch. Returns the updated repo.
+   * Set an enrolled repo's auto-merge flag (`POST /repos/auto-merge`, agents-fsm#15). When `enabled`, a
+   * run reaching the terminal `done` state auto-merges its PR into base instead of parking merge-ready
+   * for a human — gated on exactly the same approved signal `done` already requires (no approval bypass).
+   * Default off. `404` for a repo that was never enrolled; a malformed ref is a `400`. Persisted
+   * independently of enrollment, so a later re-enroll never resets it.
    */
   setRepoAutoMerge(input: { repoRef: string; enabled: boolean }): Repo {
     if (!input.repoRef) throw new ApiError(400, 'repoRef is required');

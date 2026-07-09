@@ -408,8 +408,8 @@ export interface RepoLedgerRow {
   /** Merge-conflict policy: `'auto'` = a resolver agent handles conflicts; `'manual'` = the run parks
    *  needs_human for the operator. Only meaningful for an enrolled repo. */
   conflictPolicy: 'manual' | 'auto';
-  /** Opt-in auto-merge (agents-fsm#15): a run reaching `done` merges its own PR into base (never
-   *  forced). Only meaningful for an enrolled repo. */
+  /** Opt-in auto-merge (agents-fsm#15): when true, a run reaching `done` merges its PR into base
+   *  instead of parking merge-ready for a human. Only meaningful for an enrolled repo. */
   autoMerge: boolean;
   baseBranch: string;
   runs: number;
@@ -447,7 +447,7 @@ export function repoLedgerModel(repos: Repo[] | undefined, runs: Run[] | undefin
       sourceMode: repo.sourceMode, localRepo: repo.localRepo, configured: repo.sourceMode !== null,
       // Older daemons don't send the field; default to the server's own default (manual).
       conflictPolicy: repo.conflictPolicy ?? 'manual',
-      // Older daemons that predate auto-merge don't send it; default to false (matches the store default).
+      // Older daemons that predate auto-merge don't send it; default to off (matches the server default).
       autoMerge: repo.autoMerge ?? false,
     });
   }

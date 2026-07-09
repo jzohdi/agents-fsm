@@ -243,7 +243,7 @@ export interface Repo {
    *  lets a verified resolver agent handle it (between-stage base sync + PR conflict re-open). */
   conflictPolicy: 'manual' | 'auto';
   /** Opt-in auto-merge (agents-fsm#15): when true, a run reaching the terminal `done` state merges its
-   *  own PR into base (never forced — a non-mergeable PR escalates). Optional on the wire: an older
-   *  daemon that predates the column omits it, so consumers default it to false (see `repoLedgerModel`). */
-  autoMerge?: boolean;
+   *  PR into base via the GitHub adapter instead of parking merge-ready for a human. Gated on exactly
+   *  the same approved signal `done` already requires — no new approval bypass. Default `false`. */
+  autoMerge: boolean;
 }

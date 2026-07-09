@@ -349,20 +349,20 @@ export class FakeGitHub implements GitHub {
 
   async mergePr(input: MergePrInput): Promise<MergeResult> {
     const pr = this.requirePr(input.prNumber);
-    if (pr.state === 'merged') return { merged: true }; // idempotent under ledger replay
+    // Already merged (crash/replay under the ledger) → idempotent success, no state change.
+    if (pr.state === 'merged') return { merged: true };
+    // Never force: a conflicting PR is a first-class "not mergeable" outcome, not a throw. Leave the PR
+    // (and its issue) untouched so the loop can escalate it merge-ready for a human.
     if (pr.mergeable === 'conflicting') {
-      // Never forced: the PR (and its Closes #N issue) stays exactly as it was for a human.
-      return { merged: false, reason: 'pull request is not mergeable: the base branch has conflicting changes', mergeable: 'conflicting' };
+      return { merged: false, reason: 'conflicting', mergeable: 'conflicting' };
     }
     pr.state = 'merged';
-    // Mirror a real GitHub merge: closing keywords in the PR body close the referenced issues — the
-    // README §3.5 dependency-satisfied signal the Scheduler keys off (criterion 5). Issues the fake
-    // doesn't know about are skipped (a real merge ignores dangling references too).
-    for (const match of pr.body.matchAll(/\b(?:clos(?:e[sd]?|ing)|fix(?:e[sd]|ing)?|resolv(?:e[sd]?|ing))\s+#(\d+)/gi)) {
-      const issue = [...this.issues.values()].find((i) => i.number === Number(match[1]));
+    // Mirror a real GitHub merge: the PR body's closing keywords (Closes/Fixes/Resolves #N) close the
+    // linked issues → the Scheduler's issue-closed dependency signal fires without a human (criterion 5).
+    for (const number of parseClosingRefs(pr.body)) {
+      const issue = this.findIssueByNumber(number);
       if (issue) issue.state = 'closed';
     }
-    // `deleteBranch` is honored cosmetically at most — the fake has no branch registry to prune.
     return { merged: true };
   }
 
@@ -500,9 +500,24 @@ export class FakeGitHub implements GitHub {
   }
 
   private requireIssueByNumber(number: number): StoredIssue {
-    for (const issue of this.issues.values()) if (issue.number === number) return issue;
-    throw new GitHubNotFoundError(`issue not found: #${number}`);
+    const issue = this.findIssueByNumber(number);
+    if (!issue) throw new GitHubNotFoundError(`issue not found: #${number}`);
+    return issue;
   }
+
+  private findIssueByNumber(number: number): StoredIssue | null {
+    for (const issue of this.issues.values()) if (issue.number === number) return issue;
+    return null;
+  }
+}
+
+/** GitHub closing-keyword references in a PR body: `Closes|Fixes|Resolves #N` (and their variants),
+ *  case-insensitive. Mirrors GitHub's auto-close behaviour so merging a PR closes its linked issues. */
+function parseClosingRefs(body: string): number[] {
+  const re = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s+#(\d+)/gi;
+  const numbers = new Set<number>();
+  for (const m of body.matchAll(re)) numbers.add(Number(m[1]));
+  return [...numbers];
 }
 
 function rangeKey(base: string, branch: string): string {

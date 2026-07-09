@@ -49,34 +49,32 @@ export const RESOLVE_CONFLICTS_TRIGGER = 'resolve_conflicts';
 export const RESOLVED_TRIGGER = 'resolved';
 
 /**
- * Event type for the loop-owned **auto-merge** step (agents-fsm#15). Like {@link EVENT_RESOLVE_CONFLICTS}
- * it does NOT run the stage pipeline: it dispatches only the adapter merge and then finalizes the run to
- * the terminal `done` state it was headed for. Its payload carries `doneState` (the intended terminal
- * target) so recovery knows where to finish.
- */
-export const EVENT_AUTO_MERGE = 'auto_merge';
-
-/**
- * The pseudo-state a run occupies **while** its PR is being auto-merged. Not an FSM state (loop-owned,
- * like {@link RESOLVE_CONFLICTS_STATE}) — used as the transition target and telemetry label, so the
- * dashboard shows a distinct "auto_merge", never a masqueraded `done`. The transition *entering* it
- * keeps the FSM's own trigger (the approving `approve`), so the log reads as the decision it was:
- * `code_review --approve--> auto_merge --auto_merged--> done`.
- */
-export const AUTO_MERGE_STATE = 'auto_merge';
-
-/** Trigger on the transition {@link AUTO_MERGE_STATE} → the done state after the PR merged. */
-export const AUTO_MERGED_TRIGGER = 'auto_merged';
-
-/** Escalation trigger when the PR was not mergeable / the merge failed (never forced). */
-export const AUTO_MERGE_FAILED_TRIGGER = 'auto_merge_failed';
-
-/**
  * Escalation trigger for a base-merge conflict the run could not (or, under `manual` policy, was not
  * allowed to) resolve — a first-class cause label in the transition log, like `git_error`. Shared by
  * the runner's between-stage sync and the loop's standalone {@link EventLoop.resolveMergeConflict}.
  */
 export const MERGE_CONFLICT_TRIGGER = 'merge_conflict';
+
+/**
+ * Event type for the loop-owned auto-merge step (agents-fsm#15). Like {@link EVENT_RESOLVE_CONFLICTS}
+ * it does NOT run the stage pipeline — it dispatches only the adapter merge and then finalizes the run
+ * to the terminal `done` state it was headed for. Its payload carries `doneState` (the intended
+ * terminal target the FSM already decided), so recovery and the success transition know where to land.
+ */
+export const EVENT_AUTO_MERGE = 'auto_merge';
+
+/**
+ * The pseudo-state a run occupies **while** its PR is being auto-merged. Not an FSM state (loop-owned,
+ * like {@link RESOLVE_CONFLICTS_STATE}) — used as the transition target and the `agent_runs.stage`
+ * telemetry label, so the dashboard shows a distinct "auto_merge", never a masqueraded `done`.
+ */
+export const AUTO_MERGE_STATE = 'auto_merge';
+
+/** Trigger on the transition {@link AUTO_MERGE_STATE} → doneState after the PR merged successfully. */
+export const AUTO_MERGED_TRIGGER = 'auto_merged';
+
+/** Escalation trigger when the PR was not mergeable / the merge failed (never forced). */
+export const AUTO_MERGE_FAILED_TRIGGER = 'auto_merge_failed';
 
 /**
  * Trigger recorded on the self-transition that parks a run awaiting a human reply (triage `clarify`).
@@ -727,7 +725,9 @@ export class EventLoop {
     // dedicated resolver, independent of the FSM (so it skips the config-version and budget guards,
     // which are about running stages). Branch here before any of that stage machinery.
     if (event.type === EVENT_RESOLVE_CONFLICTS) return this.applyConflictResolution(run, event);
-    // Auto-merge (agents-fsm#15) is likewise loop-owned: only the adapter merge runs, never a stage.
+
+    // Auto-merge (agents-fsm#15) is likewise a loop-owned operation, not a stage: it merges the PR and
+    // finalizes the run to the `done` state the FSM already decided — no pipeline, no FSM decision.
     if (event.type === EVENT_AUTO_MERGE) return this.applyAutoMerge(run, event);
 
     // Config-version pinning (README §3.3 Layer 2): a run uses the config version it
@@ -847,19 +847,31 @@ export class EventLoop {
         ? interrupted
         : 'running';
 
-    // Opt-in auto-merge (agents-fsm#15): interpose the loop-owned pseudo-state in place of committing
-    // `done`. The gate is exactly the FSM's terminal-`done` decision (`status === 'done'` — true iff
-    // terminal and not the escalation state; there is deliberately NO independent "is approved?" check),
-    // plus a PR to merge (a PR-less run must never wedge) and the repo's flag read fresh at dispatch.
-    // Flag off / no PR → the terminal commit below is byte-for-byte today's behaviour.
-    if (status === 'done' && run.prNumber !== null && this.runner.autoMergeEnabled(run)) {
+    // Opt-in auto-merge (agents-fsm#15): when the FSM has decided the terminal `done` transition — the
+    // sole approval gate, so `decision.to` is NOT the escalation state — the run has a PR, and the repo
+    // opted in, interpose a loop-owned pseudo-state *in place of* committing `done`. We commit into
+    // AUTO_MERGE_STATE (status `running`, carrying the same reason/flags/artifacts the terminal commit
+    // would) and enqueue EVENT_AUTO_MERGE, which performs the mechanical merge and then finalizes to the
+    // intended `done` state. No new approval check — auto-merge fires iff the FSM already reached `done`.
+    // Guarding on `status === 'done'` means a run paused/stopped mid-approval takes the normal path.
+    // Flag off (default) / no PR / escalation → this is skipped and the terminal commit below is byte-for-
+    // byte unchanged.
+    const autoMerging =
+      terminal &&
+      status === 'done' &&
+      decision.to !== this.fsm.escalationState &&
+      run.prNumber !== null &&
+      this.runner.autoMergeEnabled(run);
+
+    if (autoMerging) {
       const transition = this.repo.transaction(() => {
-        // Same envelope carriage as the normal terminal commit (reason/flags/artifacts) — nothing the
-        // approving review produced is lost; only the target differs (the pseudo-state, not `done`).
         const t = this.repo.commitTransition({
           runId: run.id,
           fromState: run.currentState,
           toState: AUTO_MERGE_STATE,
+          // Keep the FSM's own approving trigger (e.g. `approve`) on the entering transition so the log
+          // reads `code_review --approve--> auto_merge`: auto-merge rides the *same* approval, adding no
+          // new gate. (The finalizing transition below carries AUTO_MERGED_TRIGGER.)
           trigger: result.requestedTransition,
           reason: envelope.reason ?? null,
           backEdge: decision.backEdge,
@@ -873,6 +885,7 @@ export class EventLoop {
         for (const artifact of envelope.artifacts ?? []) {
           this.repo.recordArtifact({ runId: run.id, kind: artifact.kind, locator: artifact.locator });
         }
+        // The intended terminal target rides the event so applyAutoMerge finalizes there after merging.
         this.repo.enqueueEvent({ runId: run.id, type: EVENT_AUTO_MERGE, payload: { doneState: decision.to } });
         return t;
       });
@@ -954,27 +967,28 @@ export class EventLoop {
   }
 
   /**
-   * Dispatch an {@link EVENT_AUTO_MERGE} event (agents-fsm#15): merge the run's PR into base via the
-   * adapter, then finalize the run to the terminal `done` state it was headed for (carried on the event
-   * payload). No FSM, no pipeline — the approving `done` decision already happened; this is only the
-   * mechanical merge. A non-mergeable PR escalates (`needs_human`) with the PR left open + merge-ready —
-   * **never forced**. Idempotent under recovery: the runner's merge is ledger-guarded and the adapter
-   * treats an already-merged PR as success, so a re-dispatched event never double-merges.
+   * Dispatch an {@link EVENT_AUTO_MERGE} event (agents-fsm#15): merge the run's PR into base, then
+   * finalize the run out of the {@link AUTO_MERGE_STATE} pseudo-state to the terminal `done` state the
+   * FSM already decided (carried as `doneState` on the payload). On a non-mergeable/failed merge the
+   * runner returns an escalate outcome and the run is surfaced `needs_human` with the PR left open —
+   * never forced. No FSM, no pipeline. Idempotent under recovery: the runner's merge is ledger-guarded
+   * and the adapter treats an already-merged PR as success, so a re-dispatched event never double-merges.
    */
   private async applyAutoMerge(run: Run, event: EventRow): Promise<void> {
-    // `doneState` is always set by the interposing commit; fall back defensively to the FSM's terminal
-    // non-escalation state (never `run.currentState` — that is the pseudo-state itself).
+    const payload = (event.payload ?? {}) as { doneState?: string };
+    // doneState is always set by the terminal-`done` branch that enqueued this event; fall back
+    // defensively to the machine's terminal non-escalation state so a hand-enqueued event can't wedge.
     const doneState =
-      (event.payload as { doneState?: string } | null)?.doneState ??
-      Object.entries(this.fsm.states).find(([id, s]) => s.terminal === true && id !== this.fsm.escalationState)?.[0] ??
-      run.currentState;
+      payload.doneState ??
+      Object.entries(this.fsm.states).find(([name, def]) => def.terminal && name !== this.fsm.escalationState)?.[0] ??
+      this.fsm.escalationState;
 
     let outcome: { kind: 'merged' } | { kind: 'escalate'; reason: unknown };
     try {
       outcome = await this.runner.autoMergePr(run);
     } catch (err) {
-      // Same shutdown rule as a stage: our own interruption must not park the run — leave the event
-      // `processing` for recovery to re-run.
+      // Same shutdown rule as a stage/conflict resolution: our own interruption must not park the run —
+      // leave the event `processing` for recovery to re-run (the ledgered merge makes the re-run safe).
       if (this.shuttingDown) {
         throw new ShutdownInterruptError(`auto-merge for run ${run.id} interrupted by shutdown: ${String(err)}`);
       }
@@ -986,12 +1000,13 @@ export class EventLoop {
       if (this.shuttingDown) {
         throw new ShutdownInterruptError(`auto-merge for run ${run.id} interrupted by shutdown (would have escalated)`);
       }
+      // Not mergeable / merge failed: surface the run for a human, PR left open + merge-ready. Never forced.
       this.escalate(run, event, AUTO_MERGE_FAILED_TRIGGER, outcome.reason);
       return;
     }
-    // Merged: finalize to the terminal state the FSM decided on. `doneState` is terminal, so no
-    // follow-up event — the run stops at `done` with its PR merged (and its `Closes #N` issue closed →
-    // the Scheduler's dependency signal fires without a human, criterion 5).
+    // Merged: finalize out of the pseudo-state to the intended terminal `done` state — a control
+    // transition, so (because doneState is terminal) no follow-up event is enqueued and the run stops.
+    // The PR is merged and its `Closes #N` issue closed → the dependency signal fires without a human.
     const transition = this.repo.commitTransition({
       runId: run.id,
       fromState: run.currentState, // AUTO_MERGE_STATE

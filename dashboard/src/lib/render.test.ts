@@ -263,7 +263,7 @@ describe('fleetStatsModel (home masthead + stat band)', () => {
 
 describe('repoLedgerModel (home repositories ledger)', () => {
   const repo = (over: Partial<Repo> = {}): Repo => ({
-    repoRef: 'acme/web', cloneUrl: null, localRepo: null, workingRoot: '/tmp', baseBranch: 'main', watch: false, watchLabel: null, watchFilterLabel: null, watchFilterMilestone: null, sourceMode: 'clone', conflictPolicy: 'manual', ...over,
+    repoRef: 'acme/web', cloneUrl: null, localRepo: null, workingRoot: '/tmp', baseBranch: 'main', watch: false, watchLabel: null, watchFilterLabel: null, watchFilterMilestone: null, sourceMode: 'clone', conflictPolicy: 'manual', autoMerge: false, ...over,
   });
 
   it('carries the enrolled repo\'s watch flag onto the ledger row (Milestone 11)', () => {
@@ -306,6 +306,15 @@ describe('repoLedgerModel (home repositories ledger)', () => {
     expect(byRef['acme/clone']).toMatchObject({ sourceMode: 'clone', configured: true });
     expect(byRef['acme/local']).toMatchObject({ sourceMode: 'local', localRepo: '/home/me/acme', configured: true });
     expect(byRef['acme/new']).toMatchObject({ sourceMode: null, configured: false });
+  });
+
+  it('carries the auto-merge flag onto the row, defaulting to off (agents-fsm#15)', () => {
+    const on = repoLedgerModel([repo({ repoRef: 'acme/web', autoMerge: true })], []);
+    expect(on[0]).toMatchObject({ autoMerge: true });
+
+    // An older daemon that predates the column omits it → the row defaults to off (server default).
+    const legacy = repoLedgerModel([repo({ repoRef: 'acme/idle', autoMerge: undefined })], []);
+    expect(legacy[0]).toMatchObject({ autoMerge: false });
   });
 
   it('merges enrolled repos with run aggregates and sorts by most recent activity', () => {

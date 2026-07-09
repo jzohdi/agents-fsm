@@ -715,44 +715,52 @@ export class AgentRunner {
     };
   }
 
-  // --- opt-in auto-merge of approved PRs (agents-fsm#15) ------------------------
+  // --- opt-in auto-merge of approved PRs (agents-fsm#15) -----------------------
 
-  /** The repo's auto-merge flag, read fresh from the registry (a dashboard change applies immediately —
-   *  same freshness rule as {@link conflictPolicy}). Runs without a registry row (one-shot CLI, mocks)
-   *  default to `false` (off — conservative). */
+  /** The repo's auto-merge flag, read fresh from the registry at dispatch time (a dashboard change
+   *  applies immediately, like {@link conflictPolicy}). Runs without a registry row (one-shot CLI,
+   *  mocks) default to `false` — off, the conservative choice. */
   autoMergeEnabled(run: Run): boolean {
     return this.repo.getRepo(run.repoRef)?.autoMerge ?? false;
   }
 
   /**
    * Merge a finished run's PR into base (agents-fsm#15). Loop-owned, dispatched by `applyAutoMerge`
-   * only after the FSM decided the terminal `done` transition — this method performs the mechanical
-   * merge, it does NOT re-check approval (reaching `done` is the sole authorization). Ledger-guarded
-   * (M7 outbox) so a crash/replay never double-merges; the adapter treats an already-merged PR as
-   * success for the same reason. Never forces: a non-mergeable PR becomes an `escalate`.
+   * **only after the FSM decided the terminal `done` transition** — this performs the mechanical merge,
+   * it does NOT re-check approval (the reaching of `done` is the authorization). Ledger-guarded so a
+   * crash/replay never double-merges; maps the adapter's {@link MergeResult} to the loop's disposition.
+   * **Never forces:** a non-mergeable/failed merge becomes an `escalate` the loop surfaces `needs_human`,
+   * leaving the PR open + merge-ready.
    */
   async autoMergePr(run: Run): Promise<{ kind: 'merged' } | { kind: 'escalate'; reason: unknown }> {
     const { github, baseBranch } = this.repoContext(run);
     if (run.prNumber === null) {
-      // Defensive: the loop only enters the pseudo-state for a run with a PR, so this is unreachable.
+      // Defensive — the loop already guards `prNumber !== null` before entering the pseudo-state.
       return { kind: 'escalate', reason: { kind: 'auto_merge', detail: 'run has no PR to merge' } };
     }
-    // One ledger slot keyed at the pseudo-state's visit, so a replayed EVENT_AUTO_MERGE reuses the
-    // recorded result instead of re-merging.
+    // Ledger-guarded (M7 outbox), one slot keyed on this pseudo-state visit so a replay reuses the
+    // recorded result rather than issuing a second merge.
     const result = await this.ledgerFor(run).once('auto_merge', () =>
       github.mergePr({ prNumber: run.prNumber!, base: baseBranch, method: 'merge', deleteBranch: true }),
     );
     if (result.merged) {
       this.repo.recordLog({
         runId: run.id,
-        message: `auto-merged PR #${run.prNumber} into ${baseBranch} and deleted the branch (auto-merge is on for ${run.repoRef})`,
+        message: `auto-merged PR #${run.prNumber} into ${baseBranch}`,
         data: { kind: 'auto_merge', result: 'merged', prNumber: run.prNumber },
       });
       return { kind: 'merged' };
     }
+    // Not mergeable / merge failed. Do NOT retry-with-force — surface it for a human.
     return {
       kind: 'escalate',
-      reason: { kind: 'auto_merge_failed', prNumber: run.prNumber, base: baseBranch, reason: result.reason, mergeable: result.mergeable },
+      reason: {
+        kind: 'auto_merge_failed',
+        prNumber: run.prNumber,
+        base: baseBranch,
+        reason: result.reason,
+        mergeable: result.mergeable,
+      },
     };
   }
 

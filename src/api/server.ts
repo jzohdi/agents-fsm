@@ -290,9 +290,9 @@ async function handle(
     return sendJson(res, 200, orch.setRepoConflictPolicy({ repoRef: str(body, 'repoRef'), policy: str(body, 'policy') }));
   }
 
-  // --- repo auto-merge (agents-fsm#15): when on, a run reaching the terminal `done` state merges its
-  // own PR into base (never forced — a non-mergeable PR escalates instead). Body-carried repoRef
-  // (contains a `/`), like /repos/watch; boolean validated inline the same way. ---
+  // --- repo auto-merge flag (agents-fsm#15): when on, a run reaching terminal `done` merges its PR into
+  // base instead of parking merge-ready for a human — same approved signal `done` requires, no bypass.
+  // Body-carried repoRef (contains a `/`), like /repos/conflict-policy. ---
   if (method === 'POST' && path === '/repos/auto-merge') {
     const body = await readJson(req, ctx.maxBodyBytes);
     const enabled = body.enabled;

@@ -232,9 +232,9 @@ export const MIGRATIONS: Migration[] = [
   {
     version: 18,
     name: 'add repos.auto_merge',
-    // Opt-in auto-merge of approved PRs (agents-fsm#15). Additive column with a constant default 0,
-    // so a pre-existing DB backfills to 0 (off — behaviour unchanged) and a fresh DB already has it
-    // from schema.sql. Mirrors schema.sql.
+    // Opt-in auto-merge of approved PRs (agents-fsm#15). Additive column with a constant default 0, so a
+    // pre-existing DB backfills to 0 (off — a done run still parks merge-ready for a human, behaviour
+    // unchanged) and a fresh DB already has it from schema.sql. Mirrors schema.sql.
     apply: (db) => addColumnIfMissing(db, 'repos', 'auto_merge', 'INTEGER NOT NULL DEFAULT 0'),
   },
 ];

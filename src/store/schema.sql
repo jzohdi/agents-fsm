@@ -184,12 +184,13 @@ CREATE TABLE IF NOT EXISTS repos (
   -- (parallel pickup). Default 1 = today's strictly-sequential behaviour. The pure decision clamps it to
   -- >= 1 and actual concurrency is still bounded by the drain pool's FLEET_CONCURRENCY. Appended last so a
   -- fresh schema matches a DB retrofitted by the additive migration (db drift guard).
-  watch_in_flight_cap INTEGER NOT NULL DEFAULT 1,  -- max runs a watched repo admits at once (continuous mode); 1 = sequential
-  -- Opt-in auto-merge (agents-fsm#15): when 1, a run reaching the terminal `done` state merges its own
-  -- PR into base (never forced — a non-mergeable PR escalates instead). Gated on exactly the approved
-  -- signal `done` already requires; no new approval gate. Appended last so a fresh schema matches a DB
-  -- retrofitted by the additive migration (db drift guard).
-  auto_merge INTEGER NOT NULL DEFAULT 0             -- 1 = merge the PR on approve; 0 = park merge-ready for a human
+  watch_in_flight_cap INTEGER NOT NULL DEFAULT 1,   -- max runs a watched repo admits at once (continuous mode); 1 = sequential
+  -- Opt-in auto-merge of approved PRs (agents-fsm#15): when 1, a run reaching the terminal `done` state
+  -- merges its PR into base via the GitHub adapter instead of parking merge-ready for a human. Gated on
+  -- exactly the same approved signal `done` already requires — no new approval bypass. Default 0 (off) so
+  -- behaviour is unchanged until a repo opts in. Appended last so a fresh schema matches a DB retrofitted
+  -- by the additive migration (db drift guard).
+  auto_merge INTEGER NOT NULL DEFAULT 0   -- 1 = auto-merge approved PRs; 0 = park merge-ready for a human
 );
 
 -- Per-run operator ↔ agent chat — the run's "general chat" side channel (singular name by convention
