@@ -210,6 +210,17 @@ export const MIGRATIONS: Migration[] = [
     // fresh DB already has it from schema.sql. Mirrors schema.sql.
     apply: (db) => addColumnIfMissing(db, 'runs', 'issue_context', 'TEXT'),
   },
+  {
+    version: 16,
+    name: 'add repos watch filter columns',
+    // Continuous mode scope filter (issue #11): narrow the watched backlog to a label and/or milestone.
+    // Additive nullable columns, so a pre-existing DB backfills to NULL (no filter → behaviour unchanged,
+    // scans all open issues) and a fresh DB already has them from schema.sql. Mirrors schema.sql.
+    apply: (db) => {
+      addColumnIfMissing(db, 'repos', 'watch_filter_label', 'TEXT');
+      addColumnIfMissing(db, 'repos', 'watch_filter_milestone', 'TEXT');
+    },
+  },
 ];
 
 // Guard the invariants the runner relies on: versions a gap-free, strictly increasing 1..N sequence

@@ -604,6 +604,44 @@ describe('HTTP API', () => {
     expect(await off.json()).toMatchObject({ watch: false });
   });
 
+  it('round-trips the scope filter through POST /repos/watch (issue #11)', async () => {
+    const { base } = await start();
+    await fetch(`${base}/repos`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web' }) });
+    await fetch(`${base}/repos/source`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web', mode: 'clone' }) });
+
+    // A label + milestone filter persists and comes back on the returned Repo.
+    const set = await fetch(`${base}/repos/watch`, {
+      method: 'POST',
+      body: JSON.stringify({ repoRef: 'acme/web', watch: true, filterLabel: 'bug', filterMilestone: 'v2' }),
+    });
+    expect(set.status).toBe(200);
+    expect(await set.json()).toMatchObject({ watch: true, watchFilterLabel: 'bug', watchFilterMilestone: 'v2' });
+
+    // It is visible on GET /repos too.
+    const repos = (await (await fetch(`${base}/repos`)).json()) as Array<{ repoRef: string }>;
+    expect(repos.find((r: { repoRef: string }) => r.repoRef === 'acme/web')).toMatchObject({
+      watchFilterLabel: 'bug',
+      watchFilterMilestone: 'v2',
+    });
+
+    // An empty-string filter field normalizes to null (a blank input clears the filter).
+    const cleared = await fetch(`${base}/repos/watch`, {
+      method: 'POST',
+      body: JSON.stringify({ repoRef: 'acme/web', watch: true, filterLabel: '' }),
+    });
+    expect(await cleared.json()).toMatchObject({ watchFilterLabel: null, watchFilterMilestone: 'v2' });
+
+    // A non-string / non-null filter field is a 400.
+    expect(
+      (
+        await fetch(`${base}/repos/watch`, {
+          method: 'POST',
+          body: JSON.stringify({ repoRef: 'acme/web', watch: true, filterLabel: 42 }),
+        })
+      ).status,
+    ).toBe(400);
+  });
+
   it('filters the SSE stream by ?repo', async () => {
     const { base, orchestrator } = await start();
     const controller = new AbortController();

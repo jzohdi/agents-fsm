@@ -21,6 +21,7 @@ import {
   type GitHub,
   type Issue,
   type IssueComment,
+  type IssueFilter,
   type OpenPrInput,
   type PrComment,
   type PrepareWorkingTreeInput,
@@ -45,6 +46,8 @@ interface SeedIssue {
   assignees?: string[];
   /** Label names, for the intake override-label bypass. Defaults to none. */
   labels?: string[];
+  /** Milestone name, for the intake milestone scope filter (issue #11). Defaults to none. */
+  milestone?: string | null;
 }
 
 /** The fake's stored issue: the public {@link Issue} plus the intake-only fields {@link RepoIssue} exposes. */
@@ -52,6 +55,8 @@ interface StoredIssue extends Issue {
   author: string;
   assignees: string[];
   labels: string[];
+  /** Milestone name, for the intake milestone scope filter (issue #11); `null` = no milestone. */
+  milestone: string | null;
 }
 
 interface CommitEntry {
@@ -129,6 +134,7 @@ export class FakeGitHub implements GitHub {
       author: issue.author ?? (ref.split('/')[0] || 'owner'),
       assignees: issue.assignees ?? [],
       labels: issue.labels ?? [],
+      milestone: issue.milestone ?? null,
     });
     this.issueCounter = Math.max(this.issueCounter, issue.number);
     return this;
@@ -278,14 +284,22 @@ export class FakeGitHub implements GitHub {
     const number = ++this.issueCounter;
     const ref = `${this.repoRef}#${number}`;
     // Attributed to the bot: a fleet-created issue (e.g. a triage split) is filed by the app's account.
-    const issue: StoredIssue = { ref, number, title: input.title, body: input.body, state: 'open', author: this.botLogin, assignees: [], labels: [] };
+    const issue: StoredIssue = { ref, number, title: input.title, body: input.body, state: 'open', author: this.botLogin, assignees: [], labels: [], milestone: null };
     this.issues.set(ref, issue);
     return toIssue(issue);
   }
 
-  async listOpenIssues(): Promise<RepoIssue[]> {
+  async listOpenIssues(filter?: IssueFilter): Promise<RepoIssue[]> {
+    // Scope filter (issue #11): keep only issues matching each *set* field, AND-combined — mirroring how
+    // `gh issue list --label ... --milestone ...` narrows the real fetch. Matching is case-insensitive
+    // (consistent with the override-label match); an unset field is unconstrained. A `null` milestone
+    // never matches a set milestone filter. `RepoIssue` is unchanged — milestone is resolved here.
+    const label = filter?.label?.trim() ? filter.label.trim().toLowerCase() : null;
+    const milestone = filter?.milestone?.trim() ? filter.milestone.trim().toLowerCase() : null;
     return [...this.issues.values()]
       .filter((i) => i.state === 'open' && repoFromIssueRef(i.ref) === this.repoRef)
+      .filter((i) => (label === null ? true : i.labels.some((l) => l.toLowerCase() === label)))
+      .filter((i) => (milestone === null ? true : i.milestone !== null && i.milestone.toLowerCase() === milestone))
       .sort((a, b) => a.number - b.number)
       .map((i) => ({ ref: i.ref, number: i.number, title: i.title, body: i.body, author: i.author, assignees: [...i.assignees], labels: [...i.labels] }));
   }

@@ -934,7 +934,22 @@ export class Orchestrator {
     return this.repo.getRepo(ref)!;
   }
 
-  setRepoWatch(input: { repoRef: string; watch: boolean; label?: string | null }): Repo {
+  /**
+   * Turn continuous mode on/off (`POST /repos/watch`) and optionally set the override label and/or the
+   * scope filter (issue #11). `label` is the guard-*bypass* override (omit to leave, `null` to reset to
+   * the default). `filterLabel`/`filterMilestone` are the scope filter that *narrows* which issues intake
+   * considers before the guards run (a distinct concept): omit to leave each as-is, or pass a value to set
+   * it — an empty/whitespace-only string normalizes to `null` (clears it), so a blank dashboard input
+   * never degenerates into a `--label ''`. A filter is valid regardless of watch/source state, so it has
+   * no extra guard.
+   */
+  setRepoWatch(input: {
+    repoRef: string;
+    watch: boolean;
+    label?: string | null;
+    filterLabel?: string | null;
+    filterMilestone?: string | null;
+  }): Repo {
     if (!input.repoRef) throw new ApiError(400, 'repoRef is required');
     let ref: string;
     try {
@@ -949,7 +964,14 @@ export class Orchestrator {
     if (input.watch && existing.sourceMode === null) {
       throw new ApiError(400, `repo ${ref} has no working directory configured — choose clone-on-run or a local directory before watching it`);
     }
-    this.repo.setRepoWatch(ref, input.watch, input.label);
+    // Normalize the scope filter at this one boundary: `undefined` stays undefined (leave the column
+    // as-is); a string is trimmed and an empty result becomes `null` (clears); `null` stays `null`.
+    const normalizeFilter = (v: string | null | undefined): string | null | undefined =>
+      v === undefined ? undefined : v?.trim() || null;
+    this.repo.setRepoWatch(ref, input.watch, input.label, {
+      filterLabel: normalizeFilter(input.filterLabel),
+      filterMilestone: normalizeFilter(input.filterMilestone),
+    });
     return this.repo.getRepo(ref)!;
   }
 

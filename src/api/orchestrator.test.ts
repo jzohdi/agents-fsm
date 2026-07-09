@@ -1154,6 +1154,46 @@ describe('Orchestrator — repo watch + issue intake (Milestone 11)', () => {
     expect(await orchestrator.pollIssueIntakeOnce()).toMatchObject({ reposScanned: 0, started: 0 });
     expect(repo.listRuns()).toHaveLength(0);
   });
+
+  it('setRepoWatch persists and returns the scope filter, normalizing empty/whitespace to null (issue #11)', () => {
+    const { orchestrator, repo } = setup();
+    orchestrator.enrollRepo({ repoRef: 'o/r', workingRoot: './w' });
+    repo.setRepoSource('o/r', 'clone', null);
+
+    const watched = orchestrator.setRepoWatch({ repoRef: 'o/r', watch: true, filterLabel: 'bug', filterMilestone: 'v2' });
+    expect(watched).toMatchObject({ watch: true, watchFilterLabel: 'bug', watchFilterMilestone: 'v2' });
+
+    // An empty/whitespace-only filter field normalizes to null (a blank dashboard input clears it).
+    const cleared = orchestrator.setRepoWatch({ repoRef: 'o/r', watch: true, filterLabel: '   ', filterMilestone: '' });
+    expect(cleared).toMatchObject({ watchFilterLabel: null, watchFilterMilestone: null });
+  });
+
+  it('a plain watch toggle leaves an existing scope filter untouched (issue #11)', () => {
+    const { orchestrator, repo } = setup();
+    orchestrator.enrollRepo({ repoRef: 'o/r', workingRoot: './w' });
+    repo.setRepoSource('o/r', 'clone', null);
+    orchestrator.setRepoWatch({ repoRef: 'o/r', watch: true, filterLabel: 'bug', filterMilestone: 'v2' });
+
+    // Toggling watch off (no filter keys) must not clobber the scope filter.
+    const toggled = orchestrator.setRepoWatch({ repoRef: 'o/r', watch: false });
+    expect(toggled).toMatchObject({ watch: false, watchFilterLabel: 'bug', watchFilterMilestone: 'v2' });
+  });
+
+  it('the scope filter narrows the watched backlog end-to-end (issue #11)', async () => {
+    const { orchestrator, repo, github } = setup();
+    orchestrator.enrollRepo({ repoRef: 'o/r', workingRoot: './w' });
+    repo.setRepoSource('o/r', 'clone', null);
+    orchestrator.setRepoWatch({ repoRef: 'o/r', watch: true, filterLabel: 'bug' });
+    // #1 is eligible + lowest, but out of scope; #2 matches the label.
+    github.seedIssue('o/r#1', { number: 1, author: 'o' });
+    github.seedIssue('o/r#2', { number: 2, author: 'o', labels: ['bug'] });
+
+    const pass = await orchestrator.pollIssueIntakeOnce();
+    expect(pass).toMatchObject({ started: 1, skipped: 0 });
+    await orchestrator.settle();
+
+    expect(repo.listRuns().map((r) => r.issueRef)).toEqual(['o/r#2']);
+  });
 });
 
 describe('Orchestrator — resume a stopped run + on-demand reply check', () => {

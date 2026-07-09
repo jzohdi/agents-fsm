@@ -23,12 +23,19 @@ function storeStarter(repo: Repository): RunStarter {
 }
 
 /** Single-repo fixture: one enrolled repo `acme/web`, its fake adapter, and a log collector. */
-function setup(options: { watch?: boolean; label?: string | null } = {}) {
+function setup(
+  options: { watch?: boolean; label?: string | null; filterLabel?: string | null; filterMilestone?: string | null } = {},
+) {
   const repo = new Repository(openDb(':memory:'));
   const github = new FakeGitHub({ repoRef: 'acme/web' });
   repo.upsertRepo({ repoRef: 'acme/web', workingRoot: '/tmp/wr' });
   repo.setRepoSource('acme/web', 'clone', null); // a working directory is required to be watched (M12)
-  if (options.watch !== false) repo.setRepoWatch('acme/web', true, options.label);
+  if (options.watch !== false) {
+    repo.setRepoWatch('acme/web', true, options.label, {
+      filterLabel: options.filterLabel,
+      filterMilestone: options.filterMilestone,
+    });
+  }
   const logs: string[] = [];
   const resolver: RepoResolver = singleRepoResolver({ github, baseBranch: 'main' });
   const poller = new IssueIntakePoller(repo, resolver, storeStarter(repo), (m) => logs.push(m));
@@ -126,6 +133,70 @@ describe('IssueIntakePoller — guards + logging', () => {
     github.seedIssue('acme/web#1', { number: 1, author: 'stranger' });
     await poller.checkOnce();
     expect(logs.filter((l) => l.startsWith('[issue-intake] skipping acme/web#1'))).toHaveLength(2);
+  });
+});
+
+describe('IssueIntakePoller — scope filter (issue #11)', () => {
+  it('a label filter admits only matching issues; a non-matching but otherwise-eligible issue is never picked up', async () => {
+    const { repo, github, poller } = setup({ filterLabel: 'bug' });
+    // #1 is eligible and lowest-numbered, so WITHOUT the filter it would be picked first — but it lacks
+    // the label, so the scope filter excludes it before the guards ever run.
+    github.seedIssue('acme/web#1', { number: 1, author: 'acme' });
+    github.seedIssue('acme/web#2', { number: 2, author: 'acme', labels: ['bug'] });
+
+    const pass = await poller.checkOnce();
+
+    // Only the matching issue becomes a candidate run…
+    expect(pass).toMatchObject({ reposScanned: 1, started: 1 });
+    expect(repo.listRuns().map((r) => r.issueRef)).toEqual(['acme/web#2']);
+    // …and the excluded issue is filtered out *before* the guards — never a candidate, never a skip.
+    expect(pass.skipped).toBe(0);
+  });
+
+  it('a milestone filter admits only issues in that milestone', async () => {
+    const { repo, github, poller } = setup({ filterMilestone: 'v2' });
+    github.seedIssue('acme/web#1', { number: 1, author: 'acme', milestone: 'v1' });
+    github.seedIssue('acme/web#2', { number: 2, author: 'acme', milestone: 'v2' });
+
+    const pass = await poller.checkOnce();
+
+    expect(pass).toMatchObject({ reposScanned: 1, started: 1, skipped: 0 });
+    expect(repo.listRuns().map((r) => r.issueRef)).toEqual(['acme/web#2']);
+  });
+
+  it('when both fields are set, only an issue matching all of them is admitted (match-all)', async () => {
+    const { repo, github, poller } = setup({ filterLabel: 'bug', filterMilestone: 'v2' });
+    github.seedIssue('acme/web#1', { number: 1, author: 'acme', labels: ['bug'], milestone: 'v1' }); // label only
+    github.seedIssue('acme/web#2', { number: 2, author: 'acme', labels: ['chore'], milestone: 'v2' }); // milestone only
+    github.seedIssue('acme/web#3', { number: 3, author: 'acme', labels: ['bug'], milestone: 'v2' }); // both
+
+    const pass = await poller.checkOnce();
+
+    expect(pass).toMatchObject({ started: 1, skipped: 0 });
+    expect(repo.listRuns().map((r) => r.issueRef)).toEqual(['acme/web#3']);
+  });
+
+  it('the scope filter and the safety guards compose: a filtered-in issue must still clear the guards', async () => {
+    const { repo, github, poller } = setup({ filterLabel: 'bug' });
+    // #1: eligible + lowest, but out of scope (no label) → excluded before the guards, never counted.
+    github.seedIssue('acme/web#1', { number: 1, author: 'acme' });
+    // #2: in scope but guard-blocked (a stranger filed it) → a skip within the scoped set.
+    github.seedIssue('acme/web#2', { number: 2, author: 'stranger', labels: ['bug'] });
+    // #3: in scope and eligible → the one admitted.
+    github.seedIssue('acme/web#3', { number: 3, author: 'acme', labels: ['bug'] });
+
+    const pass = await poller.checkOnce();
+
+    expect(pass).toMatchObject({ started: 1, skipped: 1 }); // #3 started, #2 skipped, #1 not counted
+    expect(repo.listRuns().map((r) => r.issueRef)).toEqual(['acme/web#3']);
+  });
+
+  it('with no scope filter set, behaviour is unchanged — all open issues are considered', async () => {
+    const { repo, github, poller } = setup();
+    github.seedIssue('acme/web#1', { number: 1, author: 'acme', labels: ['bug'] });
+
+    expect((await poller.checkOnce()).started).toBe(1);
+    expect(repo.listRuns().map((r) => r.issueRef)).toEqual(['acme/web#1']);
   });
 });
 

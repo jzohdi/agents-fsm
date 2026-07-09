@@ -31,6 +31,7 @@ import {
   type GitHub,
   type Issue,
   type IssueComment,
+  type IssueFilter,
   type OpenPrInput,
   type PrComment,
   type PrepareWorkingTreeInput,
@@ -118,14 +119,19 @@ export class GitHubCli implements GitHub {
     return this.viewIssue(issueNumber(issueRef), issueRef);
   }
 
-  async listOpenIssues(): Promise<RepoIssue[]> {
+  async listOpenIssues(filter?: IssueFilter): Promise<RepoIssue[]> {
     // `--search '-label:...'` can't express the guards (author/assignee live outside label search), so
     // we pull the fields and filter in `loop/issue-intake` — one place, unit-tested without network.
     // `--limit` bounds the page; a backlog beyond it is picked up over successive ticks as issues clear.
-    const json = await this.gh([
+    const args = [
       'issue', 'list', '--repo', this.repo, '--state', 'open',
       '--json', 'number,title,body,author,assignees,labels', '--limit', '200',
-    ]);
+    ];
+    // Scope filter (issue #11): AND-combined by `gh`, so appending both narrows to issues matching all.
+    // Only append a non-empty field — an empty string must never degenerate into `--label ''`.
+    if (filter?.label && filter.label.trim()) args.push('--label', filter.label);
+    if (filter?.milestone && filter.milestone.trim()) args.push('--milestone', filter.milestone);
+    const json = await this.gh(args);
     const parsed = JSON.parse(json) as RawListIssue[];
     return parsed.map((i) => ({
       ref: `${this.repo}#${i.number}`,

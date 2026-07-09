@@ -183,6 +183,33 @@ export async function setRepoWatch(repoRef: string, watch: boolean): Promise<voi
 }
 
 /**
+ * Set an enrolled repo's continuous-mode scope filter (`POST /repos/watch`, issue #11): narrows the
+ * watched backlog to open issues matching the given label and/or milestone (empty → clears that
+ * dimension, normalized server-side). Distinct from the watch toggle and the guard-bypass override —
+ * it POSTs the row's *current* `watch` value so it never toggles watching, then refreshes the ledger.
+ */
+export async function setRepoWatchFilter(
+  repoRef: string,
+  filterLabel: string | null,
+  filterMilestone: string | null,
+): Promise<void> {
+  try {
+    // The endpoint requires `watch`; send the row's current value so the filter update never toggles it.
+    const watch = ui.repos.find((r) => r.repoRef === repoRef)?.watch ?? false;
+    await request<Repo>('POST', '/repos/watch', { repoRef, watch, filterLabel, filterMilestone });
+    banner(
+      filterLabel || filterMilestone
+        ? `${repoRef}: watching issues matching ${[filterLabel && `label ${filterLabel}`, filterMilestone && `milestone ${filterMilestone}`].filter(Boolean).join(' + ')}.`
+        : `${repoRef}: watching all open issues (scope filter cleared).`,
+      'ok',
+    );
+    await loadRepos();
+  } catch (err) {
+    banner(`Could not update scope filter: ${(err as Error).message}`, 'err');
+  }
+}
+
+/**
  * Set an enrolled repo's merge-conflict policy (`POST /repos/conflict-policy`): `manual` parks a
  * conflicted run for the operator; `auto` lets a verified resolver agent handle it. Refreshes the
  * ledger so the control reflects state.

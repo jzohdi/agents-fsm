@@ -3,7 +3,7 @@
   // the attention queue, the repositories ledger (with inline enrollment), and a recent-activity
   // feed. Everything derives from `ui.runs`/`ui.repos`, which the SSE stream keeps live — this page
   // is pure derivation, no polling of its own.
-  import { ui, configureRepoSource, enrollRepo, fetchDirSuggestions, openRepoBoard, openRun, setRepoConflictPolicy, setRepoWatch } from './store.svelte';
+  import { ui, configureRepoSource, enrollRepo, fetchDirSuggestions, openRepoBoard, openRun, setRepoConflictPolicy, setRepoWatch, setRepoWatchFilter } from './store.svelte';
   import {
     attentionModel,
     costStatusModel,
@@ -121,6 +121,47 @@
     clearTimeout(sugTimer);
     dirSugs = [];
     sugFor = null;
+  }
+
+  // Continuous-mode scope filter (issue #11). A compact chip next to Watch expands into two draft
+  // inputs (label, milestone); applying POSTs the filter without toggling `watch`. Drafts are keyed
+  // by repo so one row's typing never leaks into another; `?? row.value` shows the persisted filter.
+  type FilterRow = { repoRef: string; watchFilterLabel: string | null; watchFilterMilestone: string | null };
+  let openFilter = $state<string | null>(null);
+  let filterLabelInputs = $state<Record<string, string>>({});
+  let filterMilestoneInputs = $state<Record<string, string>>({});
+  let savingFilter = $state<string | null>(null);
+
+  /** A one-line summary of the active scope: `label:bug · milestone:v2`, or "all issues" when unset. */
+  function filterSummary(row: FilterRow): string {
+    const parts: string[] = [];
+    if (row.watchFilterLabel) parts.push(`label:${row.watchFilterLabel}`);
+    if (row.watchFilterMilestone) parts.push(`milestone:${row.watchFilterMilestone}`);
+    return parts.length ? parts.join(' · ') : 'all issues';
+  }
+
+  function toggleFilter(row: FilterRow): void {
+    openFilter = openFilter === row.repoRef ? null : row.repoRef;
+  }
+
+  function filterLabelValue(row: FilterRow): string {
+    return filterLabelInputs[row.repoRef] ?? (row.watchFilterLabel ?? '');
+  }
+  function filterMilestoneValue(row: FilterRow): string {
+    return filterMilestoneInputs[row.repoRef] ?? (row.watchFilterMilestone ?? '');
+  }
+
+  async function applyFilter(row: FilterRow): Promise<void> {
+    savingFilter = row.repoRef;
+    try {
+      // Empty inputs clear that dimension (normalized to null server-side).
+      await setRepoWatchFilter(row.repoRef, filterLabelValue(row).trim() || null, filterMilestoneValue(row).trim() || null);
+      openFilter = null;
+      delete filterLabelInputs[row.repoRef];
+      delete filterMilestoneInputs[row.repoRef];
+    } finally {
+      savingFilter = null;
+    }
   }
 
   async function saveSource(row: LedgerRow, mode: 'clone' | 'local'): Promise<void> {
@@ -310,6 +351,21 @@
         >
           <span class="pip"></span>{row.watch ? 'Watching' : 'Watch'}
         </button>
+        <!-- Continuous-mode scope filter (issue #11): narrow the watched backlog to a label and/or
+             milestone. A chip shows the active scope; clicking expands the editor row below. Distinct
+             from the guard-bypass override — it only scopes which issues are considered candidates. -->
+        {#if row.enrolled}
+          <button
+            type="button"
+            class="af-hwatch af-hfilter"
+            class:on={openFilter === row.repoRef}
+            class:scoped={row.watchFilterLabel != null || row.watchFilterMilestone != null}
+            title="Scope the watched backlog to a label and/or milestone (issue #11)"
+            onclick={() => toggleFilter(row)}
+          >
+            <span class="pip"></span>Scope: {filterSummary(row)}
+          </button>
+        {/if}
         <!-- Merge-conflict policy toggle: when a run's branch conflicts with base (the between-stage
              sync, or a finished run's PR turning CONFLICTING), 'auto' lets a resolver agent handle it;
              'manual' parks the run for you. -->
@@ -388,6 +444,39 @@
               {savingSource === row.repoRef ? 'Checking…' : 'Use folder'}
             </button>
           {/if}
+        </div>
+      {/if}
+
+      <!-- Continuous-mode scope-filter editor (issue #11): two draft inputs (label, milestone) with an
+           apply action. Empty inputs clear that dimension. Only meaningful for an enrolled repo. -->
+      {#if row.enrolled && openFilter === row.repoRef}
+        <div class="af-hfiltercfg">
+          <span class="lbl">scope</span>
+          <input
+            type="text"
+            class="af-filterin"
+            placeholder="label (optional)"
+            value={filterLabelValue(row)}
+            oninput={(e) => { filterLabelInputs[row.repoRef] = e.currentTarget.value; }}
+            onkeydown={(e) => { if (e.key === 'Enter') applyFilter(row); }}
+          />
+          <input
+            type="text"
+            class="af-filterin"
+            placeholder="milestone (optional)"
+            value={filterMilestoneValue(row)}
+            oninput={(e) => { filterMilestoneInputs[row.repoRef] = e.currentTarget.value; }}
+            onkeydown={(e) => { if (e.key === 'Enter') applyFilter(row); }}
+          />
+          <button
+            type="button"
+            class="af-srcsave"
+            disabled={savingFilter === row.repoRef}
+            title="Only issues matching every set field are considered; leave both blank to watch all open issues"
+            onclick={() => applyFilter(row)}
+          >
+            {savingFilter === row.repoRef ? 'Saving…' : 'Apply'}
+          </button>
         </div>
       {/if}
     {/each}

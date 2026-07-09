@@ -712,6 +712,24 @@ input, textarea, button, select { font: inherit; }
 .af-srcsave:hover:not(:disabled) { color: var(--accent); border-color: var(--accent-line); }
 .af-srcsave:disabled { opacity: 0.45; cursor: not-allowed; }
 
+/* Continuous-mode scope filter (issue #11): a chip summarizing the active scope + its editor row.
+   The chip reuses the watch pill's shape but carries a live filter value, so it is not uppercased and
+   truncates when long; `.scoped` accents it when a filter is set (vs. the default "all issues"). */
+.af-hfilter { text-transform: none; letter-spacing: 0.02em; max-width: 240px; }
+.af-hfilter > :not(.pip) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.af-hfilter.scoped { color: var(--accent); border-color: var(--accent-line); }
+.af-hfilter.scoped .pip { background: var(--accent); }
+.af-hfiltercfg {
+  display: flex; align-items: center; gap: 12px; padding: 9px 2px 12px 30px;
+  border-bottom: 1px solid var(--rule); background: var(--paper2);
+}
+.af-hfiltercfg .lbl { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink4); flex: 0 0 auto; }
+.af-filterin {
+  flex: 1 1 auto; min-width: 0; max-width: 240px; box-sizing: border-box; font-family: var(--mono);
+  font-size: 12px; padding: 6px 10px; border: 1px solid var(--rule); border-radius: 2px; background: var(--paper); color: var(--ink);
+}
+.af-filterin:focus { outline: none; border-color: var(--accent-line); }
+
 /* recent activity */
 .af-hrecent { animation: af-hreveal 0.5s 0.34s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
 .af-hact .when { flex: 0 0 76px; }
