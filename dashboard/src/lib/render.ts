@@ -392,6 +392,9 @@ export interface RepoLedgerRow {
   watchFilterLabel: string | null;
   /** Continuous mode scope filter (issue #11): only consider open issues in this milestone; `null` = none. */
   watchFilterMilestone: string | null;
+  /** Continuous mode (agents-fsm#10): max runs this watched repo admits in flight at once. Default 1
+   *  (sequential). Only meaningful while {@link watch} is on; actual concurrency is bounded by FLEET_CONCURRENCY. */
+  watchInFlightCap: number;
   /** Working-directory source (Milestone 12): `null` = unconfigured (runs blocked), `'clone'`, or `'local'`. */
   sourceMode: 'clone' | 'local' | null;
   /** The validated local checkout path when {@link sourceMode} is `'local'`, else `null`. */
@@ -423,7 +426,7 @@ export function repoLedgerModel(repos: Repo[] | undefined, runs: Run[] | undefin
   const rows = new Map<string, RepoLedgerRow>();
   const blank = (repoRef: string): RepoLedgerRow => ({
     repoRef, enrolled: false, watch: false, watchFilterLabel: null, watchFilterMilestone: null,
-    sourceMode: null, localRepo: null, configured: false,
+    watchInFlightCap: 1, sourceMode: null, localRepo: null, configured: false,
     conflictPolicy: 'manual', baseBranch: '', runs: 0, active: 0, awaiting: 0, needsHuman: 0,
     resolved: 0, tokens: 0, cost: 0, costLabel: '$0.00', lastActivity: null,
   });
@@ -432,6 +435,8 @@ export function repoLedgerModel(repos: Repo[] | undefined, runs: Run[] | undefin
       ...blank(repo.repoRef), enrolled: true, watch: repo.watch, baseBranch: repo.baseBranch,
       // Older daemons that predate the scope filter don't send these fields; default to null (no filter).
       watchFilterLabel: repo.watchFilterLabel ?? null, watchFilterMilestone: repo.watchFilterMilestone ?? null,
+      // Older daemons that predate the in-flight cap don't send it; default to 1 (matches the store default).
+      watchInFlightCap: repo.watchInFlightCap ?? 1,
       sourceMode: repo.sourceMode, localRepo: repo.localRepo, configured: repo.sourceMode !== null,
       // Older daemons don't send the field; default to the server's own default (manual).
       conflictPolicy: repo.conflictPolicy ?? 'manual',

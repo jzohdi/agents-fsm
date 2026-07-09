@@ -3,7 +3,7 @@
   // the attention queue, the repositories ledger (with inline enrollment), and a recent-activity
   // feed. Everything derives from `ui.runs`/`ui.repos`, which the SSE stream keeps live — this page
   // is pure derivation, no polling of its own.
-  import { ui, configureRepoSource, enrollRepo, fetchDirSuggestions, openRepoBoard, openRun, setRepoConflictPolicy, setRepoWatch, setRepoWatchFilter } from './store.svelte';
+  import { ui, configureRepoSource, enrollRepo, fetchDirSuggestions, openRepoBoard, openRun, setRepoConflictPolicy, setRepoWatch, setRepoWatchFilter, setRepoWatchInFlightCap } from './store.svelte';
   import {
     attentionModel,
     costStatusModel,
@@ -161,6 +161,35 @@
       delete filterMilestoneInputs[row.repoRef];
     } finally {
       savingFilter = null;
+    }
+  }
+
+  // Continuous-mode in-flight cap (agents-fsm#10). A compact chip next to Scope expands into a single
+  // integer input; applying POSTs the cap without toggling `watch`. Draft is keyed by repo so one
+  // row's typing never leaks into another; `?? row.watchInFlightCap` shows the persisted value.
+  type CapRow = { repoRef: string; watchInFlightCap: number };
+  let openCap = $state<string | null>(null);
+  let capInputs = $state<Record<string, string>>({});
+  let savingCap = $state<string | null>(null);
+
+  function toggleCap(row: CapRow): void {
+    openCap = openCap === row.repoRef ? null : row.repoRef;
+  }
+
+  function capValue(row: CapRow): string {
+    return capInputs[row.repoRef] ?? String(row.watchInFlightCap);
+  }
+
+  async function applyCap(row: CapRow): Promise<void> {
+    const cap = Math.trunc(Number(capValue(row)));
+    if (!Number.isInteger(cap) || cap < 1) return; // the input enforces min=1; ignore a bad draft
+    savingCap = row.repoRef;
+    try {
+      await setRepoWatchInFlightCap(row.repoRef, cap);
+      openCap = null;
+      delete capInputs[row.repoRef];
+    } finally {
+      savingCap = null;
     }
   }
 
@@ -366,6 +395,21 @@
             <span class="pip"></span>Scope: {filterSummary(row)}
           </button>
         {/if}
+        <!-- Continuous-mode in-flight cap (agents-fsm#10): how many of the watched backlog's issues the
+             fleet admits in parallel (default 1 = sequential). A chip shows the current cap; clicking
+             expands the editor row below. Actual concurrency stays bounded by FLEET_CONCURRENCY. -->
+        {#if row.enrolled}
+          <button
+            type="button"
+            class="af-hwatch af-hcap"
+            class:on={openCap === row.repoRef}
+            class:scoped={row.watchInFlightCap > 1}
+            title="How many of this repo's watched issues run in parallel (agents-fsm#10)"
+            onclick={() => toggleCap(row)}
+          >
+            <span class="pip"></span>Parallel: {row.watchInFlightCap}
+          </button>
+        {/if}
         <!-- Merge-conflict policy toggle: when a run's branch conflicts with base (the between-stage
              sync, or a finished run's PR turning CONFLICTING), 'auto' lets a resolver agent handle it;
              'manual' parks the run for you. -->
@@ -476,6 +520,32 @@
             onclick={() => applyFilter(row)}
           >
             {savingFilter === row.repoRef ? 'Saving…' : 'Apply'}
+          </button>
+        </div>
+      {/if}
+
+      <!-- Continuous-mode in-flight-cap editor (agents-fsm#10): a single integer input (min 1) with an
+           apply action. Default 1 = today's strictly-sequential pickup. Only meaningful for an enrolled repo. -->
+      {#if row.enrolled && openCap === row.repoRef}
+        <div class="af-hfiltercfg">
+          <span class="lbl">parallel</span>
+          <input
+            type="number"
+            min="1"
+            step="1"
+            class="af-filterin af-capin"
+            value={capValue(row)}
+            oninput={(e) => { capInputs[row.repoRef] = e.currentTarget.value; }}
+            onkeydown={(e) => { if (e.key === 'Enter') applyCap(row); }}
+          />
+          <button
+            type="button"
+            class="af-srcsave"
+            disabled={savingCap === row.repoRef}
+            title="Admit up to this many of the watched repo's issues at once — actual concurrency is still bounded by FLEET_CONCURRENCY"
+            onclick={() => applyCap(row)}
+          >
+            {savingCap === row.repoRef ? 'Saving…' : 'Apply'}
           </button>
         </div>
       {/if}

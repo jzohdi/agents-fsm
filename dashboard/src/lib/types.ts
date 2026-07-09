@@ -231,6 +231,11 @@ export interface Repo {
   watchFilterLabel: string | null;
   /** Continuous mode scope filter (issue #11): only pick up open issues in this milestone; `null` = none. */
   watchFilterMilestone: string | null;
+  /** Continuous mode (agents-fsm#10): max runs this watched repo admits in flight at once. Default 1
+   *  (sequential). Only meaningful while {@link watch} is on; actual concurrency is still bounded by the
+   *  drain pool's FLEET_CONCURRENCY regardless. Optional on the wire: an older daemon that predates the
+   *  column omits it, so consumers default it to 1 (see `repoLedgerModel`). */
+  watchInFlightCap?: number;
   /** Working-directory source (Milestone 12): `null` = unconfigured (runs blocked until chosen),
    *  `'clone'` = clone a fresh per-run tree from GitHub, `'local'` = use {@link localRepo} via git worktree. */
   sourceMode: 'clone' | 'local' | null;

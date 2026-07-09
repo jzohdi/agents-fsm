@@ -210,6 +210,29 @@ export async function setRepoWatchFilter(
 }
 
 /**
+ * Set an enrolled repo's continuous-mode in-flight cap (`POST /repos/watch`, agents-fsm#10): how many
+ * of the watched repo's issues the fleet admits in parallel (default 1 = sequential). Like the scope
+ * filter, it POSTs the row's *current* `watch` value so it never toggles watching, then refreshes the
+ * ledger. Actual concurrency stays bounded by the drain pool's FLEET_CONCURRENCY regardless.
+ */
+export async function setRepoWatchInFlightCap(repoRef: string, inFlightCap: number): Promise<void> {
+  try {
+    // The endpoint requires `watch`; send the row's current value so the cap update never toggles it.
+    const watch = ui.repos.find((r) => r.repoRef === repoRef)?.watch ?? false;
+    await request<Repo>('POST', '/repos/watch', { repoRef, watch, inFlightCap });
+    banner(
+      inFlightCap > 1
+        ? `${repoRef}: admitting up to ${inFlightCap} issues in parallel.`
+        : `${repoRef}: admitting one issue at a time.`,
+      'ok',
+    );
+    await loadRepos();
+  } catch (err) {
+    banner(`Could not update in-flight cap: ${(err as Error).message}`, 'err');
+  }
+}
+
+/**
  * Set an enrolled repo's merge-conflict policy (`POST /repos/conflict-policy`): `manual` parks a
  * conflicted run for the operator; `auto` lets a verified resolver agent handle it. Refreshes the
  * ledger so the control reflects state.
