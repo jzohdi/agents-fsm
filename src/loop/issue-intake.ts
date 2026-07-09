@@ -47,10 +47,12 @@ export interface IntakeSkip {
   reason: string;
 }
 
-/** What one repo's intake pass concluded — at most one `start`, plus visibility into the rest. */
+/** What one repo's intake pass concluded — the issues to admit this pass, plus visibility into the rest. */
 export interface IntakePlan {
-  /** The issue to admit next, or `null` (cap reached, nothing new, or nothing eligible). */
-  start: { issueRef: string; issueNumber: number } | null;
+  /** The issues to admit **this pass**, oldest-first (issue number asc), up to `cap - inFlight` free
+   *  slots (agents-fsm#10 — parallel pickup). Empty when the cap is full, nothing is new, or nothing
+   *  eligible. At the default cap of 1 this holds at most one entry (today's sequential behaviour). */
+  starts: Array<{ issueRef: string; issueNumber: number }>;
   /** How many of the repo's open issues already hold a slot (a non-`stopped` run). */
   inFlight: number;
   /** The resolved (clamped) in-flight cap. */
@@ -71,8 +73,9 @@ const WIP_RE = /\[wip\]/i;
  *                         and a non-`stopped` run counts against the in-flight cap.
  * @param policy           the owner / override-label / cap knobs.
  *
- * Sequential by construction: with the default cap of 1, one non-`stopped` run holds the slot and the
- * next issue is admitted only once that run's issue closes (a merge) or is stopped.
+ * Fills up to `free = cap - inFlight` slots per pass, oldest-first (agents-fsm#10 — parallel pickup).
+ * With the default cap of 1 this admits at most one issue per pass — one non-`stopped` run holds the
+ * slot and the next issue is admitted only once that run's issue closes (a merge) or is stopped.
  */
 export function decideIntake(
   openIssues: IntakeIssue[],
@@ -93,18 +96,22 @@ export function decideIntake(
     candidates.push(issue);
   }
 
-  const plan: IntakePlan = { start: null, inFlight, cap, skipped: [] };
-  if (inFlight >= cap) return plan; // slot full — sequential mode waits for a merge/stop to free it
+  const plan: IntakePlan = { starts: [], inFlight, cap, skipped: [] };
+  const free = cap - inFlight;
+  if (free <= 0) return plan; // slots full — no candidate is even evaluated; wait for a merge/stop to free one
 
   // Oldest first (issue number asc): deterministic, and it works the backlog in the order it was filed.
   candidates.sort((a, b) => a.number - b.number);
   for (const issue of candidates) {
     const reason = ineligibleReason(issue, policy);
     if (reason === null) {
-      plan.start = { issueRef: issue.ref, issueNumber: issue.number };
-      return plan; // one admission per pass; the next tick sees it in flight and holds
+      plan.starts.push({ issueRef: issue.ref, issueNumber: issue.number });
+      // Stop once the free slots are filled; the remaining candidates simply wait for a future pass
+      // (neither started nor skipped — they are still eligible, just held back by the cap).
+      if (plan.starts.length === free) break;
+    } else {
+      plan.skipped.push({ ref: issue.ref, number: issue.number, reason });
     }
-    plan.skipped.push({ ref: issue.ref, number: issue.number, reason });
   }
   return plan;
 }

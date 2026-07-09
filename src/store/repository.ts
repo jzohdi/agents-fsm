@@ -198,6 +198,10 @@ export interface Repo {
   /** Continuous mode scope filter (issue #11): only consider open issues in this milestone.
    *  `null` = no milestone filter. Only meaningful while {@link watch} is on. */
   watchFilterMilestone: string | null;
+  /** Continuous mode (agents-fsm#10): max runs this watched repo admits in flight at once. Default 1
+   *  (sequential). Only meaningful while {@link watch} is on; clamped to `>= 1` by the decision, and
+   *  actual concurrency is still bounded by the drain pool's FLEET_CONCURRENCY regardless. */
+  watchInFlightCap: number;
   createdAt: string;
 }
 
@@ -377,6 +381,7 @@ interface RepoRow {
   conflict_policy: ConflictPolicy;
   watch_filter_label: string | null;
   watch_filter_milestone: string | null;
+  watch_in_flight_cap: number;
   created_at: string;
 }
 
@@ -491,6 +496,7 @@ function mapRepo(r: RepoRow): Repo {
     conflictPolicy: r.conflict_policy,
     watchFilterLabel: r.watch_filter_label,
     watchFilterMilestone: r.watch_filter_milestone,
+    watchInFlightCap: r.watch_in_flight_cap,
     createdAt: r.created_at,
   };
 }
@@ -578,13 +584,17 @@ export class Repository {
    * filter (`watch_filter_label`/`watch_filter_milestone`) *narrows* which issues intake considers —
    * distinct from `watch_label`, the guard-bypass override. The SET-list is built dynamically from which
    * of the optional columns are present, so a plain toggle (`setRepoWatch(ref, watch)`) never clobbers a
-   * previously-set label or filter. No-op on an unenrolled repo (0 rows updated).
+   * previously-set label, filter, or in-flight cap. The `inFlightCap` (agents-fsm#10) follows the same
+   * convention (absent → leave; a number → set `watch_in_flight_cap`); the value is stored as given (the
+   * API boundary validates integer / `>= 1`; the pure decision additionally clamps defensively). No-op on
+   * an unenrolled repo (0 rows updated).
    */
   setRepoWatch(
     repoRef: string,
     watch: boolean,
     label?: string | null,
     filter?: { filterLabel?: string | null; filterMilestone?: string | null },
+    inFlightCap?: number,
   ): void {
     const sets = ['watch = ?'];
     const params: Array<string | number | null> = [watch ? 1 : 0];
@@ -599,6 +609,10 @@ export class Repository {
     if (filter?.filterMilestone !== undefined) {
       sets.push('watch_filter_milestone = ?');
       params.push(filter.filterMilestone);
+    }
+    if (inFlightCap !== undefined) {
+      sets.push('watch_in_flight_cap = ?');
+      params.push(inFlightCap);
     }
     params.push(repoRef);
     this.db.prepare(`UPDATE repos SET ${sets.join(', ')} WHERE repo_ref = ? COLLATE NOCASE`).run(...params);

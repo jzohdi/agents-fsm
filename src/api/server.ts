@@ -245,7 +245,9 @@ async function handle(
   // repoRef (it contains a `/`, awkward in a path segment); `watch` boolean required, `label` optional
   // (string to set a custom override label, null to reset to the default, absent to leave it).
   // `filterLabel`/`filterMilestone` (issue #11) are the optional scope filter — same shape as `label`:
-  // a string to set, null to clear, absent to leave; an empty string normalizes to null server-side. ---
+  // a string to set, null to clear, absent to leave; an empty string normalizes to null server-side.
+  // `inFlightCap` (agents-fsm#10) is the optional parallel-pickup cap — a number to set, absent to leave;
+  // the integer / `>= 1` check lives in the orchestrator (the single validation authority). ---
   if (method === 'POST' && path === '/repos/watch') {
     const body = await readJson(req, ctx.maxBodyBytes);
     const watch = body.watch;
@@ -262,6 +264,10 @@ async function handle(
     if (filterMilestone !== undefined && filterMilestone !== null && typeof filterMilestone !== 'string') {
       return sendError(res, new ApiError(400, '"filterMilestone" must be a string, null, or omitted'));
     }
+    const inFlightCap = body.inFlightCap;
+    if (inFlightCap !== undefined && typeof inFlightCap !== 'number') {
+      return sendError(res, new ApiError(400, '"inFlightCap" must be a positive integer or omitted'));
+    }
     return sendJson(
       res,
       200,
@@ -271,6 +277,7 @@ async function handle(
         label: label as string | null | undefined,
         filterLabel: filterLabel as string | null | undefined,
         filterMilestone: filterMilestone as string | null | undefined,
+        inFlightCap: inFlightCap as number | undefined,
       }),
     );
   }

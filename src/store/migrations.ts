@@ -221,6 +221,14 @@ export const MIGRATIONS: Migration[] = [
       addColumnIfMissing(db, 'repos', 'watch_filter_milestone', 'TEXT');
     },
   },
+  {
+    version: 17,
+    name: 'add repos.watch_in_flight_cap',
+    // Continuous mode configurable in-flight cap (agents-fsm#10). Additive column with a constant
+    // default 1, so a pre-existing DB backfills to 1 (sequential — behaviour unchanged) and a fresh DB
+    // already has it from schema.sql. Mirrors schema.sql.
+    apply: (db) => addColumnIfMissing(db, 'repos', 'watch_in_flight_cap', 'INTEGER NOT NULL DEFAULT 1'),
+  },
 ];
 
 // Guard the invariants the runner relies on: versions a gap-free, strictly increasing 1..N sequence

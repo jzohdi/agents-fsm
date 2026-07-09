@@ -179,7 +179,12 @@ CREATE TABLE IF NOT EXISTS repos (
   -- issues); both set = match all (AND). Appended last so a fresh schema matches a DB retrofitted by the
   -- additive migration (db drift guard).
   watch_filter_label     TEXT,   -- scope the watched backlog to this label (NULL = no label filter)
-  watch_filter_milestone TEXT    -- scope the watched backlog to this milestone (NULL = no milestone filter)
+  watch_filter_milestone TEXT,   -- scope the watched backlog to this milestone (NULL = no milestone filter)
+  -- Continuous mode configurable in-flight cap (agents-fsm#10): max runs a watched repo admits at once
+  -- (parallel pickup). Default 1 = today's strictly-sequential behaviour. The pure decision clamps it to
+  -- >= 1 and actual concurrency is still bounded by the drain pool's FLEET_CONCURRENCY. Appended last so a
+  -- fresh schema matches a DB retrofitted by the additive migration (db drift guard).
+  watch_in_flight_cap INTEGER NOT NULL DEFAULT 1   -- max runs a watched repo admits at once (continuous mode); 1 = sequential
 );
 
 -- Per-run operator ↔ agent chat — the run's "general chat" side channel (singular name by convention

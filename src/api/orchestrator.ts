@@ -941,7 +941,9 @@ export class Orchestrator {
    * considers before the guards run (a distinct concept): omit to leave each as-is, or pass a value to set
    * it — an empty/whitespace-only string normalizes to `null` (clears it), so a blank dashboard input
    * never degenerates into a `--label ''`. A filter is valid regardless of watch/source state, so it has
-   * no extra guard.
+   * no extra guard. `inFlightCap` (agents-fsm#10) sets the parallel-pickup cap — omit to leave, else a
+   * positive integer (validated here, the single authority); actual concurrency stays bounded by
+   * `FLEET_CONCURRENCY` regardless of the cap.
    */
   setRepoWatch(input: {
     repoRef: string;
@@ -949,6 +951,7 @@ export class Orchestrator {
     label?: string | null;
     filterLabel?: string | null;
     filterMilestone?: string | null;
+    inFlightCap?: number;
   }): Repo {
     if (!input.repoRef) throw new ApiError(400, 'repoRef is required');
     let ref: string;
@@ -968,10 +971,18 @@ export class Orchestrator {
     // as-is); a string is trimmed and an empty result becomes `null` (clears); `null` stays `null`.
     const normalizeFilter = (v: string | null | undefined): string | null | undefined =>
       v === undefined ? undefined : v?.trim() || null;
-    this.repo.setRepoWatch(ref, input.watch, input.label, {
-      filterLabel: normalizeFilter(input.filterLabel),
-      filterMilestone: normalizeFilter(input.filterMilestone),
-    });
+    // Validate the in-flight cap at this one boundary: absent leaves the stored value; otherwise it must
+    // be a positive integer (a fractional / zero / negative cap is a client error, not silently clamped).
+    if (input.inFlightCap !== undefined && !(Number.isInteger(input.inFlightCap) && input.inFlightCap >= 1)) {
+      throw new ApiError(400, '"inFlightCap" must be a positive integer');
+    }
+    this.repo.setRepoWatch(
+      ref,
+      input.watch,
+      input.label,
+      { filterLabel: normalizeFilter(input.filterLabel), filterMilestone: normalizeFilter(input.filterMilestone) },
+      input.inFlightCap,
+    );
     return this.repo.getRepo(ref)!;
   }
 
