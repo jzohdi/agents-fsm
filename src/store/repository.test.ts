@@ -709,6 +709,31 @@ describe('repos registry (Milestone 8 Phase A)', () => {
     expect(repo.getRepo('o/r')?.watchInFlightCap).toBe(5);
   });
 
+  it('persists the auto-merge flag, defaults to off, and never clobbers it on a re-enroll (agents-fsm#15)', () => {
+    repo.upsertRepo({ repoRef: 'o/r', workingRoot: './a' });
+
+    // A repo never assigned auto-merge reads back false — the flag is opt-in, default off (INV-STORE-DEFAULT).
+    expect(repo.getRepo('o/r')?.autoMerge).toBe(false);
+
+    // The dedicated setter flips it, persisted independently of enrollment (like watch/source/conflict-policy).
+    repo.setRepoAutoMerge('o/r', true);
+    expect(repo.getRepo('o/r')).toMatchObject({ autoMerge: true });
+
+    // A re-enroll (upsert never touches the auto_merge column) leaves the operator's choice intact…
+    repo.upsertRepo({ repoRef: 'o/r', workingRoot: './b', baseBranch: 'develop' });
+    expect(repo.getRepo('o/r')).toMatchObject({ workingRoot: './b', autoMerge: true });
+
+    // …and it toggles back off.
+    repo.setRepoAutoMerge('o/r', false);
+    expect(repo.getRepo('o/r')?.autoMerge).toBe(false);
+  });
+
+  it('setRepoAutoMerge matches the ref case-insensitively (agents-fsm#15)', () => {
+    repo.upsertRepo({ repoRef: 'Acme/Web', workingRoot: './a' });
+    repo.setRepoAutoMerge('acme/web', true);
+    expect(repo.getRepo('Acme/Web')?.autoMerge).toBe(true);
+  });
+
   it('upsert is idempotent on repo_ref and re-points the adapter config', () => {
     repo.upsertRepo({ repoRef: 'o/r', workingRoot: './a', baseBranch: 'main' });
     const updated = repo.upsertRepo({ repoRef: 'o/r', workingRoot: './b', baseBranch: 'develop', cloneUrl: 'git@host:o/r.git' });

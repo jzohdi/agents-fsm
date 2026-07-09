@@ -252,6 +252,53 @@ describe('FakeGitHub — pull requests and comments', () => {
   });
 });
 
+describe('FakeGitHub — mergePr (agents-fsm#15 auto-merge)', () => {
+  it('merges an open PR (state → merged) and closes its Closes #N issue — the dependency-satisfied signal', async () => {
+    const gh = new FakeGitHub({ repoRef: 'o/r' }).seedIssue('o/r#1', { number: 1 });
+    const pr = await gh.openPr({ branch: 'b', base: 'main', title: 't', body: 'Closes #1\n\nthe work' });
+
+    const result = await gh.mergePr({ prNumber: pr.number, base: 'main', method: 'merge', deleteBranch: true });
+    expect(result).toEqual({ merged: true });
+    expect((await gh.getPr(pr.number)).state).toBe('merged');
+    // Merging the `Closes #1` PR closes the linked issue (README §3.5) — mirrors a real GitHub merge.
+    expect((await gh.readIssue('o/r#1')).state).toBe('closed');
+  });
+
+  it('parses Closes/Fixes/Resolves case-insensitively and closes every referenced issue', async () => {
+    const gh = new FakeGitHub({ repoRef: 'o/r' })
+      .seedIssue('o/r#1', { number: 1 })
+      .seedIssue('o/r#2', { number: 2 });
+    const pr = await gh.openPr({ branch: 'b', base: 'main', title: 't', body: 'fixes #1, and Resolves #2' });
+
+    await gh.mergePr({ prNumber: pr.number, base: 'main' });
+    expect((await gh.readIssue('o/r#1')).state).toBe('closed');
+    expect((await gh.readIssue('o/r#2')).state).toBe('closed');
+  });
+
+  it('never force-merges a conflicting PR: returns merged:false and leaves the PR + issue open', async () => {
+    const gh = new FakeGitHub({ repoRef: 'o/r' }).seedIssue('o/r#1', { number: 1 });
+    const pr = await gh.openPr({ branch: 'b', base: 'main', title: 't', body: 'Closes #1' });
+    gh.setPrMergeable(pr.number, 'conflicting'); // base drifted under the finished run's PR
+
+    const result = await gh.mergePr({ prNumber: pr.number, base: 'main' });
+    expect(result).toMatchObject({ merged: false, mergeable: 'conflicting' });
+    expect(typeof (result as { reason: string }).reason).toBe('string'); // a human-readable why
+    // Not merged, not lost: the PR stays open + merge-ready and its issue stays open for a human.
+    expect((await gh.getPr(pr.number)).state).toBe('open');
+    expect((await gh.readIssue('o/r#1')).state).toBe('open');
+  });
+
+  it('is idempotent: merging an already-merged PR is a no-op success (ledger replay under recovery)', async () => {
+    const gh = new FakeGitHub({ repoRef: 'o/r' }).seedIssue('o/r#1', { number: 1 });
+    const pr = await gh.openPr({ branch: 'b', base: 'main', title: 't', body: 'Closes #1' });
+
+    expect(await gh.mergePr({ prNumber: pr.number, base: 'main' })).toEqual({ merged: true });
+    // A re-dispatched merge (crash/replay) sees an already-merged PR and reports success without error.
+    expect(await gh.mergePr({ prNumber: pr.number, base: 'main' })).toEqual({ merged: true });
+    expect((await gh.getPr(pr.number)).state).toBe('merged');
+  });
+});
+
 describe('FakeGitHub — stripAgentArtifacts (agents-fsm#21)', () => {
   it('records every strip request (runId + branch) and returns a synthesized CommitRef', async () => {
     const gh = new FakeGitHub();
