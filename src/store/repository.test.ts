@@ -610,6 +610,55 @@ describe('repos registry (Milestone 8 Phase A)', () => {
     expect(repo.getRepo('Acme/Web')?.watch).toBe(true);
   });
 
+  it('enrolls a repo with no scope filter set by default (issue #11)', () => {
+    const enrolled = repo.upsertRepo({ repoRef: 'o/r', workingRoot: './a' });
+    expect(enrolled).toMatchObject({ watchFilterLabel: null, watchFilterMilestone: null });
+  });
+
+  it('round-trips the watch scope filter columns, independently settable/clearable (issue #11)', () => {
+    repo.upsertRepo({ repoRef: 'o/r', workingRoot: './a' });
+
+    // Set both filter fields alongside the watch flag.
+    repo.setRepoWatch('o/r', true, undefined, { filterLabel: 'bug', filterMilestone: 'v2' });
+    expect(repo.getRepo('o/r')).toMatchObject({
+      watch: true,
+      watchFilterLabel: 'bug',
+      watchFilterMilestone: 'v2',
+    });
+
+    // An omitted filter key leaves that column as-is (a plain toggle never clobbers the scope filter)…
+    repo.setRepoWatch('o/r', false);
+    expect(repo.getRepo('o/r')).toMatchObject({
+      watch: false,
+      watchFilterLabel: 'bug',
+      watchFilterMilestone: 'v2',
+    });
+
+    // …a `null` clears just that column, leaving the other set…
+    repo.setRepoWatch('o/r', true, undefined, { filterLabel: null });
+    expect(repo.getRepo('o/r')).toMatchObject({ watchFilterLabel: null, watchFilterMilestone: 'v2' });
+
+    // …and the scope filter is distinct from the guard-bypass override label.
+    repo.setRepoWatch('o/r', true, 'fleet: go', { filterMilestone: null });
+    expect(repo.getRepo('o/r')).toMatchObject({
+      watchLabel: 'fleet: go',
+      watchFilterLabel: null,
+      watchFilterMilestone: null,
+    });
+  });
+
+  it('the scope filter survives a re-enroll (upsert never touches the watch columns) (issue #11)', () => {
+    repo.upsertRepo({ repoRef: 'o/r', workingRoot: './a' });
+    repo.setRepoWatch('o/r', true, undefined, { filterLabel: 'bug', filterMilestone: 'v2' });
+
+    repo.upsertRepo({ repoRef: 'o/r', workingRoot: './b', baseBranch: 'develop' });
+    expect(repo.getRepo('o/r')).toMatchObject({
+      workingRoot: './b',
+      watchFilterLabel: 'bug',
+      watchFilterMilestone: 'v2',
+    });
+  });
+
   it('upsert is idempotent on repo_ref and re-points the adapter config', () => {
     repo.upsertRepo({ repoRef: 'o/r', workingRoot: './a', baseBranch: 'main' });
     const updated = repo.upsertRepo({ repoRef: 'o/r', workingRoot: './b', baseBranch: 'develop', cloneUrl: 'git@host:o/r.git' });

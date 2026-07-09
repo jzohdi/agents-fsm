@@ -54,6 +54,47 @@ describe('FakeGitHub — issues', () => {
   });
 });
 
+describe('FakeGitHub — listOpenIssues scope filter (issue #11 — continuous mode)', () => {
+  /** A repo whose issues span two labels and two milestones, plus one carrying neither. */
+  const seeded = () =>
+    new FakeGitHub({ repoRef: 'acme/web' })
+      .seedIssue('acme/web#1', { number: 1, author: 'acme', labels: ['bug'], milestone: 'v2' })
+      .seedIssue('acme/web#2', { number: 2, author: 'acme', labels: ['feature'], milestone: 'v2' })
+      .seedIssue('acme/web#3', { number: 3, author: 'acme', labels: ['bug'], milestone: 'v1' })
+      .seedIssue('acme/web#4', { number: 4, author: 'acme' }); // no label, no milestone
+
+  const numbers = (issues: { number: number }[]) => issues.map((i) => i.number);
+
+  it('with no filter (or an all-null filter) returns every open repo issue, unchanged', async () => {
+    const gh = seeded();
+    expect(numbers(await gh.listOpenIssues())).toEqual([1, 2, 3, 4]);
+    // `null`/absent on each dimension means "unconstrained" — identical to passing nothing.
+    expect(numbers(await gh.listOpenIssues({ label: null, milestone: null }))).toEqual([1, 2, 3, 4]);
+  });
+
+  it('a label filter keeps only issues carrying that label', async () => {
+    expect(numbers(await seeded().listOpenIssues({ label: 'bug' }))).toEqual([1, 3]);
+  });
+
+  it('a milestone filter keeps only issues in that milestone', async () => {
+    expect(numbers(await seeded().listOpenIssues({ milestone: 'v2' }))).toEqual([1, 2]);
+  });
+
+  it('both fields AND-combine — only issues matching all set fields pass (match-all)', async () => {
+    expect(numbers(await seeded().listOpenIssues({ label: 'bug', milestone: 'v2' }))).toEqual([1]);
+  });
+
+  it('matches label and milestone case-insensitively (like the override-label match)', async () => {
+    expect(numbers(await seeded().listOpenIssues({ label: 'BUG', milestone: 'V2' }))).toEqual([1]);
+  });
+
+  it('an unmatched filter admits nothing (an empty set, not an error)', async () => {
+    expect(await seeded().listOpenIssues({ label: 'does-not-exist' })).toEqual([]);
+    // A `null`-milestone issue never matches a set milestone filter.
+    expect(numbers(await seeded().listOpenIssues({ milestone: 'v2' }))).not.toContain(4);
+  });
+});
+
 describe('FakeGitHub — issue editing, creation, and comments', () => {
   it('updates a seeded issue title and/or body', async () => {
     const gh = new FakeGitHub().seedIssue('o/r#7', { number: 7, title: 'old', body: 'vague' });

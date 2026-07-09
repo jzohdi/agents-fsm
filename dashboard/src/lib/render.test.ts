@@ -261,12 +261,25 @@ describe('fleetStatsModel (home masthead + stat band)', () => {
 
 describe('repoLedgerModel (home repositories ledger)', () => {
   const repo = (over: Partial<Repo> = {}): Repo => ({
-    repoRef: 'acme/web', cloneUrl: null, localRepo: null, workingRoot: '/tmp', baseBranch: 'main', watch: false, watchLabel: null, sourceMode: 'clone', conflictPolicy: 'manual', ...over,
+    repoRef: 'acme/web', cloneUrl: null, localRepo: null, workingRoot: '/tmp', baseBranch: 'main', watch: false, watchLabel: null, watchFilterLabel: null, watchFilterMilestone: null, sourceMode: 'clone', conflictPolicy: 'manual', ...over,
   });
 
   it('carries the enrolled repo\'s watch flag onto the ledger row (Milestone 11)', () => {
     const rows = repoLedgerModel([repo({ repoRef: 'acme/web', watch: true })], []);
     expect(rows[0]).toMatchObject({ enrolled: true, watch: true });
+  });
+
+  it('surfaces the watch scope filter onto the ledger row (issue #11)', () => {
+    const rows = repoLedgerModel(
+      [repo({ repoRef: 'acme/web', watch: true, watchFilterLabel: 'bug', watchFilterMilestone: 'v2' })],
+      [],
+    );
+    expect(rows[0]).toMatchObject({ watchFilterLabel: 'bug', watchFilterMilestone: 'v2' });
+  });
+
+  it('defaults the scope filter to null when the repo has none set (issue #11)', () => {
+    const rows = repoLedgerModel([repo({ repoRef: 'acme/web', watch: true })], []);
+    expect(rows[0]).toMatchObject({ watchFilterLabel: null, watchFilterMilestone: null });
   });
 
   it('maps the working-directory source onto the row: clone, local, and unconfigured (Milestone 12)', () => {
