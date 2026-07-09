@@ -387,6 +387,11 @@ export interface RepoLedgerRow {
   enrolled: boolean;
   /** Continuous mode is on for this repo (Milestone 11) — only meaningful for an enrolled repo. */
   watch: boolean;
+  /** Continuous mode scope filter (issue #11): only consider open issues with this label; `null` = no
+   *  label filter. Distinct from the guard-bypass override. Only meaningful while {@link watch} is on. */
+  watchFilterLabel: string | null;
+  /** Continuous mode scope filter (issue #11): only consider open issues in this milestone; `null` = none. */
+  watchFilterMilestone: string | null;
   /** Working-directory source (Milestone 12): `null` = unconfigured (runs blocked), `'clone'`, or `'local'`. */
   sourceMode: 'clone' | 'local' | null;
   /** The validated local checkout path when {@link sourceMode} is `'local'`, else `null`. */
@@ -417,13 +422,16 @@ export interface RepoLedgerRow {
 export function repoLedgerModel(repos: Repo[] | undefined, runs: Run[] | undefined): RepoLedgerRow[] {
   const rows = new Map<string, RepoLedgerRow>();
   const blank = (repoRef: string): RepoLedgerRow => ({
-    repoRef, enrolled: false, watch: false, sourceMode: null, localRepo: null, configured: false,
+    repoRef, enrolled: false, watch: false, watchFilterLabel: null, watchFilterMilestone: null,
+    sourceMode: null, localRepo: null, configured: false,
     conflictPolicy: 'manual', baseBranch: '', runs: 0, active: 0, awaiting: 0, needsHuman: 0,
     resolved: 0, tokens: 0, cost: 0, costLabel: '$0.00', lastActivity: null,
   });
   for (const repo of repos ?? []) {
     rows.set(repo.repoRef, {
       ...blank(repo.repoRef), enrolled: true, watch: repo.watch, baseBranch: repo.baseBranch,
+      // Older daemons that predate the scope filter don't send these fields; default to null (no filter).
+      watchFilterLabel: repo.watchFilterLabel ?? null, watchFilterMilestone: repo.watchFilterMilestone ?? null,
       sourceMode: repo.sourceMode, localRepo: repo.localRepo, configured: repo.sourceMode !== null,
       // Older daemons don't send the field; default to the server's own default (manual).
       conflictPolicy: repo.conflictPolicy ?? 'manual',

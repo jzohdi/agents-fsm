@@ -220,6 +220,11 @@ export interface Repo {
   watch: boolean;
   /** The label that bypasses the intake guards; `null` → the default `agent help wanted`. */
   watchLabel: string | null;
+  /** Continuous mode scope filter (issue #11): only pick up open issues with this label; `null` = no
+   *  label filter. Distinct from {@link watchLabel} (the guard-bypass override). */
+  watchFilterLabel: string | null;
+  /** Continuous mode scope filter (issue #11): only pick up open issues in this milestone; `null` = none. */
+  watchFilterMilestone: string | null;
   /** Working-directory source (Milestone 12): `null` = unconfigured (runs blocked until chosen),
    *  `'clone'` = clone a fresh per-run tree from GitHub, `'local'` = use {@link localRepo} via git worktree. */
   sourceMode: 'clone' | 'local' | null;
