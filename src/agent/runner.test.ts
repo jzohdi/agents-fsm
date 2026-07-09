@@ -705,6 +705,73 @@ describe('AgentRunner — per-run harness dispatch', () => {
   });
 });
 
+describe('AgentRunner — per-stage harness override', () => {
+  /** A stub whose handler records the stages it saw, so we can tell which executor a stage used. */
+  function recordingExecutor(seen: string[]): StubExecutor {
+    return new StubExecutor((req) => {
+      seen.push(req.stage);
+      return req.phase === 'self_review' ? { output: { acceptable: true } } : { output: { requestedTransition: 'proceed' } };
+    });
+  }
+
+  it('resolves a stage recipe `harness` to a different executor than the run default', async () => {
+    const repo = new Repository(openDb(':memory:'));
+    const github = new FakeGitHub({ autoSeedIssues: true });
+    const seenDefault: string[] = [];
+    const seenCursor: string[] = [];
+    const registry = new HarnessRegistry({ 'claude-code': recordingExecutor(seenDefault), cursor: recordingExecutor(seenCursor) });
+    // The `plan` stage is pinned to cursor; every other stage keeps the run's harness.
+    const runner = new AgentRunner(repo, registry, { plan: { harness: 'cursor' } }, github);
+
+    // Default per-run harness is 'claude-code'; the recipe override must win for `plan`.
+    const planRun = repo.createRun({ issueRef: 'o/r#1', repoRef: 'o/r', initialState: 'plan', fsmConfigVersion: 'v1' });
+    await runner.runStage(planRun);
+    expect(seenCursor).toContain('plan'); // recipe.harness ('cursor') beat run.harness ('claude-code')
+    expect(seenDefault).toEqual([]); // …and the run default executor was never touched for this stage
+
+    // A stage with no recipe harness falls back to the run's harness (claude-code).
+    const backendRun = repo.createRun({ issueRef: 'o/r#2', repoRef: 'o/r', initialState: 'backend', fsmConfigVersion: 'v1' });
+    await runner.runStage(backendRun);
+    expect(seenDefault).toContain('backend'); // no override → run.harness
+    expect(seenCursor).not.toContain('backend');
+  });
+
+  it('lets the recipe override win over an explicit per-run harness (precedence: recipe > run > default)', async () => {
+    const repo = new Repository(openDb(':memory:'));
+    const github = new FakeGitHub({ autoSeedIssues: true });
+    const seenClaude: string[] = [];
+    const seenCursor: string[] = [];
+    const registry = new HarnessRegistry({ 'claude-code': recordingExecutor(seenClaude), cursor: recordingExecutor(seenCursor) });
+    const runner = new AgentRunner(repo, registry, { plan: { harness: 'claude-code' } }, github);
+
+    // The run is pinned to cursor, but the `plan` recipe overrides back to claude-code — recipe wins.
+    const overriddenRun = repo.createRun({ issueRef: 'o/r#1', repoRef: 'o/r', initialState: 'plan', fsmConfigVersion: 'v1', harness: 'cursor' });
+    await runner.runStage(overriddenRun);
+    expect(seenClaude).toContain('plan'); // recipe.harness ('claude-code') beat run.harness ('cursor')
+    expect(seenCursor).toEqual([]);
+
+    // Same run harness, no recipe override → the run's harness (cursor) is used.
+    const plainRun = repo.createRun({ issueRef: 'o/r#2', repoRef: 'o/r', initialState: 'backend', fsmConfigVersion: 'v1', harness: 'cursor' });
+    await runner.runStage(plainRun);
+    expect(seenCursor).toContain('backend');
+  });
+
+  it('escalates a stage whose recipe harness is valid but unregistered (throws → the loop parks that one run)', async () => {
+    const repo = new Repository(openDb(':memory:'));
+    const github = new FakeGitHub({ autoSeedIssues: true });
+    // Only claude-code is wired; `cursor` is a valid HarnessId but has no executor in this daemon.
+    const registry = new HarnessRegistry({ 'claude-code': new StubExecutor(() => ({ output: {} })) });
+    const runner = new AgentRunner(repo, registry, { plan: { harness: 'cursor' } }, github);
+    const run = repo.createRun({ issueRef: 'o/r#1', repoRef: 'o/r', initialState: 'plan', fsmConfigVersion: 'v1' });
+
+    // Resolution happens inside the per-phase try: the strict registry throws, a failed agent_run is
+    // recorded, and the runner rethrows so the loop turns it into an `executor_error` escalation for the
+    // one run (never a silent fallback to the run's harness, never a crashed drain).
+    await expect(runner.runStage(run)).rejects.toThrowError(/no executor registered for harness "cursor"/);
+    expect(repo.listAgentRuns(run.id).some((r) => !r.success)).toBe(true);
+  });
+});
+
 describe('reentryContext — why a stage is being re-run (README §2 reason delivery)', () => {
   const tr = (over: Partial<Transition>): Transition => ({
     id: 1,

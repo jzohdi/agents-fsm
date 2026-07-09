@@ -137,6 +137,27 @@ describe('parseConfigFile — agent recipe', () => {
     expect(() => parseConfigFile(withAgents({ a: { io: { kind: 'review', opensPr: true } } }))).toThrow(/opensPr/);
     expect(() => parseConfigFile(withAgents({ a: { io: { kind: 'produce', opensPr: true } } }))).not.toThrow();
   });
+
+  it('accepts a per-stage harness override and surfaces it on the recipe', () => {
+    const { agents } = parseConfigFile(withAgents({ a: { harness: 'cursor' } }));
+    // The optional recipe field is passed through raw — no default applied here; the runner owns precedence.
+    expect(recipeFor('a', agents).harness).toBe('cursor');
+  });
+
+  it('leaves the recipe harness undefined when a stage does not set one', () => {
+    const { agents } = parseConfigFile(withAgents({ a: { phases: ['produce'] } }));
+    // Absent → undefined so the runner's `recipe.harness ?? run.harness ?? DEFAULT_HARNESS` chain drives precedence.
+    expect(recipeFor('a', agents).harness).toBeUndefined();
+    // A stage with no recipe at all is likewise undefined.
+    expect(recipeFor('missing', agents).harness).toBeUndefined();
+  });
+
+  it('rejects an invalid harness id at config load (the isHarnessId static guard)', () => {
+    // `claude` is the model-catalog name, not a harness id — a common typo the schema must catch at load
+    // rather than letting every run that hits the stage escalate at runtime.
+    expect(() => parseConfigFile(withAgents({ a: { harness: 'claude' } }))).toThrow(ConfigValidationError);
+    expect(() => parseConfigFile(withAgents({ a: { harness: 'claude' } }))).toThrow(/valid harness id/);
+  });
 });
 
 describe('parseFsmConfig — accepts valid', () => {
