@@ -282,6 +282,15 @@ describe('repoLedgerModel (home repositories ledger)', () => {
     expect(rows[0]).toMatchObject({ watchFilterLabel: null, watchFilterMilestone: null });
   });
 
+  it('surfaces the in-flight cap onto the ledger row, defaulting to 1 (agents-fsm#10)', () => {
+    const withCap = repoLedgerModel([repo({ repoRef: 'acme/web', watch: true, watchInFlightCap: 5 })], []);
+    expect(withCap[0]).toMatchObject({ watchInFlightCap: 5 });
+
+    // An older daemon that predates the column omits it → the row defaults to 1 (matches the store default).
+    const legacy = repoLedgerModel([repo({ repoRef: 'acme/idle', watch: true })], []);
+    expect(legacy[0]).toMatchObject({ watchInFlightCap: 1 });
+  });
+
   it('maps the working-directory source onto the row: clone, local, and unconfigured (Milestone 12)', () => {
     const rows = repoLedgerModel(
       [

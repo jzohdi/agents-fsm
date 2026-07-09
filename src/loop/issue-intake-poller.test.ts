@@ -24,17 +24,26 @@ function storeStarter(repo: Repository): RunStarter {
 
 /** Single-repo fixture: one enrolled repo `acme/web`, its fake adapter, and a log collector. */
 function setup(
-  options: { watch?: boolean; label?: string | null; filterLabel?: string | null; filterMilestone?: string | null } = {},
+  options: {
+    watch?: boolean;
+    label?: string | null;
+    filterLabel?: string | null;
+    filterMilestone?: string | null;
+    inFlightCap?: number;
+  } = {},
 ) {
   const repo = new Repository(openDb(':memory:'));
   const github = new FakeGitHub({ repoRef: 'acme/web' });
   repo.upsertRepo({ repoRef: 'acme/web', workingRoot: '/tmp/wr' });
   repo.setRepoSource('acme/web', 'clone', null); // a working directory is required to be watched (M12)
   if (options.watch !== false) {
-    repo.setRepoWatch('acme/web', true, options.label, {
-      filterLabel: options.filterLabel,
-      filterMilestone: options.filterMilestone,
-    });
+    repo.setRepoWatch(
+      'acme/web',
+      true,
+      options.label,
+      { filterLabel: options.filterLabel, filterMilestone: options.filterMilestone },
+      options.inFlightCap,
+    );
   }
   const logs: string[] = [];
   const resolver: RepoResolver = singleRepoResolver({ github, baseBranch: 'main' });
@@ -92,6 +101,60 @@ describe('IssueIntakePoller — sequential cap across passes', () => {
     repo.setRunStatus(repo.listRuns().find((r) => r.issueRef === 'acme/web#1')!.id, 'done');
     expect((await poller.checkOnce()).started).toBe(1);
     expect(repo.listRuns().map((r) => r.issueRef).sort()).toEqual(['acme/web#1', 'acme/web#2']);
+  });
+});
+
+describe('IssueIntakePoller — configurable in-flight cap (parallel pickup, agents-fsm#10)', () => {
+  it('at cap N admits exactly N runs in one pass; the N+1th waits until a slot frees', async () => {
+    const { repo, github, poller } = setup({ inFlightCap: 3 });
+    for (const n of [1, 2, 3, 4]) github.seedIssue(`acme/web#${n}`, { number: n, author: 'acme' });
+
+    // One pass fills all 3 slots, oldest-first; #4 is not started this pass.
+    const first = await poller.checkOnce();
+    expect(first).toMatchObject({ reposScanned: 1, started: 3 });
+    expect(repo.listRuns().map((r) => r.issueRef).sort()).toEqual(['acme/web#1', 'acme/web#2', 'acme/web#3']);
+
+    // A second pass with all 3 slots full admits nothing new (the cap holds).
+    expect((await poller.checkOnce()).started).toBe(0);
+    expect(repo.listRuns()).toHaveLength(3);
+
+    // #1's PR merges → its issue closes → its run finishes; the freed slot admits the waiting #4.
+    github.closeIssue(1);
+    repo.setRunStatus(repo.listRuns().find((r) => r.issueRef === 'acme/web#1')!.id, 'done');
+    expect((await poller.checkOnce()).started).toBe(1);
+    expect(repo.listRuns().map((r) => r.issueRef).sort()).toEqual([
+      'acme/web#1',
+      'acme/web#2',
+      'acme/web#3',
+      'acme/web#4',
+    ]);
+  });
+
+  it('stops admitting for the rest of the pass when a start throws (cost ceiling / lost race)', async () => {
+    const repo = new Repository(openDb(':memory:'));
+    const github = new FakeGitHub({ repoRef: 'acme/web' });
+    repo.upsertRepo({ repoRef: 'acme/web', workingRoot: '/tmp/wr' });
+    repo.setRepoSource('acme/web', 'clone', null);
+    repo.setRepoWatch('acme/web', true, undefined, undefined, 3);
+    for (const n of [1, 2, 3]) github.seedIssue(`acme/web#${n}`, { number: n, author: 'acme' });
+
+    // A starter that admits the first issue then throws on the second (e.g. the global cost ceiling).
+    let calls = 0;
+    const starter: RunStarter = {
+      start: ({ issueRef }) => {
+        calls += 1;
+        if (calls === 2) throw new Error('cost ceiling reached');
+        return repo.createRun({ issueRef, repoRef: issueRef.split('#')[0]!, initialState: 'triage', fsmConfigVersion: VERSION });
+      },
+    };
+    const resolver: RepoResolver = singleRepoResolver({ github, baseBranch: 'main' });
+    const poller = new IssueIntakePoller(repo, resolver, starter, () => {});
+
+    const pass = await poller.checkOnce();
+    // Break-on-throw: #1 started (call 1), #2 threw (call 2) → stop; #3 is never attempted this pass.
+    expect(calls).toBe(2);
+    expect(pass.started).toBe(1);
+    expect(repo.listRuns().map((r) => r.issueRef)).toEqual(['acme/web#1']);
   });
 });
 

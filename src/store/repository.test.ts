@@ -690,6 +690,25 @@ describe('repos registry (Milestone 8 Phase A)', () => {
     });
   });
 
+  it('persists the in-flight cap, defaults to 1, and never clobbers it on a plain toggle (agents-fsm#10)', () => {
+    repo.upsertRepo({ repoRef: 'o/r', workingRoot: './a' });
+
+    // A repo never assigned a cap reads back 1 (INV-STORE-DEFAULT).
+    expect(repo.getRepo('o/r')?.watchInFlightCap).toBe(1);
+
+    // Setting the cap alongside the watch flag persists it (INV-STORE-SET).
+    repo.setRepoWatch('o/r', true, undefined, undefined, 5);
+    expect(repo.getRepo('o/r')).toMatchObject({ watch: true, watchInFlightCap: 5 });
+
+    // A plain toggle (cap absent) leaves the previously-set cap untouched (INV-STORE-LEAVE)…
+    repo.setRepoWatch('o/r', false);
+    expect(repo.getRepo('o/r')).toMatchObject({ watch: false, watchInFlightCap: 5 });
+
+    // …as does a re-enroll (upsert never touches the watch columns).
+    repo.upsertRepo({ repoRef: 'o/r', workingRoot: './b', baseBranch: 'develop' });
+    expect(repo.getRepo('o/r')?.watchInFlightCap).toBe(5);
+  });
+
   it('upsert is idempotent on repo_ref and re-points the adapter config', () => {
     repo.upsertRepo({ repoRef: 'o/r', workingRoot: './a', baseBranch: 'main' });
     const updated = repo.upsertRepo({ repoRef: 'o/r', workingRoot: './b', baseBranch: 'develop', cloneUrl: 'git@host:o/r.git' });

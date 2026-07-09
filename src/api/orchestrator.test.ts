@@ -1168,6 +1168,26 @@ describe('Orchestrator — repo watch + issue intake (Milestone 11)', () => {
     expect(cleared).toMatchObject({ watchFilterLabel: null, watchFilterMilestone: null });
   });
 
+  it('persists and validates the in-flight cap, rejecting non-positive integers (agents-fsm#10)', () => {
+    const { orchestrator, repo } = setup();
+    orchestrator.enrollRepo({ repoRef: 'o/r', workingRoot: './w' });
+    repo.setRepoSource('o/r', 'clone', null);
+
+    // A valid cap (integer >= 1) persists and round-trips on the returned Repo (INV-API-VALID).
+    const watched = orchestrator.setRepoWatch({ repoRef: 'o/r', watch: true, inFlightCap: 4 });
+    expect(watched).toMatchObject({ watch: true, watchInFlightCap: 4 });
+
+    // Omitting the cap leaves the stored value unchanged, even across a plain toggle (INV-API-LEAVE).
+    expect(orchestrator.setRepoWatch({ repoRef: 'o/r', watch: false }).watchInFlightCap).toBe(4);
+
+    // 0, a negative, and a non-integer each reject at this boundary (INV-API-REJECT)…
+    for (const bad of [0, -3, 1.5]) {
+      expect(() => orchestrator.setRepoWatch({ repoRef: 'o/r', watch: true, inFlightCap: bad })).toThrow(ApiError);
+    }
+    // …and never reach the store — the previously-set cap is intact.
+    expect(repo.getRepo('o/r')?.watchInFlightCap).toBe(4);
+  });
+
   it('a plain watch toggle leaves an existing scope filter untouched (issue #11)', () => {
     const { orchestrator, repo } = setup();
     orchestrator.enrollRepo({ repoRef: 'o/r', workingRoot: './w' });
