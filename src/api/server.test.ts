@@ -642,6 +642,33 @@ describe('HTTP API', () => {
     ).toBe(400);
   });
 
+  it('accepts and round-trips inFlightCap through POST /repos/watch, rejecting a bad value (agents-fsm#10)', async () => {
+    const { base } = await start();
+    await fetch(`${base}/repos`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web' }) });
+    await fetch(`${base}/repos/source`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web', mode: 'clone' }) });
+
+    // A valid cap persists and comes back on the returned Repo.
+    const set = await fetch(`${base}/repos/watch`, {
+      method: 'POST',
+      body: JSON.stringify({ repoRef: 'acme/web', watch: true, inFlightCap: 3 }),
+    });
+    expect(set.status).toBe(200);
+    expect(await set.json()).toMatchObject({ watch: true, watchInFlightCap: 3 });
+
+    // A non-number cap is a 400 at the route boundary; 0 (non-positive) is a 400 at the orchestrator.
+    expect(
+      (await fetch(`${base}/repos/watch`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web', watch: true, inFlightCap: 'lots' }) })).status,
+    ).toBe(400);
+    expect(
+      (await fetch(`${base}/repos/watch`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web', watch: true, inFlightCap: 0 }) })).status,
+    ).toBe(400);
+
+    // Omitting the cap (a plain toggle) leaves the stored value unchanged; GET /repos round-trips it.
+    await fetch(`${base}/repos/watch`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web', watch: false }) });
+    const repos = (await (await fetch(`${base}/repos`)).json()) as Array<{ repoRef: string; watchInFlightCap: number }>;
+    expect(repos.find((r) => r.repoRef === 'acme/web')?.watchInFlightCap).toBe(3);
+  });
+
   it('filters the SSE stream by ?repo', async () => {
     const { base, orchestrator } = await start();
     const controller = new AbortController();

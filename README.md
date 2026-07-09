@@ -414,7 +414,7 @@ Choosing between the two executors is configuration, not a rewrite — a deploym
 
 Point the orchestrator at a **whole repository** (not a single issue) and have it work the backlog on its own: pick up an open issue, drive it to a merge-ready PR, **wait for a human to merge that PR, then automatically start the next issue** — repeating until the backlog is empty. This is the "set it and let it run" mode the dashboard's new-run box hints at.
 
-**Shipped:** the opt-in per-repo `watch` flag (`repos.watch`, migration 10; toggled from the home-ledger **Watch** button or `POST /repos/watch`), the **Issue Intake Poller** (`src/loop/issue-intake-poller.ts` around the pure `src/loop/issue-intake.ts`) that admits the next eligible issue **sequentially (in-flight cap 1)** each poll tick, and the **safety guards** (owner-filed / unassigned / non-`[WIP]`, with an `agent help wanted` override label) that stop an untrusted issue from becoming an injection or cost vector — operating guide §9.10. Auto-picked issues go through the same `POST /runs` admission (dedup, cost ceiling, enrollment) as manual runs. An optional per-repo **scope filter** (`repos.watch_filter_label` / `watch_filter_milestone`, migration 15; issue #11) narrows the watched backlog to issues carrying a given label and/or milestone *before* the guards run — distinct from the `agent help wanted` override, which bypasses the guards rather than scoping the backlog. *Still open:* a configurable cap > 1 (parallel pickup).
+**Shipped:** the opt-in per-repo `watch` flag (`repos.watch`, migration 10; toggled from the home-ledger **Watch** button or `POST /repos/watch`), the **Issue Intake Poller** (`src/loop/issue-intake-poller.ts` around the pure `src/loop/issue-intake.ts`) that admits the next eligible issue **sequentially (in-flight cap 1)** each poll tick, and the **safety guards** (owner-filed / unassigned / non-`[WIP]`, with an `agent help wanted` override label) that stop an untrusted issue from becoming an injection or cost vector — operating guide §9.10. Auto-picked issues go through the same `POST /runs` admission (dedup, cost ceiling, enrollment) as manual runs. An optional per-repo **scope filter** (`repos.watch_filter_label` / `watch_filter_milestone`, migration 15; issue #11) narrows the watched backlog to issues carrying a given label and/or milestone *before* the guards run — distinct from the `agent help wanted` override, which bypasses the guards rather than scoping the backlog. The per-repo **in-flight cap is configurable** (`repos.watch_in_flight_cap`, migration 17; agents-fsm#10): default **1** (strictly sequential, unchanged), or set it > 1 for **parallel pickup** — the poller then admits up to `cap - inFlight` eligible issues per pass, oldest-first (safe on per-run worktrees from M8 Phase B; actual concurrency stays bounded by `FLEET_CONCURRENCY`).
 
 It is mostly **composition of pieces already planned**, which is why it is cheap to add once they exist:
 - **Issue ingestion** for a repo: list open issues via the GitHub adapter (`gh issue list` / `gh search`, the same surface `suggestIssues` already uses) and create a run per issue — gated by a configurable in-flight cap (default **1**, i.e. strictly sequential).
@@ -971,11 +971,18 @@ separate opt-in — flip the **Watch** toggle on the repo's row in the dashboard
 (on `--poll-interval`, the same `--poll-timeout 0` disables it) scans that repo's open issues each tick
 and starts a run for the next eligible one.
 
-**Sequential by default (in-flight cap 1):** a watched repo runs **one issue at a time**. The next
-issue is admitted only when the current run's issue **closes** (a human merges its `Closes #N` PR — the
-same no-stacked-PRs discipline as §3.5) or the run is **stopped**. A run parked at `needs_human` holds
-the slot, so a broken issue pauses the queue rather than silently skipping ahead. Issues are picked up
-**oldest first** (issue number ascending).
+**Sequential by default, configurable parallel pickup (in-flight cap):** a watched repo runs **one
+issue at a time** by default. The next issue is admitted only when the current run's issue **closes** (a
+human merges its `Closes #N` PR — the same no-stacked-PRs discipline as §3.5) or the run is **stopped**.
+A run parked at `needs_human` holds the slot, so a broken issue pauses the queue rather than silently
+skipping ahead. Issues are picked up **oldest first** (issue number ascending). To let a repo work
+several issues at once, raise its **in-flight cap** (`repos.watch_in_flight_cap`, agents-fsm#10) — the
+per-repo control on the repo's home-ledger row, or the `inFlightCap` field of `POST /repos/watch`
+(a positive integer). At cap **N** the poller fills up to `N − inFlight` free slots in a single pass,
+still oldest-first; each parked/`needs_human` run keeps holding its slot. Default **1** reproduces the
+strictly-sequential behaviour exactly. Parallel pickup is safe because each run gets its own working
+tree (M8 Phase B); a large cap only lengthens the queue — actual concurrent *execution* stays bounded
+by `FLEET_CONCURRENCY`.
 
 **Guards — an open issue is untrusted input.** To keep a stranger's issue from becoming an injection
 or cost vector, the poller only auto-picks an issue that is (1) **filed by the repo owner**, (2)

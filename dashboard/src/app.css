@@ -730,6 +730,14 @@ input, textarea, button, select { font: inherit; }
 }
 .af-filterin:focus { outline: none; border-color: var(--accent-line); }
 
+/* Continuous-mode in-flight cap (agents-fsm#10): a chip showing the parallel-pickup cap, accented via
+   `.scoped` when raised above the default 1; its editor reuses the scope-filter row, with a narrow
+   number input since the value is a single small integer. */
+.af-hcap { text-transform: none; letter-spacing: 0.02em; }
+.af-hcap.scoped { color: var(--accent); border-color: var(--accent-line); }
+.af-hcap.scoped .pip { background: var(--accent); }
+.af-capin { flex: 0 0 auto; width: 72px; max-width: 72px; }
+
 /* recent activity */
 .af-hrecent { animation: af-hreveal 0.5s 0.34s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
 .af-hact .when { flex: 0 0 76px; }

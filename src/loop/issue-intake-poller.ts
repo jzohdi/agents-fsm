@@ -3,10 +3,11 @@
  * pure {@link ./issue-intake.decideIntake}).
  *
  * One `checkOnce` pass, ticked on the shared `--poll-interval`, scans every **watched** enrolled repo
- * (`repos.watch`), lists its open issues through that repo's adapter, and — for the single issue the
- * pure decision selects — starts a run via {@link RunStarter}. Sequential by default (in-flight cap 1):
- * a watched repo gets one run at a time, and the next issue is admitted only once the current run's
- * issue closes (a human merges its PR — §3.5) or is stopped.
+ * (`repos.watch`), lists its open issues through that repo's adapter, and — for each issue the pure
+ * decision selects — starts a run via {@link RunStarter}. The per-repo in-flight cap is configurable
+ * (`repos.watch_in_flight_cap`, agents-fsm#10), default 1 = sequential: a watched repo gets one run at a
+ * time, and the next issue is admitted only once the current run's issue closes (a human merges its PR —
+ * §3.5) or is stopped. At a cap of N the decision fills up to N free slots in a single pass (oldest-first).
  *
  * Shaped like the Reply / PR-Feedback / Scheduler pollers: per-repo error isolation (one repo's bad
  * GitHub read never aborts the pass), and idempotent (a pass over a repo whose slot is full does
@@ -29,7 +30,7 @@ export interface RunStarter {
 export interface IntakePass {
   /** Watched repos scanned this pass. */
   reposScanned: number;
-  /** Runs started this pass (at most one per watched repo, sequential). */
+  /** Runs started this pass (up to each watched repo's free in-flight slots, across all repos). */
   started: number;
   /** Open issues declined by the guards this pass (across all repos). */
   skipped: number;
@@ -47,7 +48,7 @@ export class IssueIntakePoller {
     private readonly log: (message: string) => void = (m) => console.log(m),
   ) {}
 
-  /** One pass over every watched repo; admits at most one run per repo (sequential cap). */
+  /** One pass over every watched repo; admits up to each repo's free in-flight slots (configurable cap). */
   async checkOnce(): Promise<IntakePass> {
     const pass: IntakePass = { reposScanned: 0, started: 0, skipped: 0 };
     const currentSkips = new Set<string>();
@@ -85,27 +86,36 @@ export class IssueIntakePoller {
       if (!statusByRef.has(key)) statusByRef.set(key, run.status);
     }
 
-    const plan = decideIntake(openIssues, statusByRef, { owner: ownerOf(repoRef), overrideLabel, inFlightCap: 1 });
+    const plan = decideIntake(openIssues, statusByRef, {
+      owner: ownerOf(repoRef),
+      overrideLabel,
+      inFlightCap: repo.watchInFlightCap,
+    });
 
     for (const skip of plan.skipped) {
       pass.skipped += 1;
       this.announceSkip(skip, currentSkips);
     }
 
-    if (!plan.start) return;
-    try {
-      const run = this.starter.start({ issueRef: plan.start.issueRef });
-      this.repo.recordLog({
-        runId: run.id,
-        message: `auto-picked from ${repoRef} backlog (watched repo, continuous mode)`,
-        data: { kind: 'issue_intake', issueRef: plan.start.issueRef, issueNumber: plan.start.issueNumber },
-      });
-      pass.started += 1;
-      this.emit(`started run ${run.id} for ${plan.start.issueRef}`);
-    } catch (err) {
-      // A lost race (a manual run beat us to the issue → dup guard) or the cost ceiling (429): leave it;
-      // the next tick re-evaluates once the conflict clears. Not fatal to the pass.
-      this.emit(`could not start ${plan.start.issueRef}: ${String(err)}`);
+    // Fill the free slots oldest-first (agents-fsm#10). Each start runs the same admission path the
+    // manual "File a new run" uses (dedup / cost ceiling / enrollment), applied independently per issue.
+    for (const start of plan.starts) {
+      try {
+        const run = this.starter.start({ issueRef: start.issueRef });
+        this.repo.recordLog({
+          runId: run.id,
+          message: `auto-picked from ${repoRef} backlog (watched repo, continuous mode)`,
+          data: { kind: 'issue_intake', issueRef: start.issueRef, issueNumber: start.issueNumber },
+        });
+        pass.started += 1;
+        this.emit(`started run ${run.id} for ${start.issueRef}`);
+      } catch (err) {
+        // A lost race (a manual run beat us to the issue → dup guard) or the cost ceiling (429): leave it;
+        // the next tick re-evaluates once the conflict clears. Break out of the rest of this pass's starts
+        // so we don't hammer the same failure (e.g. the global cost ceiling) once per waiting issue.
+        this.emit(`could not start ${start.issueRef}: ${String(err)}`);
+        break;
+      }
     }
   }
 
