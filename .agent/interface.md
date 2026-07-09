@@ -1,370 +1,182 @@
-# Interface — Remote access: hardening the exposed API surface (#27)
+# Interface — Per-stage harness override (agents-fsm#12)
 
-Contracts the TDD stage writes failing tests against and the implementation stages satisfy. This is a
-**review + targeted fixes** issue: keep the KISS, no-framework, pure-helper-plus-thin-adapter shape the
-surface already uses (`auth.ts` / `bind-guard.ts` / `static.ts` precedent). **No new runtime
-dependencies. Do not touch `src/fsm/`.**
-
-The overriding invariant: the **auth-off / loopback default must stay byte-for-byte the same observable
-behaviour** for a normal localhost operator. Every new control here is either universal-and-cheap
-(security headers, body cap, error sanitization) or defaulted-generous enough that a single local
-dashboard never trips it (rate limiting, CORS deny).
+The contract the `tdd` and implementation stages build against. Two production files change plus
+their tests; everything is additive plumbing on the existing harness registry/recipe design. **No new
+executors, no UI, no migration, no store change** (all explicit non-goals).
 
 ---
 
-## 1. Rate limiter — `src/api/rate-limit.ts` (new, pure)
+## 1. `StageAgentConfig` — new optional recipe field (`src/fsm/config.ts`)
 
-A tiny in-process token-bucket limiter. Pure and unit-testable — **no `node:http`, no timers, no
-`Date.now()` of its own**; the caller passes `now` in (the `auth.ts` injection precedent).
+Add `harness?: string` to the Layer 4 per-stage recipe interface, documented alongside the existing
+fields (`phases`, `models`, `reviewCap`, `allowedTools`, `io`).
 
 ```ts
-/** The verdict for one request. `retryAfterSec` is present (an integer ≥ 1) iff `ok === false`. */
-export interface RateLimitDecision {
-  ok: boolean;
-  retryAfterSec?: number;
-}
-
-export interface RateLimiterOptions {
-  /** Bucket capacity = max burst before throttling. Must be ≥ 1. */
-  capacity: number;
-  /** Tokens replenished per second (fractional allowed, e.g. 1 = one per second). Must be > 0. */
-  refillPerSec: number;
+export interface StageAgentConfig {
+  phases?: AgentPhase[];
+  models?: Partial<Record<AgentPhase, string>>;
+  reviewCap?: number;
+  allowedTools?: string[];
+  io?: StageIo;
   /**
-   * Evict a bucket untouched for at least this long (ms) on the next `check()` (lazy sweep), so an
-   * attacker cycling source IPs can't grow the map unboundedly. Default ≈ 10 min.
+   * Optional per-stage harness override. Absent → the run's harness (`runs.harness`), then the
+   * shipped default (`DEFAULT_HARNESS`, `claude-code`). Must be a valid `HarnessId`
+   * (`claude-code` | `cursor`) — NOT `claude`.
    */
-  idleEvictMs?: number;
-  /**
-   * Hard cap on simultaneously-tracked buckets (memory backstop). On overflow, evict the
-   * least-recently-seen. Default ≈ 10_000.
-   */
-  maxKeys?: number;
-}
-
-export interface RateLimiter {
-  /** Consume one token for `key` at time `now` (epoch ms). Returns allow/deny + retry hint. */
-  check(key: string, now: number): RateLimitDecision;
-}
-
-export function createRateLimiter(options: RateLimiterOptions): RateLimiter;
-```
-
-**Semantics / invariants**
-
-- Each `key` starts full (`capacity` tokens). `check` refills based on elapsed time since that key's
-  last `check` (`refillPerSec * elapsedSec`, clamped to `capacity`), then consumes one token.
-- `ok: true` while tokens ≥ 1 (i.e. the first `capacity` rapid calls succeed); after that `ok: false`
-  with `retryAfterSec = ceil((1 − tokens) / refillPerSec)` — always an integer ≥ 1.
-- Tokens never exceed `capacity` and never go negative.
-- Distinct keys are fully independent.
-- Waiting long enough fully restores a throttled key (a later `now` yields `ok: true` again).
-- `now` is monotonic per the server's clock; a non-increasing `now` must not increase available tokens
-  (never a negative-elapsed refill).
-- Memory is bounded: idle keys are evicted after `idleEvictMs`; the live set never exceeds `maxKeys`.
-  Eviction must not affect the decision for an active key.
-
----
-
-## 2. Security response headers + CORS — `src/api/security-headers.ts` (new, pure)
-
-Pure header-policy helpers, applied by the transport. No `node:http` coupling.
-
-```ts
-/**
- * Baseline security headers applied to EVERY response (JSON, static asset, SSE, 404, error). These do
- * not vary by route and are safe for any content type.
- */
-export function securityHeaders(): Record<string, string>;
-
-/**
- * The Content-Security-Policy header value for HTML/SPA document responses only (added on top of the
- * baseline by the static handler when it serves `text/html`). Not applied to JSON/SSE.
- */
-export const CONTENT_SECURITY_POLICY: string;
-
-/**
- * Cross-origin response headers for a request's `Origin`. Returns the ACAO/allow-* set ONLY when
- * `origin` is a non-empty exact member of `allowedOrigins`; otherwise returns `{}` (deny — no ACAO,
- * so a browser blocks the cross-origin read). Never emits a `*` wildcard. Always include
- * `Vary: Origin` in the header set it returns so caches don't cross-serve.
- */
-export function corsHeaders(origin: string | undefined, allowedOrigins: readonly string[]): Record<string, string>;
-```
-
-**`securityHeaders()` — required entries (exact names; values as noted):**
-
-- `X-Content-Type-Options: nosniff`
-- `X-Frame-Options: DENY`
-- `Referrer-Policy: no-referrer`
-- (Do **not** set HSTS — TLS may be terminated by a tunnel/proxy; that's the terminator's job.
-  Documented in the threat model.)
-
-**`CONTENT_SECURITY_POLICY` — required invariants (the string must contain, at minimum):**
-
-- `default-src 'self'`
-- `frame-ancestors 'none'` (clickjacking defense, pairs with `X-Frame-Options`)
-- `base-uri 'none'`
-- `object-src 'none'`
-- `script-src 'self'` (the built SPA loads a hashed module bundle from same-origin — no inline script)
-- `connect-src 'self'` (same-origin API + SSE)
-- `img-src 'self' data:` (the favicon is a `data:` URI)
-
-> **CSP ↔ built-dashboard reality (verified against `dashboard/index.html`, the Vite source — the
-> `dist/` bundle is gitignored/not built in this tree).** The SPA shell pulls **Google Fonts**:
-> `<link href="https://fonts.googleapis.com/…" rel="stylesheet">` plus font files from
-> `https://fonts.gstatic.com`, and Svelte/Vite emit component styles. To avoid blanking styling under
-> CSP, the policy MUST also permit:
-> - `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com` (Vite/Svelte inject styles; the
->   fonts stylesheet is remote),
-> - `font-src 'self' https://fonts.gstatic.com`.
->
-> The implementation MUST verify the CSP against the actual built asset (`npm run build:dashboard` →
-> `dashboard/dist/index.html`) before finalizing, and prefer hashes over `'unsafe-inline'` for
-> `script-src` if the Vite build turns out to emit an inline bootstrap/module-preload script. **If the
-> SPA cannot load under a reasonable CSP without editing Svelte/build source, do not loosen to `*` —
-> surface it back** (that would pull frontend into scope; this stage is `needs_frontend: false`). Losing
-> the remote font is acceptable graceful degradation; a blanked dashboard is not.
-
-**`corsHeaders` invariants:** allowed origin → `Access-Control-Allow-Origin: <origin>` (echoed exactly,
-never `*`), `Access-Control-Allow-Methods`, `Access-Control-Allow-Headers: Authorization, Content-Type`,
-and `Vary: Origin`. Disallowed/absent origin → no ACAO at all. `allowedOrigins` empty (the default) ⇒
-every cross-origin request is denied.
-
----
-
-## 3. `src/api/server.ts` — wiring the fixes into the transport
-
-### 3.1 `ApiServerOptions` extension (additive, all optional; omit ⇒ hardened defaults)
-
-```ts
-export interface ApiServerOptions {
-  publicDir?: string;                       // unchanged
-  apiToken?: string;                        // unchanged
-  tls?: { cert: string; key: string };      // unchanged
-  // --- NEW (#27) ---
-  /** Token-bucket config for mutating/expensive routes. Omit ⇒ a generous built-in default
-   *  (e.g. capacity 60, refillPerSec 1) that a normal local dashboard never trips. */
-  rateLimit?: { capacity: number; refillPerSec: number };
-  /** Max request-body bytes before `413`. Omit ⇒ default 1 MiB (1_048_576). */
-  maxBodyBytes?: number;
-  /** Exact-match CORS allow-list. Omit/empty ⇒ deny all cross-origin (the default). */
-  allowedOrigins?: string[];
-  /** Injectable clock (epoch ms) for the rate limiter, for deterministic tests. Omit ⇒ `Date.now`. */
-  now?: () => number;
+  harness?: string;
 }
 ```
 
-`createApiServer` builds one `RateLimiter` from `rateLimit` (or the default) and holds it for the
-server's lifetime; the same instance is shared across all requests (per-process, per-source-key state).
+**Invariant:** the declared type is `string`, but its *value* is validated to a known `HarnessId` at
+config-load (§2). Left `undefined` when unset — the runner's `??` chain (§4) drives precedence.
 
-### 3.2 Request pipeline order inside `handle()`
+---
 
-The gate order is a contract (each step happens before the next):
+## 2. `stageAgentSchema` — static validation (`src/fsm/config.ts`)
 
-1. **Security headers** — applied to *every* response, including errors and 404s, via the response
-   helpers (§3.4) and the SSE `writeHead` (§3.6) and the static handler (§4). Universal.
-2. **CORS / OPTIONS** — if `method === 'OPTIONS'`: respond `204 No Content` with `corsHeaders(origin,
-   allowedOrigins)` + the baseline security headers + `Access-Control-Max-Age`, and return (never falls
-   through to the SPA/404). For non-OPTIONS requests, `corsHeaders(...)` is merged into the response so
-   an allowed origin can read the body; a disallowed origin still gets no ACAO. Emitting CORS does not
-   bypass auth.
-3. **Auth gate** — unchanged (`requiresAuth(path)` + `tokenMatches`). Still first among
-   *authorization* checks, still skipped entirely when `apiToken` is unset.
-4. **Rate limit** — for **rate-limited routes only** (see predicate below): compute the client key,
-   `limiter.check(key, now())`; on `ok: false` respond `429` (§3.5) and return. Applied *after* auth so
-   an unauthenticated flood still gets `401` (cheap) — but the limiter is also consulted so auth itself
-   can't be brute-forced unboundedly (a `401` on a limited route still consumes a token). Order:
-   auth-fail short-circuits to `401`; a rate-limited *authenticated* request that exceeds gets `429`.
-   > Simpler acceptable equivalent: run the rate-limit check immediately before dispatch for limited
-   > routes (after the auth gate). The observable contract is: an authenticated client exceeding the
-   > limit on a mutating route gets `429`; `/health` and cheap `GET`s never get `429`.
-5. **Dispatch** — the existing route table, unchanged.
-
-**Rate-limited-route predicate** (pure, e.g. `isRateLimited(method, path)`):
-
-- Limit every **mutating/expensive** request: `method` ∈ {`POST`, `PUT`, `DELETE`, `PATCH`}. This
-  covers `POST /runs`, all control-plane mutations, and the on-demand poll/advise routes
-  (`check-pr-feedback`, `check-reply`, `advise`, `scheduler/check`) — all POST.
-- **Never** limit: `GET` (incl. `GET /stream` SSE and the dashboard's polling GETs), `HEAD`,
-  `OPTIONS`, and **`/health`** regardless of method (liveness probes).
-
-**Client key:** `req.socket.remoteAddress ?? 'unknown'`. Document (threat model + code comment) that
-this is per-source-IP and a coarse abuse backstop — behind a shared-IP tunnel/proxy all clients collapse
-to one bucket. **Do not trust `X-Forwarded-For`** (spoofable); note it as a future opt-in only.
-
-### 3.3 Body-size cap — `readJson(req, maxBytes)`
+Add a `harness` key to the strict `stageAgentSchema` Zod object:
 
 ```ts
-async function readJson(req: IncomingMessage, maxBytes: number): Promise<Record<string, unknown>>;
+harness: z
+  .string()
+  .refine(isHarnessId, { message: 'harness must be a valid harness id (e.g. "claude-code", "cursor")' })
+  .optional(),
 ```
 
-- Track cumulative bytes while consuming `req`. As soon as the total **exceeds** `maxBytes`, stop
-  reading and throw `new ApiError(413, 'request body too large')`.
-- Preserve existing behaviour exactly otherwise: empty/whitespace body → `{}`; non-object JSON →
-  `ApiError(400, 'request body must be a JSON object')`; malformed JSON → `ApiError(400, 'invalid JSON
-  in request body')`.
-- `maxBytes` is threaded from `ApiServerOptions.maxBodyBytes` (default 1 MiB). Every current
-  `readJson(req)` call site becomes `readJson(req, maxBytes)`.
-
-### 3.4 Error-response sanitization — `sendError()`
-
-- `ApiError` → its `status` + its `message` verbatim (these are the deliberate, client-facing API
-  contract — including the new `413`/`429` messages).
-- **Any non-`ApiError`** (a bug, an I/O error, an unexpected throw) → **`500` with a fixed generic body
-  `{ error: 'internal server error' }`**. The real error is logged **server-side only**
-  (`console.error`), optionally with a short correlation label, so an operator can still diagnose. **No
-  raw `.message`, stack, or filesystem path reaches a remote caller.**
-- Stack traces were already never sent; the change is that the raw `.message` of a non-`ApiError` is no
-  longer echoed.
-- `sendError` still no-ops the body if `res.headersSent` (SSE mid-stream), and still applies the
-  baseline security headers when it does write.
-
-### 3.5 New status codes
-
-Extend the error path to emit, with generic non-leaking bodies:
-
-- **`413 Payload Too Large`** — body cap exceeded. Body `{ error: 'request body too large' }`.
-- **`429 Too Many Requests`** — rate limit exceeded. Body `{ error: 'rate limit exceeded' }` **and a
-  `Retry-After: <retryAfterSec>` header** (integer seconds from the limiter). Never leaks the key or
-  limit internals.
-
-Both are raised as `ApiError` so they flow through the sanitized `sendError` unchanged (the `429` also
-needs the `Retry-After` header set — either raise a small `ApiError` subtype carrying it, or set the
-header before/around the throw; the contract is only that the response has status `429` + `Retry-After`).
-
-### 3.6 SSE — `streamSse`
-
-Add the baseline security headers to the existing `res.writeHead(200, {...})` alongside
-`Content-Type: text/event-stream` / `Cache-Control: no-cache` / `Connection: keep-alive` — **without
-disturbing** those. Do **not** add CSP to the SSE response (not an HTML document). SSE frames must
-continue to carry only `StreamEvent` data (never the token).
-
-### 3.7 `sendJson`
-
-Applies the baseline security headers on its `writeHead` (in addition to `Content-Type:
-application/json`). Behaviour otherwise unchanged.
+- **Import:** `import { isHarnessId } from '../agent/harness';` — a **value** import. This creates no
+  import cycle: `harness.ts` has only type-only imports (`import type { StageExecutor }`), so there is
+  no path back to `fsm/config`. Mirrors `agent/runner` already importing `recipeFor` from `fsm/config`.
+- **Contract:** an invalid id (e.g. `'claude'`) is rejected at config load. `parseAgentsConfig` throws
+  `ConfigValidationError`, message prefixed `agents.<stage>.harness: …` (the existing
+  `parsed.error.issues.map(...)` path). Matches how a per-run harness is validated at `POST /runs`.
+- The object stays `.strict()`; `agentsSchema` and `parseAgentsConfig` are otherwise unchanged.
 
 ---
 
-## 4. `src/api/static.ts` — headers on static/SPA + traversal re-verification
+## 3. `recipeFor` — surface the field (`src/fsm/config.ts`)
 
-- `serveStatic`, the SPA fallback, and `notFound` all apply the baseline `securityHeaders()`.
-- HTML responses (`contentTypeFor` → `text/html…`, i.e. `index.html` and the SPA fallback) **also**
-  emit `Content-Security-Policy: CONTENT_SECURITY_POLICY`. Non-HTML assets (JS/CSS/SVG/etc.) get the
-  baseline set but **not** CSP.
-- `resolveStaticPath` is unchanged in behaviour but re-verified under remote exposure. Add regression
-  tests for edge cases and confirm each returns `null` (rejected): backslash separators
-  (`/..\\..\\etc`), an embedded NUL byte (`/foo%00.js`), doubly-encoded traversal (`/%252e%252e/`),
-  absolute-path smuggling, and the sibling-prefix escape (`publicDir` + `XYZ`). If any currently
-  *passes* (escapes the base), that is a real gap to fix in `resolveStaticPath` — otherwise the tests
-  just pin the existing guard.
+Add `harness` to both the inline return type and the returned object:
 
----
+```ts
+export function recipeFor(
+  stage: string,
+  agents: AgentsConfig,
+): {
+  phases: AgentPhase[];
+  models: Partial<Record<AgentPhase, string>>;
+  reviewCap: number;
+  allowedTools?: string[];
+  io: StageIo;
+  harness?: string;   // NEW
+} {
+  const c = agents[stage];
+  return {
+    phases: c?.phases ?? [...DEFAULT_PHASES],
+    models: c?.models ?? {},
+    reviewCap: c?.reviewCap ?? DEFAULT_REVIEW_CAP,
+    allowedTools: c?.allowedTools,
+    io: c?.io ?? DEFAULT_IO,
+    harness: c?.harness,   // NEW — undefined when unset; NO default here
+  };
+}
+```
 
-## 5. Config plumbing — `src/cli-args.ts` / `src/build-runner.ts` / `src/serve.ts`
-
-Follow the `resolveApiToken` / `resolveHost` precedent (flag → env → safe default; blank ⇒ unset).
-
-**New `CliArgs` fields (all optional):**
-
-| CliArgs field           | flag                 | env                     | default            |
-|-------------------------|----------------------|-------------------------|--------------------|
-| `rateLimitCapacity?`    | `--rate-limit`       | `FLEET_RATE_LIMIT`      | 60 (burst)         |
-| `rateLimitRefillPerSec?`| `--rate-limit-refill`| `FLEET_RATE_LIMIT_REFILL`| 1 (per second)    |
-| `maxBodyBytes?`         | `--max-body-bytes`   | `FLEET_MAX_BODY_BYTES`  | 1_048_576 (1 MiB)  |
-| `allowedOrigins?`       | `--cors-origin`       | `FLEET_CORS_ORIGINS`    | `[]` (deny all)    |
-
-- `--cors-origin` may be repeated **or** comma-separated; `FLEET_CORS_ORIGINS` is comma-separated. A
-  blank value ⇒ empty list (deny all cross-origin). Each entry is an exact origin string
-  (`https://host[:port]`).
-- New `build-runner` resolvers mirroring the existing ones (name suggestions; keep the shape):
-  `resolveRateLimit(args): { capacity: number; refillPerSec: number }`,
-  `resolveMaxBodyBytes(args): number`, `resolveAllowedOrigins(args): string[]`. Non-finite / negative /
-  garbage values fall back to the safe default (a typo must never wedge the daemon or, worse, *disable*
-  a protection).
-- `serve.ts` resolves these and passes them into `createApiServer(orchestrator, { …, rateLimit,
-  maxBodyBytes, allowedOrigins })`. **No change to the auth/bind-guard/TLS boot order.** Update the
-  banner to note limits are active (keep it honest, don't leak values that matter).
+- `harness` is passed through raw (**no** default applied here) so the runner owns precedence.
+- `Recipe = ReturnType<typeof recipeFor>` (`runner.ts:1224`) widens automatically — no separate type
+  to edit.
 
 ---
 
-## 6. Threat-model write-up — `plans/remote-access-threat-model.md` (new)
+## 4. `AgentRunner.invokePhase` — resolve the executor per stage (`src/agent/runner.ts`)
 
-Short and concrete (the issue Deliverable):
+Change the single resolution line at `runner.ts:1079`, inside the existing per-phase `try`:
 
-- **Trust boundary:** an off-localhost attacker, with and without the shared token.
-- **Can do:** reach `/health`, fetch the SPA shell, attempt auth (constant-time compare — no timing
-  oracle, no length leak).
-- **Cannot do:** drive the API without the token; read back `GITHUB_TOKEN` / `ANTHROPIC_API_KEY` / any
-  config secret; traverse the filesystem via static paths; flood past the rate limit; exhaust memory via
-  an unbounded body; clickjack/frame the SPA; read cross-origin API responses (no permissive ACAO); ride
-  an ambient credential (auth is a **bearer token, never a cookie** ⇒ classic CSRF is N/A).
-- **Per-gap disposition table:** each item from the issue scope marked *fixed-with-test* or
-  *deferred-with-rationale*.
-- **Token rotation:** restart the daemon with a new `FLEET_API_TOKEN`; one shared token by design —
-  multi-user/RBAC is out of scope (README §1).
-- **Documented residuals:** rate limiting is per-source-IP (coarse behind a shared-IP tunnel); HSTS is
-  the TLS terminator's responsibility, not the app's; `X-Forwarded-For` is untrusted.
-- Add a brief pointer + the rotation note to **README §9.11** so the operating guide stays the entry
-  point.
+```ts
+// before
+const executor = this.harnesses.for(run.harness);
 
----
+// after
+const executor = this.harnesses.for(recipe.harness ?? run.harness ?? DEFAULT_HARNESS);
+```
 
-## 7. Non-gaps to pin with tests (confirm they stay non-gaps)
+- **Import** `DEFAULT_HARNESS` from `./harness` — the module `runner.ts` already imports
+  `singleHarness`, `isHarnessResolver`, `HarnessResolver` from.
+- `recipe` is already a parameter of `invokePhase` (`runner.ts:1048`); no signature change.
+- **Use `??` (nullish coalescing), not `||`** — an empty string must not fall through (the schema
+  forbids it anyway, but the operator is a belt-and-braces guard on precedence semantics).
+- Resolution **stays inside the existing `try`**, so a valid-but-unregistered id (e.g. `cursor` on a
+  daemon that only wired `claude-code`) is caught by the same `catch`: records a failed `agent_run`,
+  rethrows, and the loop escalates that one run as `executor_error → needs_human`. Never crashes the
+  drain. This exactly matches the PR-1 per-run behavior the issue references.
+- Update the adjacent comment (`runner.ts:1076–1078`) to note the per-stage precedence.
 
-- **No secret is readable back:** `GET /config` returns only `{ fsm, agents, version }`; no route body
-  or SSE frame contains `GITHUB_TOKEN` / `ANTHROPIC_API_KEY` / the API token value.
-- **Token never leaks:** it never appears in any response body (incl. error bodies), SSE frame, or log
-  line (`serve.ts` prints only that auth is *on*).
-- **Path params stay integer-guarded** (`/^\/runs\/(\d+)\/…$/`) — no injection surface.
+**Out of scope — do NOT touch:** `runChat`, `runAdvisor`, `invokeConflictResolver`. Those pseudo-stage
+invocations (`chat`, `advise`, `resolve_conflicts`) are not FSM states, have no recipe, and correctly
+keep resolving `run.harness`. `validateAgents` already rejects an `agents` key that is not a real
+non-terminal state, so a pseudo-stage recipe cannot be configured.
 
 ---
 
-## 8. Testing contract (what the TDD stage writes against)
+## 5. Precedence — the one invariant to uphold
 
-Follow the existing patterns: pure unit tests for the new helpers (`auth.test.ts` /
-`bind-guard.test.ts` precedent) + integration tests driving the real server over an ephemeral port with
-`fetch` and the stub executor / fake GitHub (`server.test.ts` precedent).
+```
+recipe.harness (per-stage)  >  run.harness (per-run, pinned at start)  >  DEFAULT_HARNESS ('claude-code')
+```
 
-- **`rate-limit.test.ts`** — first `capacity` calls `ok`; the next is `ok:false` with integer
-  `retryAfterSec ≥ 1`; refills over injected `now`; independent keys independent; non-increasing `now`
-  never over-refills; idle eviction + `maxKeys` bound the map.
-- **`security-headers.test.ts`** — `securityHeaders()` has `nosniff` / `X-Frame-Options: DENY` /
-  `Referrer-Policy: no-referrer` and no HSTS; `CONTENT_SECURITY_POLICY` contains `default-src 'self'`,
-  `frame-ancestors 'none'`, `base-uri 'none'`, `object-src 'none'`, and permits the Google-Fonts
-  origins for `style-src`/`font-src`; `corsHeaders` echoes an allowed origin (never `*`) with `Vary:
-  Origin`, and returns no ACAO for a disallowed/absent origin or an empty allow-list.
-- **`server.test.ts` additions** — a mutating route past the limit → `429` + `Retry-After` (and a cheap
-  `GET`/`/health` never throttled); oversized body → `413`; a forced non-`ApiError` internal failure →
-  `500` with `{ error: 'internal server error' }` (no path/raw-message leak); every response (JSON,
-  static, SSE, 404) carries the baseline security headers; HTML carries CSP, JSON does not; `OPTIONS`
-  cross-origin from a non-allowed origin → locked-down (no wildcard ACAO); an allowed origin (server
-  configured with `allowedOrigins`) is echoed; `GET /config` + a captured SSE frame contain **no**
-  secret/token value; the token appears in no error body.
-- **`static.test.ts` additions** — headers on static + 404 + SPA-fallback; CSP only on HTML; the extra
-  `resolveStaticPath` traversal edge cases all reject.
-- Full `npm test` + `npm run lint` + `npm run typecheck` green; existing localhost behaviour and tests
-  unchanged.
+`runs.harness` is `NOT NULL DEFAULT 'claude-code'`, so `run.harness` is always present in practice; the
+`?? DEFAULT_HARNESS` tail is a defensive match to the issue's exact expression.
+
+**Behavior-preserving:** when no recipe sets `harness`, `recipe.harness` is `undefined` and resolution
+reduces to `this.harnesses.for(run.harness)` — identical to today. No `default-config.json` change (no
+shipped stage sets `harness`).
 
 ---
 
-## 9. Files
+## 6. Two distinct guards — both must hold
 
-- **New:** `src/api/rate-limit.ts` (+ `rate-limit.test.ts`)
-- **New:** `src/api/security-headers.ts` (+ `security-headers.test.ts`) — baseline headers, CSP, CORS
-- **New:** `plans/remote-access-threat-model.md`
-- **Edit:** `src/api/server.ts` — `ApiServerOptions` extension, headers in helpers + SSE, `readJson`
-  body cap, sanitized `sendError`, rate-limit + CORS/OPTIONS branches, `413`/`429` mapping
-- **Edit:** `src/api/static.ts` — baseline headers + CSP on HTML; traversal edge-case tests
-- **Edit:** `src/cli-args.ts` — new flags/fields
-- **Edit:** `src/build-runner.ts` — `resolveRateLimit` / `resolveMaxBodyBytes` / `resolveAllowedOrigins`
-- **Edit:** `src/serve.ts` — resolve + pass the new options through; honest banner
-- **Edit:** `README.md` §9.11 — threat-model pointer + rotation note + the new knobs
+| Case | Where it fails | Result |
+| --- | --- | --- |
+| Invalid id (not a `HarnessId`, e.g. `'claude'`) | config load (`isHarnessId` refine, §2) | `ConfigValidationError` — never reaches a run |
+| Valid but unregistered id (e.g. `'cursor'` on a subset registry) | runtime (`HarnessRegistry.for` throws, §4) | `executor_error` escalates that one run |
 
-## 10. Scope flags
+---
 
-- **needs_backend: true** — server, pure helpers, config plumbing, docs.
-- **needs_frontend: false** — server-emitted headers/limits + a doc; no Svelte source changes. CSP is
-  validated against the *already-built* dashboard asset. Only if the built SPA cannot load under a
-  reasonable CSP without editing dashboard source would frontend enter scope — surfaced as a risk, not
-  silently absorbed.
+## 7. Test contract (for the `tdd` stage)
+
+**`src/fsm/config.test.ts`**
+- `parseAgentsConfig` accepts a stage with `harness: 'cursor'`; `recipeFor(stage, agents).harness ===
+  'cursor'`.
+- A stage without `harness` → `recipeFor(...).harness === undefined`.
+- `parseAgentsConfig` **rejects** `harness: 'claude'` with a `ConfigValidationError` (the isHarnessId
+  static guard); the message references `agents.<stage>.harness`.
+
+**`src/agent/runner.test.ts`** (mirror the existing per-run dispatch block ~`:667`, which constructs
+`AgentsConfig`/registry literals directly and bypasses `parseAgentsConfig`)
+- **Per-stage override selects a different executor:** a two-executor `HarnessRegistry` (`claude-code`,
+  `cursor` spies), a run whose default harness is `claude-code`, and `agents: { plan: { harness:
+  'cursor' } }` → the `plan` stage hits the `cursor` spy; a stage with no recipe `harness` hits the run
+  default (`claude-code`).
+- **Fallback precedence:** with no recipe `harness`, the stage dispatches to `run.harness`; the recipe
+  override wins when both are set.
+- **Unknown-id escalation:** `agents: { plan: { harness: 'cursor' } }` against a registry that
+  registers only `claude-code` → the stage rejects with `no executor registered for harness "cursor"`,
+  a failed `agent_run` is recorded, and the `executor_error` path parks that one run (same assertion
+  shape as the existing `ghost` per-run test ~`:695`).
+
+**Full suite** stays green (`npm test`); typecheck/build clean.
+
+---
+
+## 8. Files
+
+- **Edit:** `src/fsm/config.ts` — `StageAgentConfig.harness`, `stageAgentSchema` `harness` validation,
+  `recipeFor` return (+ inline return type), `isHarnessId` import.
+- **Edit:** `src/agent/runner.ts` — `DEFAULT_HARNESS` import; per-stage resolution in `invokePhase`
+  (one line + comment).
+- **Edit:** `src/fsm/config.test.ts` — schema/recipe coverage (§7).
+- **Edit:** `src/agent/runner.test.ts` — per-stage dispatch + fallback + unknown-id escalation (§7).
+
+## 9. Scope flags
+
+- **needs_backend: true** — `src/fsm/config.ts`, `src/agent/runner.ts`, and their tests.
+- **needs_frontend: false** — config-file only; no UI/dashboard surface (explicit non-goal).
