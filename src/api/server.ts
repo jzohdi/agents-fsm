@@ -16,6 +16,7 @@
  *   POST /runs/:id/archive      POST /runs/:id/unarchive
  *   POST /runs/:id/cost-override POST /runs/:id/model
  *   POST /runs/:id/effort       POST /runs/:id/harness
+ *   POST /runs/:id/context      (agents-fsm#5: per-issue operator context, Layer 3)
  *   POST /runs/:id/resolve-conflicts
  *   POST /runs/:id/check-pr-feedback   POST /runs/:id/check-reply
  *   POST /runs/:id/chat         GET /runs/:id/chat          POST /runs/:id/chat/:chatId/cancel
@@ -26,6 +27,7 @@
  *   GET  /cost                  GET /models[?harness=]
  *   GET  /suggestions[?q=]      POST /scheduler/check
  *   GET  /settings              PUT /settings/default-harness
+ *   PUT  /settings/context/global   PUT /settings/context/stage   (agents-fsm#5: operator context Layers 1–2)
  *   GET  /stream[?runId=&repo=] GET /health
  */
 
@@ -213,6 +215,21 @@ async function handle(
     return sendJson(res, 200, orch.setDefaultModel(model, effort));
   }
 
+  // --- operator context (agents-fsm#5): the global base (Layer 1) + per-stage (Layer 2) prompts. Both
+  // `context` bodies are a string or null (null/blank clears the key). Per-stage also carries `stage`,
+  // validated against the known stage set in the orchestrator (an unknown one → 400 typo guard). ---
+  if (method === 'PUT' && path === '/settings/context/global') {
+    const context = (await readJson(req, ctx.maxBodyBytes)).context ?? null;
+    if (context !== null && typeof context !== 'string') return sendError(res, new ApiError(400, '"context" must be a string or null'));
+    return sendJson(res, 200, orch.setGlobalContext(context));
+  }
+  if (method === 'PUT' && path === '/settings/context/stage') {
+    const body = await readJson(req, ctx.maxBodyBytes);
+    const context = body.context ?? null;
+    if (context !== null && typeof context !== 'string') return sendError(res, new ApiError(400, '"context" must be a string or null'));
+    return sendJson(res, 200, orch.setStageContext(str(body, 'stage'), context));
+  }
+
   // --- new-run autocomplete: your repos + their open issues matching ?q= (README §3.3 Layer 7) ---
   if (method === 'GET' && path === '/suggestions') {
     return sendJson(res, 200, await orch.suggestIssues(url.searchParams.get('q') ?? ''));
@@ -309,7 +326,7 @@ async function handle(
   const runMatch = /^\/runs\/(\d+)$/.exec(path);
   if (runMatch && method === 'GET') return sendJson(res, 200, orch.getRunDetail(Number(runMatch[1])));
 
-  const actionMatch = /^\/runs\/(\d+)\/(pause|resume|stop|revert|archive|unarchive|cost-override|model|effort|harness|resolve-conflicts)$/.exec(path);
+  const actionMatch = /^\/runs\/(\d+)\/(pause|resume|stop|revert|archive|unarchive|cost-override|model|effort|harness|context|resolve-conflicts)$/.exec(path);
   if (actionMatch && method === 'POST') {
     const id = Number(actionMatch[1]);
     switch (actionMatch[2]) {
@@ -367,6 +384,14 @@ async function handle(
       case 'harness': {
         // `harness`: re-point the run at another harness from its next stage on (clears model/effort overrides).
         return sendJson(res, 200, orch.setHarness(id, str(await readJson(req, ctx.maxBodyBytes), 'harness')));
+      }
+      case 'context': {
+        // `context`: the run's per-issue operator context (Layer 3, agents-fsm#5), or `null`/blank to clear.
+        const raw = (await readJson(req, ctx.maxBodyBytes)).context;
+        if (raw !== null && typeof raw !== 'string') {
+          return sendError(res, new ApiError(400, '"context" (string, or null to clear) is required'));
+        }
+        return sendJson(res, 200, orch.setRunContext(id, raw));
       }
       case 'resolve-conflicts':
         // Escape hatch: run the dedicated resolver on a finished run whose PR conflicts (any policy).

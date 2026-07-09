@@ -171,9 +171,13 @@ describe('migrate', () => {
 
     expect(columnExists(db, 'runs', 'issue_context')).toBe(true);
     expect(appliedMigrations(db)).toEqual(ALL_MIGRATION_NAMES);
-    // Drift guard: the retrofitted `runs` table stays column-identical to a fresh DB's (schema.sql parity).
+    // Drift guard: the retrofitted `issue_context` column is schema-identical to a fresh DB's (the ALTER
+    // and schema.sql define the same column; if they drift — type/notnull/default — old and new DBs
+    // diverge silently). Whole-table parity isn't assertable here: this pre-existing `runs` starts minimal
+    // and migrations are additive, so it never grows schema.sql's original columns (issue_ref, created_at…).
     const fresh = openDb();
-    expect(columns(db, 'runs')).toEqual(columns(fresh, 'runs'));
+    const issueContextCol = (d: Db) => columns(d, 'runs').find((c) => (c as { name: string }).name === 'issue_context');
+    expect(issueContextCol(db)).toEqual(issueContextCol(fresh));
     fresh.close();
     db.close();
   });

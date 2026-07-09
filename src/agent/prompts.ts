@@ -55,19 +55,26 @@ export function createSystemPromptFn(options: SystemPromptOptions = {}): SystemP
   const advise = read(dir, join('phases', 'advise.md'));
   const stages = loadStages(join(dir, 'stages'));
 
-  return (stage, phase) => {
+  return (stage, phase, operatorContext) => {
+    // Operator-provided context (agents-fsm#5) is an already-labeled, delimited block from
+    // `composeOperatorContext`; treated here as an opaque section. It is spliced so the load-bearing
+    // output contract stays LAST (INV-CONTRACT-LAST). Empty/absent ⇒ omitted, so the composed prompt is
+    // byte-identical to today (INV-STABLE-PROMPTS). `op` is [] (nothing to splice) or [operatorContext].
+    const op = operatorContext && operatorContext !== '' ? [operatorContext] : [];
     // The conflict resolver is a stage-agnostic phase (the between-stage base sync), not an FSM stage:
     // no stage role file, and deliberately NO output contract — its success is judged mechanically from
-    // the git state (runner `finishBaseMerge`), so the envelope contract would only mislead it.
-    if (stage === RESOLVE_CONFLICTS_STATE) return [base, resolveConflicts].join(SECTION_SEPARATOR);
+    // the git state (runner `finishBaseMerge`), so the envelope contract would only mislead it. With no
+    // contract, "before the contract" degrades to "at the very end".
+    if (stage === RESOLVE_CONFLICTS_STATE) return [base, resolveConflicts, ...op].join(SECTION_SEPARATOR);
     // Run chat is likewise not an FSM stage: the operator's ad-hoc prompt against the run's tree. Its
     // own section carries the chat output contract ({ "response": … }), which overrides base's
-    // envelope instruction — so no shared contract file is appended.
-    if (stage === CHAT_STAGE) return [base, chat].join(SECTION_SEPARATOR);
+    // envelope instruction — so no shared contract file is appended, and operator context goes before it.
+    if (stage === CHAT_STAGE) return [base, ...op, chat].join(SECTION_SEPARATOR);
     // The escalation-resolution advisor (Layer 3) is likewise not an FSM stage: a read-only,
     // operator-initiated pass over a needs_human run. Its section carries its own output contract
-    // ({ "summary", "options" }), which overrides base's envelope instruction — no shared contract file.
-    if (stage === ADVISE_STAGE) return [base, advise].join(SECTION_SEPARATOR);
+    // ({ "summary", "options" }), which overrides base's envelope instruction — so operator context
+    // goes before that phase section too.
+    if (stage === ADVISE_STAGE) return [base, ...op, advise].join(SECTION_SEPARATOR);
     const role = stages.get(stage);
     if (role === undefined) {
       throw new Error(`No stage prompt for "${stage}" (expected ${join(dir, 'stages', `${stage}.md`)})`);
@@ -75,6 +82,8 @@ export function createSystemPromptFn(options: SystemPromptOptions = {}): SystemP
     const parts = [base, role];
     if (phase === 'self_review') parts.push(selfReview);
     if (phase === 'simplify') parts.push(simplify);
+    // Operator context sits immediately before the contract, so the contract stays last (INV-CONTRACT-LAST).
+    parts.push(...op);
     // The contract is the load-bearing instruction. `triage` is a router/editor with its own decision
     // contract (it has only a `produce` phase, so it never needs the verdict one); every other stage's
     // produce/simplify emits the work envelope, and self_review emits the verdict.

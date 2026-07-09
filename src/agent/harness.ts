@@ -40,6 +40,39 @@ export const DEFAULT_HARNESS_SETTING_KEY = 'default_harness';
 export const DEFAULT_MODEL_SETTING_KEY = 'default_model';
 export const DEFAULT_EFFORT_SETTING_KEY = 'default_effort';
 
+/**
+ * Settings key for the global base operator context (agents-fsm#5, Layer 1) — one prompt applied to
+ * every agent on every stage. Persisted in the settings KV so it survives restarts; read fresh by the
+ * runner at each stage dispatch. Co-located with the other setting keys so its writer/reader share one source.
+ */
+export const CONTEXT_GLOBAL_SETTING_KEY = 'context_global';
+
+/**
+ * Settings key for a per-stage operator context (agents-fsm#5, Layer 2) — one prompt per stage type,
+ * applied to every run of that stage. One `settings` row per stage that has context.
+ */
+export function contextStageKey(stage: string): string {
+  return `context_stage:${stage}`;
+}
+
+/**
+ * The stage types an operator may attach per-stage context to (Layer 2). Used to validate
+ * `PUT /settings/context/stage` so typo'd keys can't accumulate dead `context_stage:<typo>` rows. These
+ * are the canonical FSM stages (matching the role files under `src/agent/prompts/stages/`, INV-STAGES);
+ * the pseudo-stages (chat / advise / resolve_conflicts) are deliberately excluded — those runs still
+ * receive the global + per-run layers.
+ */
+export const CONTEXT_STAGE_TYPES: readonly string[] = [
+  'triage',
+  'plan',
+  'plan_review',
+  'interface_design',
+  'tdd',
+  'frontend',
+  'backend',
+  'code_review',
+];
+
 /** Narrow an untrusted value to a known {@link HarnessId} — the validation the API applies to a request. */
 export function isHarnessId(value: unknown): value is HarnessId {
   return typeof value === 'string' && (HARNESS_IDS as readonly string[]).includes(value);
