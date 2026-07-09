@@ -127,6 +127,8 @@ describe('humanizeState / fmtTokens', () => {
     expect(fmtTokens(840)).toBe('840');
     expect(fmtTokens(6234)).toBe('6.2k');
     expect(fmtTokens(120_000)).toBe('120k');
+    expect(fmtTokens(1_500_000)).toBe('1.5M');
+    expect(fmtTokens(621_071_000)).toBe('621M');
     expect(fmtTokens(undefined)).toBe('0');
   });
 });

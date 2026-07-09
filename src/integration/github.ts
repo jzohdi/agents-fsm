@@ -179,6 +179,25 @@ export interface UpdatePrInput {
   body?: string;
 }
 
+/**
+ * Outcome of an auto-merge attempt (agents-fsm#15). A discriminated result, never a throw for the
+ * expected "not mergeable" case: `merged:false` is a normal, first-class outcome the loop escalates on.
+ * `merged:true` includes the already-merged case (idempotent under ledger replay).
+ */
+export type MergeResult =
+  | { merged: true }
+  | { merged: false; reason: string; mergeable?: PullRequest['mergeable'] };
+
+export interface MergePrInput {
+  prNumber: number;
+  /** The PR's own base — merge into this and never stack (no-stacked-PRs discipline). */
+  base: string;
+  /** Merge strategy. Only `'merge'` (a merge commit) is used today; typed narrow to leave room. */
+  method?: 'merge';
+  /** Delete the (disposable per-run) branch after a successful merge. Default true at the call site. */
+  deleteBranch?: boolean;
+}
+
 export interface UpdateIssueInput {
   number: number;
   title?: string;
@@ -366,6 +385,15 @@ export interface GitHub {
 
   /** Update an existing PR (the idempotent path when the run already has a PR). */
   updatePr(input: UpdatePrInput): Promise<PullRequest>;
+
+  /**
+   * Merge a PR into its base (agents-fsm#15 auto-merge). **Never forces**: on any non-mergeable/failed
+   * merge (conflict, base moved, required checks unsatisfied, permission) it returns
+   * `{ merged:false, reason, mergeable? }` and leaves the PR open — it must not `--force`/`--admin`.
+   * An already-merged PR returns `{ merged:true }` (idempotent under ledger replay). Merges into the
+   * PR's recorded base only; never stacks.
+   */
+  mergePr(input: MergePrInput): Promise<MergeResult>;
 
   /**
    * Replace the PR's `af:`-prefixed labels with the given set, leaving human labels alone — the

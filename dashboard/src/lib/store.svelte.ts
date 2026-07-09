@@ -252,6 +252,26 @@ export async function setRepoConflictPolicy(repoRef: string, policy: 'manual' | 
   }
 }
 
+/**
+ * Set an enrolled repo's auto-merge flag (`POST /repos/auto-merge`, agents-fsm#15): when on, a run
+ * reaching the terminal `done` state merges its own PR into base (never forced — a non-mergeable PR
+ * escalates for you). Refreshes the ledger so the control reflects state.
+ */
+export async function setRepoAutoMerge(repoRef: string, enabled: boolean): Promise<void> {
+  try {
+    await request<Repo>('POST', '/repos/auto-merge', { repoRef, enabled });
+    banner(
+      enabled
+        ? `${repoRef}: approved runs will merge their own PRs.`
+        : `${repoRef}: finished runs will leave their PRs open for you to merge.`,
+      'ok',
+    );
+    await loadRepos();
+  } catch (err) {
+    banner(`Could not update auto-merge: ${(err as Error).message}`, 'err');
+  }
+}
+
 /** Archive a resolved (done/stopped) run server-side so it drops out of the Resolved lane. */
 export async function archiveRun(id: number): Promise<void> {
   try {

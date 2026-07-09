@@ -27,10 +27,14 @@ export function humanizeHarness(harness: string | null | undefined): string {
     .join(' ');
 }
 
-/** A compact token count: `6234` → `6.2k`, `120000` → `120k`, `840` → `840`. */
+/** A compact token count: `6234` → `6.2k`, `120000` → `120k`, `621071000` → `621M`, `840` → `840`. */
 export function fmtTokens(value: number | null | undefined): string {
   const n = Number(value ?? 0);
   if (!Number.isFinite(n) || n < 1000) return String(Math.max(0, Math.round(n)));
+  if (n >= 1_000_000) {
+    const m = n / 1_000_000;
+    return `${m >= 100 ? Math.round(m) : m.toFixed(1)}M`;
+  }
   const k = n / 1000;
   return `${k >= 100 ? Math.round(k) : k.toFixed(1)}k`;
 }
@@ -404,6 +408,9 @@ export interface RepoLedgerRow {
   /** Merge-conflict policy: `'auto'` = a resolver agent handles conflicts; `'manual'` = the run parks
    *  needs_human for the operator. Only meaningful for an enrolled repo. */
   conflictPolicy: 'manual' | 'auto';
+  /** Opt-in auto-merge (agents-fsm#15): a run reaching `done` merges its own PR into base (never
+   *  forced). Only meaningful for an enrolled repo. */
+  autoMerge: boolean;
   baseBranch: string;
   runs: number;
   active: number;
@@ -427,7 +434,7 @@ export function repoLedgerModel(repos: Repo[] | undefined, runs: Run[] | undefin
   const blank = (repoRef: string): RepoLedgerRow => ({
     repoRef, enrolled: false, watch: false, watchFilterLabel: null, watchFilterMilestone: null,
     watchInFlightCap: 1, sourceMode: null, localRepo: null, configured: false,
-    conflictPolicy: 'manual', baseBranch: '', runs: 0, active: 0, awaiting: 0, needsHuman: 0,
+    conflictPolicy: 'manual', autoMerge: false, baseBranch: '', runs: 0, active: 0, awaiting: 0, needsHuman: 0,
     resolved: 0, tokens: 0, cost: 0, costLabel: '$0.00', lastActivity: null,
   });
   for (const repo of repos ?? []) {
@@ -440,6 +447,8 @@ export function repoLedgerModel(repos: Repo[] | undefined, runs: Run[] | undefin
       sourceMode: repo.sourceMode, localRepo: repo.localRepo, configured: repo.sourceMode !== null,
       // Older daemons don't send the field; default to the server's own default (manual).
       conflictPolicy: repo.conflictPolicy ?? 'manual',
+      // Older daemons that predate auto-merge don't send it; default to false (matches the store default).
+      autoMerge: repo.autoMerge ?? false,
     });
   }
   for (const r of runs ?? []) {

@@ -19,3 +19,4 @@ dashboard/dist/
 .env
 .env.*
 !.env.example
+*.pem

@@ -242,4 +242,8 @@ export interface Repo {
   /** Merge-conflict policy: `'manual'` parks a conflicted run needs_human for the operator; `'auto'`
    *  lets a verified resolver agent handle it (between-stage base sync + PR conflict re-open). */
   conflictPolicy: 'manual' | 'auto';
+  /** Opt-in auto-merge (agents-fsm#15): when true, a run reaching the terminal `done` state merges its
+   *  own PR into base (never forced — a non-mergeable PR escalates). Optional on the wire: an older
+   *  daemon that predates the column omits it, so consumers default it to false (see `repoLedgerModel`). */
+  autoMerge?: boolean;
 }

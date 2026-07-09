@@ -620,15 +620,24 @@ input, textarea, button, select { font: inherit; }
 .af-hrepo:hover { background: none; } /* the inner open button owns the hover, not the whole wrapper */
 .af-hrepo:last-child { border-bottom: 1px solid var(--rule); }
 .af-hrepo-open {
-  display: flex; align-items: baseline; gap: 18px; flex: 1 1 auto; min-width: 0; text-align: left;
+  /* The min-width floor keeps the button at least as wide as its fixed parts (figures + when +
+     arrow + the name's floor) — shrinking below that spills them under the chip rail, which is the
+     shrinkable part beside it (it wraps internally). A long repo name still ellipsizes. */
+  display: flex; align-items: baseline; gap: 18px; flex: 1 1 auto; min-width: min(100%, 790px); text-align: left;
   cursor: pointer; background: none; border: 0; padding: 18px 2px; font: inherit; color: var(--ink);
   transition: background 0.14s;
 }
 .af-hrepo-open:hover { background: var(--paper2); }
 .af-hrepo-open:hover .arr { color: var(--accent); transform: translateX(4px); }
+/* Config-chip rail: the pills (Directory / Watch / Scope / Parallel / Conflicts) share one wrapping
+   container at the row's end. It shrinks by wrapping internally instead of crushing the repo name. */
+.af-hchips {
+  flex: 0 1 auto; min-width: 0; align-self: center; margin-left: 14px;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px;
+}
 /* Watch toggle pill: muted when off, accent when watching (a live pulsing pip signals the auto-pickup). */
 .af-hwatch {
-  flex: 0 0 auto; align-self: center; display: inline-flex; align-items: center; gap: 7px; margin-left: 14px;
+  flex: 0 0 auto; align-self: center; display: inline-flex; align-items: center; gap: 7px;
   border: 1px solid var(--rule); background: none; color: var(--ink3); cursor: pointer;
   font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
   padding: 6px 12px; border-radius: 2px; transition: 0.14s;
@@ -639,7 +648,8 @@ input, textarea, button, select { font: inherit; }
 .af-hwatch.on .pip { background: var(--accent); animation: af-watchpulse 1.9s ease-in-out infinite; }
 .af-hwatch:disabled { opacity: 0.4; cursor: not-allowed; }
 .af-hrepo .ix { font-family: var(--mono); font-size: 11px; color: var(--ink4); flex: 0 0 26px; }
-.af-hrepo .name { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+/* min-width floors the name against the fixed-width figures — the chip rail wraps instead. */
+.af-hrepo .name { flex: 1 1 260px; min-width: 170px; display: flex; flex-direction: column; gap: 3px; }
 .af-hrepo .nm { font-family: var(--display); font-weight: 560; font-variation-settings: "opsz" 28; font-size: 21px; letter-spacing: -0.01em; line-height: 1.1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .af-hrepo .livedot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-left: 10px; vertical-align: 3px; animation: af-watchpulse 1.9s ease-in-out infinite; }
 .af-hrepo .meta2 { font-size: 12px; color: var(--ink3); }
@@ -659,7 +669,7 @@ input, textarea, button, select { font: inherit; }
 .af-hrepo .af-src.local { color: var(--ink3); display: inline-block; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 /* "Set directory" pill — same shape as the watch pill; accented while its panel is open. */
 .af-hcfg {
-  flex: 0 0 auto; align-self: center; margin-left: 14px; border: 1px solid var(--rule); background: none;
+  flex: 0 0 auto; align-self: center; border: 1px solid var(--rule); background: none;
   color: var(--ink3); cursor: pointer; font-family: var(--mono); font-size: 10.5px; font-weight: 600;
   letter-spacing: 0.08em; text-transform: uppercase; padding: 6px 12px; border-radius: 2px; transition: 0.14s;
 }
@@ -747,19 +757,24 @@ input, textarea, button, select { font: inherit; }
 .af-hact:last-child { border-bottom: 1px solid var(--rule); }
 
 /* --- responsive / condensed mobile --- */
-@media (max-width: 1040px) {
+@media (max-width: 1080px) {
   .af-triptych, .af-actgrid { grid-template-columns: 1fr; gap: 24px; }
   .af-col, .af-actgrid .wirecol, .af-actgrid .livecol { border: 0; padding: 0; }
   .af-hstats-row { grid-template-columns: repeat(3, 1fr); }
   .af-hstats .cell { border-left: 0; padding-left: 0; padding-top: 18px; padding-bottom: 16px; }
-  /* Repo ledger rows reflow to two lines (name, then the figures) so nothing gets crushed to 0 width:
-     the name keeps the whole first line (the arrow leaves the flow), figures wrap beneath it. */
-  .af-hrepo { flex-wrap: wrap; row-gap: 13px; padding-right: 26px; }
+  /* Repo ledger rows reflow to two lines (name, then the figures) so nothing gets crushed to 0 width.
+     The row's content lives inside the nested open button (.af-hrepo-open) — the wrap must happen
+     there: the name keeps the whole first line (the arrow leaves the flow), figures wrap beneath.
+     The config chips are the button's siblings; they flow as an evenly-gapped row underneath the
+     button (which spans the full row), spaced by the container's gap instead of per-chip margins. */
+  .af-hrepo { flex-wrap: wrap; row-gap: 10px; padding-bottom: 16px; }
+  .af-hrepo-open { flex: 1 1 100%; flex-wrap: wrap; row-gap: 13px; padding-right: 26px; padding-bottom: 0; }
   .af-hrepo .arr { position: absolute; right: 2px; top: 18px; margin-left: 0; }
-  .af-hrepo .name { flex: 1 1 calc(100% - 70px); }
+  .af-hrepo .name { flex: 1 1 calc(100% - 50px); }
   .af-hrepo .fig, .af-hrepo .fig.wide { flex: 0 0 auto; flex-direction: row; align-items: baseline; gap: 6px; }
   .af-hrepo .fig b { font-size: 14px; }
   .af-hrepo .when { flex: 0 0 auto; margin-left: auto; }
+  .af-hchips { flex: 1 1 100%; margin-left: 0; justify-content: flex-start; }
 }
 @media (max-width: 720px) {
   /* --- topbar: brand + status on line 1, nav on line 2; drop low-value chrome --- */
@@ -845,6 +860,19 @@ input, textarea, button, select { font: inherit; }
   /* --- home enroll form: full-width inputs --- */
   .af-enroll input { flex: 1 1 100%; min-width: 0; }
   .af-enroll .af-enroll-go { flex: 1 1 auto; padding: 10px 18px; }
+
+  /* --- home repo ledger: a tighter figure line, and a bound local path that truncates instead of
+     setting the line width (the full path stays in the title attr). --- */
+  .af-hrepo-open { column-gap: 14px; }
+  .af-hrepo .af-src.local { max-width: 55vw; }
+  .af-hfilter { max-width: 100%; }
+
+  /* --- home config editors (source / scope / parallel): controls wrap, inputs take a full line
+     instead of being crushed between the label and the save button. --- */
+  .af-hsrccfg, .af-hfiltercfg { flex-wrap: wrap; row-gap: 10px; padding-left: 2px; }
+  .af-dirbox { flex: 1 1 100%; max-width: none; }
+  .af-filterin { flex: 1 1 140px; max-width: none; }
+  .af-capin { flex: 0 0 auto; max-width: 72px; }
 }
 
 @media (max-width: 640px) {
@@ -861,9 +889,11 @@ input, textarea, button, select { font: inherit; }
   .af-hmast { padding: 30px 0 24px; }
   .af-hsub { gap: 4px 16px; }
   .af-hsub .sep { display: none; } /* no dangling em-dashes when the line wraps */
+  /* Two columns, not three: big mono numerals ("621M", "$935.73") need the width or they collide. */
+  .af-hstats-row { grid-template-columns: repeat(2, 1fr); }
   .af-hstats .n { font-size: 30px; }
   .af-hstats .n.money { font-size: 26px; padding-top: 3px; }
-  .af-hstats .cell { padding-top: 14px; padding-bottom: 12px; }
+  .af-hstats .cell { padding-top: 14px; padding-bottom: 12px; padding-right: 14px; }
   .af-hstats .cell .af-eyebrow { min-height: 32px; } /* room for "Awaiting you" to wrap — numerals stay aligned */
   .af-hstats .sub { font-size: 11px; }
   .af-hrepo .nm { font-size: 19px; }

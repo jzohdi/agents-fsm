@@ -290,6 +290,16 @@ async function handle(
     return sendJson(res, 200, orch.setRepoConflictPolicy({ repoRef: str(body, 'repoRef'), policy: str(body, 'policy') }));
   }
 
+  // --- repo auto-merge (agents-fsm#15): when on, a run reaching the terminal `done` state merges its
+  // own PR into base (never forced — a non-mergeable PR escalates instead). Body-carried repoRef
+  // (contains a `/`), like /repos/watch; boolean validated inline the same way. ---
+  if (method === 'POST' && path === '/repos/auto-merge') {
+    const body = await readJson(req, ctx.maxBodyBytes);
+    const enabled = body.enabled;
+    if (typeof enabled !== 'boolean') return sendError(res, new ApiError(400, '"enabled" (boolean) is required'));
+    return sendJson(res, 200, orch.setRepoAutoMerge({ repoRef: str(body, 'repoRef'), enabled }));
+  }
+
   // --- directory-path completions for the local-checkout picker (Milestone 12 UI). The browser can't
   // read absolute paths from a native folder dialog, so the daemon (which runs on the operator's
   // machine) supplies shell-style tab-completions instead. Read-only, names-only. ---

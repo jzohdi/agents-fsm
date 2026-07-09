@@ -3,7 +3,7 @@
   // the attention queue, the repositories ledger (with inline enrollment), and a recent-activity
   // feed. Everything derives from `ui.runs`/`ui.repos`, which the SSE stream keeps live — this page
   // is pure derivation, no polling of its own.
-  import { ui, configureRepoSource, enrollRepo, fetchDirSuggestions, openRepoBoard, openRun, setRepoConflictPolicy, setRepoWatch, setRepoWatchFilter, setRepoWatchInFlightCap } from './store.svelte';
+  import { ui, configureRepoSource, enrollRepo, fetchDirSuggestions, openRepoBoard, openRun, setRepoAutoMerge, setRepoConflictPolicy, setRepoWatch, setRepoWatchFilter, setRepoWatchInFlightCap } from './store.svelte';
   import {
     attentionModel,
     costStatusModel,
@@ -349,6 +349,10 @@
           <span class="when">{fmtRelTime(row.lastActivity)}</span>
           <span class="arr">→</span>
         </button>
+        <!-- Config chips live in their own wrapping rail: on a wide screen they sit at the row's end
+             (wrapping internally when tight), on small screens they become a full-width chip row —
+             either way they can never crush the repo name to zero width. -->
+        <div class="af-hchips">
         <!-- Configure the working directory (Milestone 12). Hidden while unconfigured — the config row
              below is force-open then, so a toggle would be a dead control. -->
         {#if row.enrolled && row.configured}
@@ -412,7 +416,8 @@
         {/if}
         <!-- Merge-conflict policy toggle: when a run's branch conflicts with base (the between-stage
              sync, or a finished run's PR turning CONFLICTING), 'auto' lets a resolver agent handle it;
-             'manual' parks the run for you. -->
+             'manual' parks the run for you. Labeled "Auto-resolve conflicts" (not "Auto-merge") so it
+             cannot be read as the PR auto-merge toggle beside it (agents-fsm#15 naming guard). -->
         <button
           type="button"
           class="af-hwatch af-hconflict"
@@ -425,8 +430,26 @@
               : 'Merge conflicts wait for you — click to let an agent auto-resolve them'}
           onclick={() => setRepoConflictPolicy(row.repoRef, row.conflictPolicy === 'auto' ? 'manual' : 'auto')}
         >
-          <span class="pip"></span>{row.conflictPolicy === 'auto' ? 'Auto-merge' : 'Conflicts: manual'}
+          <span class="pip"></span>{row.conflictPolicy === 'auto' ? 'Auto-resolve conflicts' : 'Conflicts: manual'}
         </button>
+        <!-- Opt-in auto-merge (agents-fsm#15): a run reaching the terminal `done` state merges its own
+             PR into base. Never forced — a non-mergeable PR escalates needs_human with the PR left open.
+             Same enrollment gating as the conflict-policy control. -->
+        <button
+          type="button"
+          class="af-hwatch af-hautomerge"
+          class:on={row.autoMerge}
+          disabled={!row.enrolled}
+          title={!row.enrolled
+            ? 'Re-enroll this repo to configure auto-merge'
+            : row.autoMerge
+              ? 'Approved runs merge their own PRs into base (never forced) — click to keep merges manual'
+              : 'Finished PRs wait for you to merge — click to let approved runs merge their own PRs'}
+          onclick={() => setRepoAutoMerge(row.repoRef, !row.autoMerge)}
+        >
+          <span class="pip"></span>{row.autoMerge ? 'Auto-merging PRs' : 'Auto-merge PRs'}
+        </button>
+        </div>
       </div>
 
       <!-- Working-directory config row (Milestone 12): one compact line — a small segmented mode

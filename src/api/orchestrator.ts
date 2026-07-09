@@ -935,6 +935,25 @@ export class Orchestrator {
   }
 
   /**
+   * Set an enrolled repo's auto-merge flag (`POST /repos/auto-merge`, agents-fsm#15): when on, a run
+   * reaching the terminal `done` state merges its own PR into base (never forced — a non-mergeable PR
+   * escalates). 404 if the repo is not enrolled. Takes effect from each run's next terminal decision —
+   * the runner reads the flag fresh at dispatch. Returns the updated repo.
+   */
+  setRepoAutoMerge(input: { repoRef: string; enabled: boolean }): Repo {
+    if (!input.repoRef) throw new ApiError(400, 'repoRef is required');
+    let ref: string;
+    try {
+      ref = parseRepoRef(input.repoRef);
+    } catch (err) {
+      throw new ApiError(400, err instanceof Error ? err.message : String(err));
+    }
+    if (!this.repo.getRepo(ref)) throw new ApiError(404, `repo ${ref} is not enrolled — enroll it (POST /repos) first`);
+    this.repo.setRepoAutoMerge(ref, input.enabled);
+    return this.repo.getRepo(ref)!;
+  }
+
+  /**
    * Turn continuous mode on/off (`POST /repos/watch`) and optionally set the override label and/or the
    * scope filter (issue #11). `label` is the guard-*bypass* override (omit to leave, `null` to reset to
    * the default). `filterLabel`/`filterMilestone` are the scope filter that *narrows* which issues intake

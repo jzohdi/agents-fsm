@@ -229,6 +229,14 @@ export const MIGRATIONS: Migration[] = [
     // already has it from schema.sql. Mirrors schema.sql.
     apply: (db) => addColumnIfMissing(db, 'repos', 'watch_in_flight_cap', 'INTEGER NOT NULL DEFAULT 1'),
   },
+  {
+    version: 18,
+    name: 'add repos.auto_merge',
+    // Opt-in auto-merge of approved PRs (agents-fsm#15). Additive column with a constant default 0,
+    // so a pre-existing DB backfills to 0 (off — behaviour unchanged) and a fresh DB already has it
+    // from schema.sql. Mirrors schema.sql.
+    apply: (db) => addColumnIfMissing(db, 'repos', 'auto_merge', 'INTEGER NOT NULL DEFAULT 0'),
+  },
 ];
 
 // Guard the invariants the runner relies on: versions a gap-free, strictly increasing 1..N sequence

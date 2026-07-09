@@ -22,6 +22,8 @@ import {
   type Issue,
   type IssueComment,
   type IssueFilter,
+  type MergePrInput,
+  type MergeResult,
   type OpenPrInput,
   type PrComment,
   type PrepareWorkingTreeInput,
@@ -343,6 +345,25 @@ export class FakeGitHub implements GitHub {
     if (input.title !== undefined) pr.title = input.title;
     if (input.body !== undefined) pr.body = input.body;
     return { ...pr };
+  }
+
+  async mergePr(input: MergePrInput): Promise<MergeResult> {
+    const pr = this.requirePr(input.prNumber);
+    if (pr.state === 'merged') return { merged: true }; // idempotent under ledger replay
+    if (pr.mergeable === 'conflicting') {
+      // Never forced: the PR (and its Closes #N issue) stays exactly as it was for a human.
+      return { merged: false, reason: 'pull request is not mergeable: the base branch has conflicting changes', mergeable: 'conflicting' };
+    }
+    pr.state = 'merged';
+    // Mirror a real GitHub merge: closing keywords in the PR body close the referenced issues — the
+    // README §3.5 dependency-satisfied signal the Scheduler keys off (criterion 5). Issues the fake
+    // doesn't know about are skipped (a real merge ignores dangling references too).
+    for (const match of pr.body.matchAll(/\b(?:clos(?:e[sd]?|ing)|fix(?:e[sd]|ing)?|resolv(?:e[sd]?|ing))\s+#(\d+)/gi)) {
+      const issue = [...this.issues.values()].find((i) => i.number === Number(match[1]));
+      if (issue) issue.state = 'closed';
+    }
+    // `deleteBranch` is honored cosmetically at most — the fake has no branch registry to prune.
+    return { merged: true };
   }
 
   async setPrLabels(prNumber: number, labels: string[]): Promise<void> {
