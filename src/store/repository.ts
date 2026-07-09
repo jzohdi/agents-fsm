@@ -202,6 +202,10 @@ export interface Repo {
    *  (sequential). Only meaningful while {@link watch} is on; clamped to `>= 1` by the decision, and
    *  actual concurrency is still bounded by the drain pool's FLEET_CONCURRENCY regardless. */
   watchInFlightCap: number;
+  /** Opt-in auto-merge (agents-fsm#15): when true, a run reaching the terminal `done` state merges its
+   *  PR into base via the GitHub adapter instead of parking merge-ready for a human. Gated on exactly
+   *  the same approved signal `done` already requires — no new approval bypass. Default `false`. */
+  autoMerge: boolean;
   createdAt: string;
 }
 
@@ -382,6 +386,7 @@ interface RepoRow {
   watch_filter_label: string | null;
   watch_filter_milestone: string | null;
   watch_in_flight_cap: number;
+  auto_merge: number;
   created_at: string;
 }
 
@@ -497,6 +502,7 @@ function mapRepo(r: RepoRow): Repo {
     watchFilterLabel: r.watch_filter_label,
     watchFilterMilestone: r.watch_filter_milestone,
     watchInFlightCap: r.watch_in_flight_cap,
+    autoMerge: r.auto_merge !== 0,
     createdAt: r.created_at,
   };
 }
@@ -575,6 +581,12 @@ export class Repository {
    *  enrollment, like watch/source: a re-enroll (`upsertRepo`) never resets the operator's choice. */
   setRepoConflictPolicy(repoRef: string, policy: ConflictPolicy): void {
     this.db.prepare('UPDATE repos SET conflict_policy = ? WHERE repo_ref = ? COLLATE NOCASE').run(policy, repoRef);
+  }
+
+  /** Set a repo's auto-merge flag ({@link Repo.autoMerge}). Persisted independently of enrollment,
+   *  like watch/source/conflict-policy: a re-enroll (`upsertRepo`) never resets the operator's choice. */
+  setRepoAutoMerge(repoRef: string, enabled: boolean): void {
+    this.db.prepare('UPDATE repos SET auto_merge = ? WHERE repo_ref = ? COLLATE NOCASE').run(enabled ? 1 : 0, repoRef);
   }
 
   /**

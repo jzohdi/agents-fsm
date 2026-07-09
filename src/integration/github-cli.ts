@@ -32,6 +32,8 @@ import {
   type Issue,
   type IssueComment,
   type IssueFilter,
+  type MergePrInput,
+  type MergeResult,
   type OpenPrInput,
   type PrComment,
   type PrepareWorkingTreeInput,
@@ -202,6 +204,24 @@ export class GitHubCli implements GitHub {
     if (input.body !== undefined) args.push('--body', input.body);
     await this.gh(args);
     return this.viewPr(input.prNumber);
+  }
+
+  async mergePr(input: MergePrInput): Promise<MergeResult> {
+    // Never force: no --admin/--force. A non-zero exit is a normal "not mergeable" outcome the loop
+    // escalates on, not a throw — so run gh directly and inspect the exit code rather than via `this.gh`.
+    const method = `--${input.method ?? 'merge'}`;
+    const args = ['pr', 'merge', String(input.prNumber), '--repo', this.repo, method];
+    if (input.deleteBranch ?? true) args.push('--delete-branch');
+    const result = await this.exec(this.ghCommand, args, {});
+    if (result.code === 0) return { merged: true };
+    // An already-merged PR (idempotent under ledger replay) reads as merged, not a failure. Confirm via
+    // getPr rather than string-matching gh's wording, which drifts across versions.
+    try {
+      if ((await this.viewPr(input.prNumber)).state === 'merged') return { merged: true };
+    } catch {
+      // fall through — treat as a genuine merge failure below
+    }
+    return { merged: false, reason: (result.stderr || result.stdout).trim() };
   }
 
   async setPrLabels(prNumber: number, labels: string[]): Promise<void> {

@@ -22,6 +22,8 @@ import {
   type Issue,
   type IssueComment,
   type IssueFilter,
+  type MergePrInput,
+  type MergeResult,
   type OpenPrInput,
   type PrComment,
   type PrepareWorkingTreeInput,
@@ -345,6 +347,25 @@ export class FakeGitHub implements GitHub {
     return { ...pr };
   }
 
+  async mergePr(input: MergePrInput): Promise<MergeResult> {
+    const pr = this.requirePr(input.prNumber);
+    // Already merged (crash/replay under the ledger) → idempotent success, no state change.
+    if (pr.state === 'merged') return { merged: true };
+    // Never force: a conflicting PR is a first-class "not mergeable" outcome, not a throw. Leave the PR
+    // (and its issue) untouched so the loop can escalate it merge-ready for a human.
+    if (pr.mergeable === 'conflicting') {
+      return { merged: false, reason: 'conflicting', mergeable: 'conflicting' };
+    }
+    pr.state = 'merged';
+    // Mirror a real GitHub merge: the PR body's closing keywords (Closes/Fixes/Resolves #N) close the
+    // linked issues → the Scheduler's issue-closed dependency signal fires without a human (criterion 5).
+    for (const number of parseClosingRefs(pr.body)) {
+      const issue = this.findIssueByNumber(number);
+      if (issue) issue.state = 'closed';
+    }
+    return { merged: true };
+  }
+
   async setPrLabels(prNumber: number, labels: string[]): Promise<void> {
     this.requirePr(prNumber);
     const current = this.prLabelsByNumber.get(prNumber) ?? new Set<string>();
@@ -479,9 +500,24 @@ export class FakeGitHub implements GitHub {
   }
 
   private requireIssueByNumber(number: number): StoredIssue {
-    for (const issue of this.issues.values()) if (issue.number === number) return issue;
-    throw new GitHubNotFoundError(`issue not found: #${number}`);
+    const issue = this.findIssueByNumber(number);
+    if (!issue) throw new GitHubNotFoundError(`issue not found: #${number}`);
+    return issue;
   }
+
+  private findIssueByNumber(number: number): StoredIssue | null {
+    for (const issue of this.issues.values()) if (issue.number === number) return issue;
+    return null;
+  }
+}
+
+/** GitHub closing-keyword references in a PR body: `Closes|Fixes|Resolves #N` (and their variants),
+ *  case-insensitive. Mirrors GitHub's auto-close behaviour so merging a PR closes its linked issues. */
+function parseClosingRefs(body: string): number[] {
+  const re = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s+#(\d+)/gi;
+  const numbers = new Set<number>();
+  for (const m of body.matchAll(re)) numbers.add(Number(m[1]));
+  return [...numbers];
 }
 
 function rangeKey(base: string, branch: string): string {
