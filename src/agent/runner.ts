@@ -28,7 +28,7 @@ import { BOT_COMMENT_MARKER, defaultScheduling, parseMarker, upsertMarker, type 
 import { isRepoResolver, singleRepoResolver, type RepoContext, type RepoResolver } from '../integration/github-resolver';
 import type { AgentPhase, ChatExchange, ConflictPolicy, Repository, Run, Transition } from '../store/repository';
 import type { AgentActivity, AgentRunResult, StageExecutor } from './executor';
-import { isHarnessResolver, singleHarness, type HarnessResolver } from './harness';
+import { DEFAULT_HARNESS, isHarnessResolver, singleHarness, type HarnessResolver } from './harness';
 import {
   parseEnvelope,
   parseReviewVerdict,
@@ -1073,10 +1073,11 @@ export class AgentRunner {
     const startedAt = Date.now();
     let result: AgentRunResult;
     try {
-      // Resolve the run's harness inside the try: an unknown/unregistered harness throws here and is
-      // recorded as a failed agent_run + rethrown, so the loop escalates the one run (executor_error →
-      // needs_human) rather than silently switching harness or crashing the drain.
-      const executor = this.harnesses.for(run.harness);
+      // Resolve the harness per stage inside the try: precedence is `recipe.harness` (per-stage
+      // override) > `run.harness` (per-run, pinned at start) > DEFAULT_HARNESS. An unknown/unregistered
+      // id throws here and is recorded as a failed agent_run + rethrown, so the loop escalates the one
+      // run (executor_error → needs_human) rather than silently switching harness or crashing the drain.
+      const executor = this.harnesses.for(recipe.harness ?? run.harness ?? DEFAULT_HARNESS);
       result = await executor.run({
         runId: run.id,
         stage: run.currentState,

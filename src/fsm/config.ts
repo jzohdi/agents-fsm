@@ -13,6 +13,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { z } from 'zod';
 
+import { isHarnessId } from '../agent/harness';
 import type { AgentPhase } from '../store/repository';
 import { FORWARD, type FsmConfig } from './types';
 
@@ -213,6 +214,13 @@ export interface StageAgentConfig {
   allowedTools?: string[];
   /** Git/GitHub effects that bracket this stage. Absent → {@link DEFAULT_IO} (a producing stage). */
   io?: StageIo;
+  /**
+   * Optional per-stage harness override. Absent → the run's harness (`runs.harness`), then the
+   * shipped default ({@link DEFAULT_HARNESS}, `claude-code`). Must be a valid {@link HarnessId}
+   * (`claude-code` | `cursor`) — NOT `claude` (the model-catalog name). Validated at config load
+   * by {@link stageAgentSchema}; the runner (`AgentRunner.invokePhase`) applies the precedence.
+   */
+  harness?: string;
 }
 
 /** Agent config keyed by stage name. Stages absent here use {@link DEFAULT_PHASES}. */
@@ -262,6 +270,10 @@ const stageAgentSchema = z
       .strict()
       .refine((io) => !io.opensPr || io.kind === 'produce', { message: 'opensPr is only valid on a produce stage' })
       .optional(),
+    harness: z
+      .string()
+      .refine(isHarnessId, { message: 'harness must be a valid harness id (e.g. "claude-code", "cursor")' })
+      .optional(),
   })
   .strict();
 
@@ -287,6 +299,7 @@ export function recipeFor(
   reviewCap: number;
   allowedTools?: string[];
   io: StageIo;
+  harness?: string;
 } {
   const c = agents[stage];
   return {
@@ -295,6 +308,9 @@ export function recipeFor(
     reviewCap: c?.reviewCap ?? DEFAULT_REVIEW_CAP,
     allowedTools: c?.allowedTools,
     io: c?.io ?? DEFAULT_IO,
+    // Passed through raw — no default here; the runner's `recipe.harness ?? run.harness ??
+    // DEFAULT_HARNESS` chain owns precedence, so an unset override stays behavior-preserving.
+    harness: c?.harness,
   };
 }
 
