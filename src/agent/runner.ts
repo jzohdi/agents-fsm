@@ -28,7 +28,8 @@ import { BOT_COMMENT_MARKER, defaultScheduling, parseMarker, upsertMarker, type 
 import { isRepoResolver, singleRepoResolver, type RepoContext, type RepoResolver } from '../integration/github-resolver';
 import type { AgentPhase, ChatExchange, ConflictPolicy, Repository, Run, Transition } from '../store/repository';
 import type { AgentActivity, AgentRunResult, StageExecutor } from './executor';
-import { DEFAULT_HARNESS, isHarnessResolver, singleHarness, type HarnessResolver } from './harness';
+import { CONTEXT_GLOBAL_SETTING_KEY, DEFAULT_HARNESS, contextStageKey, isHarnessResolver, singleHarness, type HarnessResolver } from './harness';
+import { composeOperatorContext } from './operator-context';
 import {
   parseEnvelope,
   parseReviewVerdict,
@@ -168,8 +169,10 @@ export type StageOutcome =
   | { kind: 'await_input'; reason: unknown };
 
 /** Builds the per-phase system prompt. The real implementation is `createSystemPromptFn`
- * (agent/prompts.ts); injected via {@link AgentRunnerOptions.systemPrompt} for real runs. */
-export type SystemPromptFn = (stage: string, phase: AgentPhase) => string;
+ * (agent/prompts.ts); injected via {@link AgentRunnerOptions.systemPrompt} for real runs. The optional
+ * `operatorContext` is an already-labeled block (agents-fsm#5) spliced before the output contract; omit
+ * it (or pass `''`) for the plain composition. */
+export type SystemPromptFn = (stage: string, phase: AgentPhase, operatorContext?: string) => string;
 
 /** Default used by stub/fake runs that don't inject real prompts (the demo CLI, most unit tests). */
 const defaultSystemPrompt: SystemPromptFn = (stage, phase) => `[${stage}:${phase}] system prompt (stub — inject createSystemPromptFn for real runs)`;
@@ -765,7 +768,7 @@ export class AgentRunner {
         phase: 'produce',
         model,
         ...(effort ? { effort } : {}),
-        system: this.systemPrompt(CHAT_STAGE, 'produce'),
+        system: this.systemPrompt(CHAT_STAGE, 'produce', this.operatorContextFor(run, CHAT_STAGE)),
         input,
         onActivity: (activity) => this.handleActivity(run.id, CHAT_STAGE, 'produce', activity),
         allowedTools: exchange.mode === 'write' ? CHAT_WRITE_TOOLS : CHAT_READ_TOOLS,
@@ -863,7 +866,7 @@ export class AgentRunner {
         phase: 'produce',
         model,
         ...(effort ? { effort } : {}),
-        system: this.systemPrompt(ADVISE_STAGE, 'produce'),
+        system: this.systemPrompt(ADVISE_STAGE, 'produce', this.operatorContextFor(run, ADVISE_STAGE)),
         input,
         onActivity: (activity) => this.handleActivity(run.id, ADVISE_STAGE, 'produce', activity),
         allowedTools: ADVISE_READ_TOOLS,
@@ -932,7 +935,7 @@ export class AgentRunner {
         phase: 'produce',
         model,
         ...(effort ? { effort } : {}),
-        system: this.systemPrompt(RESOLVE_CONFLICTS_STATE, 'produce'),
+        system: this.systemPrompt(RESOLVE_CONFLICTS_STATE, 'produce', this.operatorContextFor(run, RESOLVE_CONFLICTS_STATE)),
         input,
         onActivity: (activity) => this.handleActivity(run.id, RESOLVE_CONFLICTS_STATE, 'produce', activity),
         // Pre-approve the edit tools so a headless run never stalls on a permission prompt (see the
@@ -1045,6 +1048,22 @@ export class AgentRunner {
   }
 
   /** One phase invocation: call the executor (harness), record telemetry + usage, return the raw output. */
+  /**
+   * The effective operator context (agents-fsm#5) for one agent invocation: the three layers composed
+   * in global→stage→issue order — global (settings `context_global`) + per-stage (settings
+   * `context_stage:<stage>`) + per-run (`runs.issue_context`). Read fresh here at each dispatch, so a
+   * mid-run change and re-runs pick up current values automatically (INV-DURABLE). Returns `''` when no
+   * layer is set — every agent invocation (real stages + all three pseudo-stages) routes through here, so
+   * the global and per-run layers reach all of them; a pseudo-stage's per-stage key is simply never set.
+   */
+  private operatorContextFor(run: Run, stage: string): string {
+    return composeOperatorContext({
+      global: this.repo.getSetting(CONTEXT_GLOBAL_SETTING_KEY) ?? null,
+      stage: this.repo.getSetting(contextStageKey(stage)) ?? null,
+      issue: run.issueContext,
+    });
+  }
+
   private async invokePhase(run: Run, phase: AgentPhase, recipe: Recipe, prep: StagePrep, extra: PhaseExtra): Promise<unknown> {
     // The run's model override (dashboard dropdown) replaces the frontier role; `run` is the snapshot the
     // loop loaded when this stage was dispatched, so the whole stage uses one model and a mid-run change
@@ -1084,7 +1103,7 @@ export class AgentRunner {
         phase,
         model,
         ...(effort ? { effort } : {}),
-        system: this.systemPrompt(run.currentState, phase),
+        system: this.systemPrompt(run.currentState, phase, this.operatorContextFor(run, run.currentState)),
         input,
         onActivity: (activity) => this.handleActivity(run.id, run.currentState, phase, activity),
         ...(prep.workingDir ? { workingDir: prep.workingDir } : {}),

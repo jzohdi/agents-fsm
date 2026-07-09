@@ -1637,3 +1637,75 @@ describe('Orchestrator — resolution advisor (advise) + per-resume extraRounds'
     expect(repo.getRun(run.id)!.status).toBe('done');
   });
 });
+
+describe('Orchestrator — operator context (agents-fsm#5)', () => {
+  it('reports the three-layer context state on getSettings (empty by default)', () => {
+    const { orchestrator } = setup();
+    const settings = orchestrator.getSettings();
+    // Layer 1 unset → null; Layer 2 map has no entries until a stage is configured.
+    expect(settings.contextGlobal).toBeNull();
+    expect(settings.contextStages).toEqual({});
+  });
+
+  it('sets, reads back, and clears the global base context (Layer 1)', () => {
+    const { orchestrator, repo } = setup();
+
+    expect(orchestrator.setGlobalContext('break the UI into small sections')).toEqual({
+      contextGlobal: 'break the UI into small sections',
+    });
+    expect(orchestrator.getSettings().contextGlobal).toBe('break the UI into small sections');
+    // Persisted in the settings KV so it survives a restart.
+    expect(repo.getSetting('context_global')).toBe('break the UI into small sections');
+
+    // null (or blank) clears the key.
+    expect(orchestrator.setGlobalContext(null)).toEqual({ contextGlobal: null });
+    expect(orchestrator.getSettings().contextGlobal).toBeNull();
+    expect(repo.getSetting('context_global')).toBeUndefined();
+  });
+
+  it('sets per-stage context for a known stage and surfaces only non-empty stages (Layer 2)', () => {
+    const { orchestrator } = setup();
+
+    orchestrator.setStageContext('code_review', 'always look for ways to simplify (KISS)');
+    orchestrator.setStageContext('frontend', 'break the UI into small sections');
+    expect(orchestrator.getSettings().contextStages).toEqual({
+      code_review: 'always look for ways to simplify (KISS)',
+      frontend: 'break the UI into small sections',
+    });
+
+    // Clearing one drops it from the map (no empty values), leaving the others.
+    orchestrator.setStageContext('frontend', null);
+    expect(orchestrator.getSettings().contextStages).toEqual({
+      code_review: 'always look for ways to simplify (KISS)',
+    });
+  });
+
+  it('rejects an unknown stage with a 400 and persists nothing (typo guard)', () => {
+    const { orchestrator, repo } = setup();
+    try {
+      orchestrator.setStageContext('frontned', 'oops typo');
+      throw new Error('expected setStageContext to 400 on an unknown stage');
+    } catch (err) {
+      expect((err as ApiError).status).toBe(400);
+    }
+    expect(repo.getSetting('context_stage:frontned')).toBeUndefined();
+    expect(orchestrator.getSettings().contextStages).toEqual({});
+  });
+
+  it('sets and clears a run’s per-issue context, returning the updated run (Layer 3)', () => {
+    const { orchestrator, repo } = setup();
+    const run = orchestrator.start({ issueRef: 'o/r#1' });
+
+    const updated = orchestrator.setRunContext(run.id, 'for this issue the backend agent should add an index');
+    expect(updated.issueContext).toBe('for this issue the backend agent should add an index');
+    expect(repo.getRun(run.id)!.issueContext).toBe('for this issue the backend agent should add an index');
+
+    const cleared = orchestrator.setRunContext(run.id, null);
+    expect(cleared.issueContext).toBeNull();
+  });
+
+  it('404s setRunContext on a missing run (like setModel/setEffort)', () => {
+    const { orchestrator } = setup();
+    expect(() => orchestrator.setRunContext(99999, 'x')).toThrow(/not found/);
+  });
+});

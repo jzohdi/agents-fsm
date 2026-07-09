@@ -204,6 +204,14 @@ export const MIGRATIONS: Migration[] = [
   },
   {
     version: 15,
+    name: 'add runs.issue_context',
+    // Per-run (Layer 3) operator context prompt (agents-fsm#5). Additive nullable column, so a plain
+    // ALTER ADD COLUMN retrofits a pre-existing DB (backfilling to NULL = "no per-run context") and a
+    // fresh DB already has it from schema.sql. Mirrors schema.sql.
+    apply: (db) => addColumnIfMissing(db, 'runs', 'issue_context', 'TEXT'),
+  },
+  {
+    version: 16,
     name: 'add repos watch filter columns',
     // Continuous mode scope filter (issue #11): narrow the watched backlog to a label and/or milestone.
     // Additive nullable columns, so a pre-existing DB backfills to NULL (no filter → behaviour unchanged,

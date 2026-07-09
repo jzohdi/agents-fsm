@@ -38,6 +38,8 @@ export interface Run {
   modelOverride: string | null;
   /** Per-run reasoning-effort override (Claude Code's `--effort`); `null` = the model default. Read by the runner at each stage. */
   effortOverride: string | null;
+  /** Per-run (Layer 3) operator context prompt (agents-fsm#5); `null` = none. Read by the runner at each stage and composed global→stage→issue into the system prompt. */
+  issueContext: string | null;
   /** Which agent harness runs this, pinned at start (a {@link HarnessId} from the agent layer; kept as a
    *  plain string here so the store never depends upward on the agent layer). Defaults to `claude-code`. */
   harness: string;
@@ -296,6 +298,7 @@ interface RunRow {
   cost_override: CostOverride | null;
   model_override: string | null;
   effort_override: string | null;
+  issue_context: string | null;
   harness: string;
   depends_on: string;
   priority: number;
@@ -403,6 +406,7 @@ function mapRun(r: RunRow): Run {
     costOverride: r.cost_override,
     modelOverride: r.model_override,
     effortOverride: r.effort_override,
+    issueContext: r.issue_context,
     harness: r.harness,
     dependsOn: JSON.parse(r.depends_on) as number[],
     priority: r.priority,
@@ -768,6 +772,17 @@ export class Repository {
    */
   setRunEffortOverride(id: number, effort: string | null): void {
     this.db.prepare(`UPDATE runs SET effort_override = ?, updated_at = ${NOW} WHERE id = ?`).run(effort, id);
+  }
+
+  /**
+   * Set (or clear, with `null`) a run's per-run operator context (Layer 3 — the dashboard's per-issue
+   * context field, agents-fsm#5). The runner reads it fresh at each stage, so a change takes effect on the
+   * run's next stage. Normalizes a blank / whitespace-only value to `null` (INV-CLEAR) so "cleared" and
+   * "blank" are one state downstream.
+   */
+  setRunIssueContext(id: number, context: string | null): void {
+    const normalized = context && context.trim() !== '' ? context : null;
+    this.db.prepare(`UPDATE runs SET issue_context = ?, updated_at = ${NOW} WHERE id = ?`).run(normalized, id);
   }
 
   /**

@@ -25,6 +25,8 @@ export interface Run {
   effortOverride: string | null;
   /** Which agent harness runs this, pinned at start (e.g. `claude-code` | `cursor`). */
   harness: string;
+  /** Per-run (Layer 3) operator context appended to this run's agents; null = none. Takes effect next stage. */
+  issueContext: string | null;
   /** Cached §3.5 scheduling (M9): same-repo issue numbers that must close before later stages run. */
   dependsOn?: number[];
   /** Cached §3.5 scheduling (M9): higher dispatches first. */
@@ -45,6 +47,10 @@ export interface Settings {
   defaultModel: string | null;
   /** The persisted pre-run reasoning-effort selection (null = none). */
   defaultEffort: string | null;
+  /** Layer 1 — the global base operator context applied to every agent invocation (null = unset). */
+  contextGlobal: string | null;
+  /** Layer 2 — per-stage operator context, keyed by stage; only stages with a non-empty value appear. */
+  contextStages: Record<string, string>;
 }
 
 /** One selectable harness model (the model picker), from `GET /models`. */

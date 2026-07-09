@@ -200,6 +200,32 @@ describe('migrate', () => {
     db.close();
   });
 
+  it('retrofits a database created before runs.issue_context existed (agents-fsm#5)', () => {
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, flags TEXT NOT NULL DEFAULT '{}', archived_at TEXT)`);
+    expect(columnExists(db, 'runs', 'issue_context')).toBe(false);
+
+    runMigrations(db); // the issue_context migration adds the per-run operator-context column on a pre-existing DB
+
+    expect(columnExists(db, 'runs', 'issue_context')).toBe(true);
+    expect(appliedMigrations(db)).toEqual(ALL_MIGRATION_NAMES);
+    // Drift guard: the retrofitted `issue_context` column is schema-identical to a fresh DB's (the ALTER
+    // and schema.sql define the same column; if they drift — type/notnull/default — old and new DBs
+    // diverge silently). Whole-table parity isn't assertable here: this pre-existing `runs` starts minimal
+    // and migrations are additive, so it never grows schema.sql's original columns (issue_ref, created_at…).
+    const fresh = openDb();
+    const issueContextCol = (d: Db) => columns(d, 'runs').find((c) => (c as { name: string }).name === 'issue_context');
+    expect(issueContextCol(db)).toEqual(issueContextCol(fresh));
+    fresh.close();
+    db.close();
+  });
+
+  it('provisions runs.issue_context on a fresh database (agents-fsm#5)', () => {
+    const db = openDb();
+    expect(columnExists(db, 'runs', 'issue_context')).toBe(true); // baseline (schema.sql) provisions it
+    db.close();
+  });
+
   it('retrofits a database created before runs.harness existed, backfilling to claude-code', () => {
     const db = new Database(':memory:');
     db.exec(`CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, flags TEXT NOT NULL DEFAULT '{}', archived_at TEXT)`);

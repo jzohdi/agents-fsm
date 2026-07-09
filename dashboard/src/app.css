@@ -308,6 +308,9 @@ input, textarea, button, select { font: inherit; }
 .af-rig .cell select:focus { outline: none; background: var(--paper2); }
 .af-rig .af-effort { gap: 9px; }
 
+/* --- per-run operator context (issue #5, Layer 3): quiet block under the agent-config rail --- */
+.af-runctx { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--rule); }
+
 /* --- searchable model picker (ModelPicker.svelte): shared by the new-run bar + the run controls --- */
 .af-mp { position: relative; display: inline-flex; }
 .af-mp-trigger {

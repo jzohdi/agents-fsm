@@ -51,6 +51,11 @@ export const ui = $state({
   // an older daemon without the route (the selector then hides).
   defaultHarness: null as string | null,
   harnesses: [] as string[],
+  // Operator-provided context (issue #5), three layers. Layers 1–2 are daemon settings (persisted in
+  // `settings`), hydrated from GET /settings and edited via the actions below; Layer 3 (per-run) lives on
+  // each Run's `issueContext`. Empty layers contribute nothing; the runner composes them before invoking.
+  contextGlobal: null as string | null,
+  contextStages: {} as Record<string, string>,
   // Run chat (the per-run operator ↔ agent side channel). The thread itself lives on `detail.chat`;
   // these are the dock's view state: open/closed, the sticky permission mode, and how many replies
   // landed while the dock was closed (the launcher badge). Unread resets on open and on run switch.
@@ -329,6 +334,8 @@ export async function loadSettings(): Promise<void> {
     ui.harnesses = s.harnesses;
     ui.selectedModel = s.defaultModel ?? null; // pre-fill the bar from the persisted selection
     ui.selectedEffort = s.defaultEffort ?? null;
+    ui.contextGlobal = s.contextGlobal ?? null; // operator context layers 1–2 (issue #5)
+    ui.contextStages = s.contextStages ?? {};
   } catch {
     ui.defaultHarness = null; // older daemon without /settings — the selector hides
     ui.harnesses = [];
@@ -395,6 +402,62 @@ async function persistDefaultSelection(prev: { model: string | null; effort: str
     ui.selectedModel = prev.model; // roll back a rejected change
     ui.selectedEffort = prev.effort;
     banner(`Model change failed: ${(err as Error).message}`, 'err');
+  }
+}
+
+/**
+ * Set (or clear, with `null`) the global base operator context (Layer 1, issue #5) via
+ * `PUT /settings/context/global`. Optimistic — reflect it immediately, then adopt the server value;
+ * roll back and banner on failure. Passing an empty string clears the layer (the daemon normalizes blank → unset).
+ */
+export async function setGlobalContext(text: string | null): Promise<void> {
+  const previous = ui.contextGlobal;
+  ui.contextGlobal = text; // optimistic
+  try {
+    const { contextGlobal } = await request<{ contextGlobal: string | null }>('PUT', '/settings/context/global', { context: text });
+    ui.contextGlobal = contextGlobal;
+  } catch (err) {
+    ui.contextGlobal = previous; // roll back a rejected change
+    banner(`Context change failed: ${(err as Error).message}`, 'err');
+  }
+}
+
+/**
+ * Set (or clear, with `null`) the per-stage operator context for one stage (Layer 2, issue #5) via
+ * `PUT /settings/context/stage`. Optimistic; adopts the server's full stage map on success, rolls back on failure.
+ */
+export async function setStageContext(stage: string, text: string | null): Promise<void> {
+  const previous = ui.contextStages;
+  ui.contextStages = text ? { ...previous, [stage]: text } : omitKey(previous, stage); // optimistic
+  try {
+    const { contextStages } = await request<{ stage: string; contextStages: Record<string, string> }>(
+      'PUT',
+      '/settings/context/stage',
+      { stage, context: text },
+    );
+    ui.contextStages = contextStages;
+  } catch (err) {
+    ui.contextStages = previous; // roll back a rejected change
+    banner(`Context change failed: ${(err as Error).message}`, 'err');
+  }
+}
+
+function omitKey(map: Record<string, string>, key: string): Record<string, string> {
+  const { [key]: _drop, ...rest } = map;
+  return rest;
+}
+
+/**
+ * Set (or clear, with `null`) the selected run's per-run operator context (Layer 3, issue #5) via
+ * `POST /runs/:id/context`. Reflects the returned run (which carries the normalized `issueContext`).
+ * Takes effect on the run's next stage; banners on failure.
+ */
+export async function setRunContext(id: number, text: string | null): Promise<void> {
+  try {
+    upsertRun(await request<Run>('POST', `/runs/${id}/context`, { context: text }));
+    if (id === ui.selectedId) await refreshDetail();
+  } catch (err) {
+    banner(`Context change failed: ${(err as Error).message}`, 'err');
   }
 }
 

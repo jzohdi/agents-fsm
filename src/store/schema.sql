@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS runs (
   priority           INTEGER NOT NULL DEFAULT 0,       -- higher dispatches first (claim ORDER BY)
   order_key          TEXT    NOT NULL DEFAULT '',      -- lexicographic tiebreaker after priority
   deps_satisfied_at  TEXT,                             -- the latch; NULL = unverified/unsatisfied
+  issue_context      TEXT,                              -- per-run (Layer 3) operator context prompt (agents-fsm#5); NULL = none. Read by the runner at each stage; composed global→stage→issue into the system prompt.
   created_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );

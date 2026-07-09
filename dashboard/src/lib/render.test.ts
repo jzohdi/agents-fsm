@@ -59,7 +59,7 @@ const FSM: FsmConfig = {
 const run = (over: Partial<Run> = {}): Run => ({
   id: 1, issueRef: 'o/r#1', repoRef: 'o/r', currentState: 'plan', status: 'running', fsmConfigVersion: 'v',
   prNumber: null, branch: null, tokensUsed: 10, costUsed: 0.5, agentRunsCount: 0, flags: {}, archivedAt: null, modelOverride: null,
-  effortOverride: null, harness: 'claude-code', createdAt: '', updatedAt: '', ...over,
+  effortOverride: null, harness: 'claude-code', issueContext: null, createdAt: '', updatedAt: '', ...over,
 });
 
 describe('formatting', () => {

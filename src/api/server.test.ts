@@ -1172,3 +1172,67 @@ describe('HTTP API — remote-access hardening (issue #27)', () => {
     expect(await denied.text()).not.toContain(TOKEN);
   });
 });
+
+describe('HTTP API — operator context routes (agents-fsm#5)', () => {
+  const json = (r: Response) => r.json() as Promise<Record<string, unknown>>;
+  const put = (base: string, path: string, body: unknown) =>
+    fetch(`${base}${path}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+  it('persists + clears the global base context and surfaces it via GET /settings (Layer 1)', async () => {
+    const { base } = await start();
+
+    const saved = await put(base, '/settings/context/global', { context: 'always KISS' }).then(json);
+    expect(saved).toEqual({ contextGlobal: 'always KISS' });
+    expect(await fetch(`${base}/settings`).then(json)).toMatchObject({ contextGlobal: 'always KISS' });
+
+    // null clears.
+    expect(await put(base, '/settings/context/global', { context: null }).then(json)).toEqual({ contextGlobal: null });
+    expect(await fetch(`${base}/settings`).then(json)).toMatchObject({ contextGlobal: null });
+
+    // A non-string, non-null body → 400.
+    expect((await put(base, '/settings/context/global', { context: 42 })).status).toBe(400);
+  });
+
+  it('persists per-stage context for a known stage and 400s an unknown one (Layer 2)', async () => {
+    const { base } = await start();
+
+    const res = await put(base, '/settings/context/stage', { stage: 'code_review', context: 'look for ways to simplify' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      stage: 'code_review',
+      contextStages: { code_review: 'look for ways to simplify' },
+    });
+    expect(await fetch(`${base}/settings`).then(json)).toMatchObject({
+      contextStages: { code_review: 'look for ways to simplify' },
+    });
+
+    // Unknown stage → 400 (typo guard); a non-string/non-null context → 400.
+    expect((await put(base, '/settings/context/stage', { stage: 'frontned', context: 'x' })).status).toBe(400);
+    expect((await put(base, '/settings/context/stage', { stage: 'frontend', context: 7 })).status).toBe(400);
+  });
+
+  it('sets + clears a run’s per-issue context via POST /runs/:id/context (Layer 3)', async () => {
+    const { base } = await start();
+    const run = (await (await fetch(`${base}/runs`, { method: 'POST', body: JSON.stringify({ issueRef: 'o/r#1' }) })).json()) as { id: number };
+
+    const set = await fetch(`${base}/runs/${run.id}/context`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ context: 'add a DB index for this issue' }),
+    }).then(json);
+    expect(set).toMatchObject({ id: run.id, issueContext: 'add a DB index for this issue' });
+
+    const cleared = await fetch(`${base}/runs/${run.id}/context`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ context: null }),
+    }).then(json);
+    expect(cleared).toMatchObject({ id: run.id, issueContext: null });
+
+    // A non-string/non-null context → 400; a missing run → 404.
+    const badBody = await fetch(`${base}/runs/${run.id}/context`, { method: 'POST', body: JSON.stringify({ context: 9 }) });
+    expect(badBody.status).toBe(400);
+    const missing = await fetch(`${base}/runs/99999/context`, { method: 'POST', body: JSON.stringify({ context: 'x' }) });
+    expect(missing.status).toBe(404);
+  });
+});
