@@ -3,7 +3,7 @@
   // the attention queue, the repositories ledger (with inline enrollment), and a recent-activity
   // feed. Everything derives from `ui.runs`/`ui.repos`, which the SSE stream keeps live — this page
   // is pure derivation, no polling of its own.
-  import { ui, configureRepoSource, enrollRepo, fetchDirSuggestions, openRepoBoard, openRun, setRepoConflictPolicy, setRepoWatch, setRepoWatchFilter, setRepoWatchInFlightCap } from './store.svelte';
+  import { ui, configureRepoSource, enrollRepo, fetchDirSuggestions, openRepoBoard, openRun, setRepoAutoMerge, setRepoConflictPolicy, setRepoWatch, setRepoWatchFilter, setRepoWatchInFlightCap } from './store.svelte';
   import {
     attentionModel,
     costStatusModel,
@@ -425,7 +425,24 @@
               : 'Merge conflicts wait for you — click to let an agent auto-resolve them'}
           onclick={() => setRepoConflictPolicy(row.repoRef, row.conflictPolicy === 'auto' ? 'manual' : 'auto')}
         >
-          <span class="pip"></span>{row.conflictPolicy === 'auto' ? 'Auto-merge' : 'Conflicts: manual'}
+          <span class="pip"></span>{row.conflictPolicy === 'auto' ? 'Conflicts: auto' : 'Conflicts: manual'}
+        </button>
+        <!-- Auto-merge toggle (agents-fsm#15): when on, a run reaching the terminal `done` state merges
+             its approved PR into base instead of parking merge-ready for you. Gated on exactly the same
+             approved signal `done` already requires — no new approval bypass. Off by default. -->
+        <button
+          type="button"
+          class="af-hwatch af-hautomerge"
+          class:on={row.autoMerge}
+          disabled={!row.enrolled}
+          title={!row.enrolled
+            ? 'Re-enroll this repo to configure auto-merge'
+            : row.autoMerge
+              ? 'Approved PRs auto-merge into base — click to require a human merge instead'
+              : 'Approved PRs wait for you to merge — click to auto-merge them on approval'}
+          onclick={() => setRepoAutoMerge(row.repoRef, !row.autoMerge)}
+        >
+          <span class="pip"></span>{row.autoMerge ? 'Auto-merge PRs' : 'Merge on approve: off'}
         </button>
       </div>
 

@@ -242,4 +242,8 @@ export interface Repo {
   /** Merge-conflict policy: `'manual'` parks a conflicted run needs_human for the operator; `'auto'`
    *  lets a verified resolver agent handle it (between-stage base sync + PR conflict re-open). */
   conflictPolicy: 'manual' | 'auto';
+  /** Opt-in auto-merge (agents-fsm#15): when true, a run reaching the terminal `done` state merges its
+   *  PR into base via the GitHub adapter instead of parking merge-ready for a human. Gated on exactly
+   *  the same approved signal `done` already requires — no new approval bypass. Default `false`. */
+  autoMerge: boolean;
 }
