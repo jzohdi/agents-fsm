@@ -679,7 +679,6 @@ Everything below is not-yet-built planned work, one [GitHub issue](https://githu
 - **Continuous mode: configurable in-flight cap > 1** (parallel pickup; today hardcoded to 1) — [#10](https://github.com/jzohdi/agents-fsm/issues/10).
 - **Continuous mode: label/milestone backlog filter** — [#11](https://github.com/jzohdi/agents-fsm/issues/11).
 - **Per-stage harness override** — [#12](https://github.com/jzohdi/agents-fsm/issues/12).
-- **Per-harness model catalogs for off-default runs** — [#13](https://github.com/jzohdi/agents-fsm/issues/13).
 - **Cursor `.cursor/rules` system-prompt path** (conditional) — [#14](https://github.com/jzohdi/agents-fsm/issues/14).
 - **Opt-in auto-merge of approved PRs** — [#15](https://github.com/jzohdi/agents-fsm/issues/15).
 - **Remote / phone access** (API auth + networking + hardening) — [#16](https://github.com/jzohdi/agents-fsm/issues/16).
@@ -917,9 +916,11 @@ concrete ids rather than synthesizing them.
 - **Cursor auth failures are non-fatal**: an unauthenticated `cursor-agent` escalates only *its own* runs
   to `needs_human` (with a login remedy in the reason) — Claude Code runs keep flowing. (A Claude auth
   failure still aborts the whole drain, as before.)
-- The per-run **model picker** (in the run inspector) appears only for a run whose harness matches the
-  loaded catalog (i.e. the current default's), so it never offers wrong-harness models; per-harness
-  catalogs for off-default runs are deferred.
+- The per-run **model picker** (in the run inspector) loads the catalog of the *run's own* harness via
+  `GET /models?harness=<run.harness>` (cached per harness in `ui.catalogs`), so an off-default run gets a
+  working picker of *its* harness's models — never the daemon default's. Graceful degradation: against an
+  older daemon that ignores the query param and returns the default catalog, the harness-field mismatch
+  guard refuses to cache it, so such a run simply shows no picker rather than wrong-harness models.
 
 ### 9.9 Order work with dependencies (multi-issue)
 
