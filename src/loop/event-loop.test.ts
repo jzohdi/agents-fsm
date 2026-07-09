@@ -1443,3 +1443,63 @@ describe('standalone merge-conflict resolution (dedicated resolve stage)', () =>
     expect(repo.getRun(run.id)!.status).toBe('done');
   });
 });
+
+describe('opt-in auto-merge of approved PRs (agents-fsm#15)', () => {
+  /** Enroll the test repo and set its auto-merge flag (the loop reads it fresh at the terminal decision). */
+  function enrollAutoMerge(repo: Repository, enabled: boolean) {
+    repo.upsertRepo({ repoRef: 'o/r', workingRoot: '/tmp/agent-fleet-test' });
+    repo.setRepoAutoMerge('o/r', enabled);
+  }
+
+  it('flag off (default): a done run parks merge-ready with its PR still open — behavior unchanged (criterion 2)', async () => {
+    const { repo, loop, github } = setup(goldenPathHandler); // repo not enrolled → auto-merge defaults off
+    github.seedIssue('o/r#1', { number: 1 });
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.runUntilIdle();
+
+    const done = repo.getRun(run.id)!;
+    expect(done).toMatchObject({ currentState: 'done', status: 'done' });
+    // The auto-merge pseudo-state is never entered; the PR is left open for a human to merge.
+    expect(repo.listTransitions(run.id).some((t) => t.toState === 'auto_merge')).toBe(false);
+    expect((await github.getPr(done.prNumber!)).state).toBe('open');
+  });
+
+  it('flag on: a done run auto-merges its PR into base via the pseudo-state, ending done (criterion 3)', async () => {
+    const { repo, loop, github } = setup(goldenPathHandler);
+    github.seedIssue('o/r#1', { number: 1 });
+    enrollAutoMerge(repo, true);
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    await loop.runUntilIdle();
+
+    const done = repo.getRun(run.id)!;
+    expect(done).toMatchObject({ currentState: 'done', status: 'done' });
+    expect((await github.getPr(done.prNumber!)).state).toBe('merged'); // the mechanical merge fired
+    // No new approval gate: auto-merge is interposed only *after* code_review approved (→ the done target).
+    const seq = sequence(repo, run.id);
+    expect(seq.at(-2)).toEqual(['code_review', 'approve', 'auto_merge']);
+    expect(seq.at(-1)).toEqual(['auto_merge', 'auto_merged', 'done']);
+  });
+
+  it('flag on but the PR is not mergeable: the run is surfaced (needs_human), never force-merged (criterion 4)', async () => {
+    const { repo, loop, github } = setup(goldenPathHandler);
+    github.seedIssue('o/r#1', { number: 1 });
+    enrollAutoMerge(repo, true);
+    const run = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+
+    // Drive the pipeline up to the auto-merge pseudo-state, then base drifts under the PR (conflict).
+    while (repo.getRun(run.id)!.currentState !== 'auto_merge') {
+      if (!(await loop.tick())) break;
+    }
+    const parked = repo.getRun(run.id)!;
+    expect(parked.currentState).toBe('auto_merge'); // interposed in place of committing done
+    expect(parked.status).toBe('running');
+    const prNumber = parked.prNumber!;
+    github.setPrMergeable(prNumber, 'conflicting');
+    await loop.runUntilIdle();
+
+    // Escalated, not merged: the PR stays open + merge-ready for a human and the run surfaces — never forced.
+    expect(repo.getRun(run.id)!.status).toBe('needs_human');
+    expect((await github.getPr(prNumber)).state).toBe('open');
+    expect(repo.listTransitions(run.id).at(-1)).toMatchObject({ fromState: 'auto_merge', trigger: 'auto_merge_failed' });
+  });
+});

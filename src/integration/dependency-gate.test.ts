@@ -69,4 +69,39 @@ describe('dependency ordering, end to end (Milestone 9)', () => {
       expect(states).toEqual(['plan', 'plan_review', 'interface_design', 'tdd', 'frontend', 'backend', 'code_review', 'done']);
     }
   });
+
+  it('with auto_merge on, A reaching done merges its own PR and closes its issue — waking B without a human merge (agents-fsm#15)', async () => {
+    const { fsm, agents, version } = loadDefaultConfig();
+    const repo = new Repository(openDb(':memory:'));
+    const github = new FakeGitHub({ repoRef: 'o/r' });
+    github.seedIssue('o/r#1', { number: 1, title: 'A: the dependency', body: 'build the base' });
+    github.seedIssue('o/r#2', { number: 2, title: 'B: the dependent', body: `builds on #1\n\n${DEP_MARKER}` });
+    const runner = new AgentRunner(repo, new StubExecutor(goldenPathHandler), agents, github);
+    const loop = new EventLoop(repo, fsm, version, runner);
+    const poller = new SchedulerPoller(repo, github, loop);
+
+    // Auto-merge is opt-in per repo; enrolling + enabling it is what lets a `done` run produce the merge
+    // signal that satisfies the continuous-mode dependency chain — the whole point of criterion 5.
+    repo.upsertRepo({ repoRef: 'o/r', workingRoot: '/tmp/agent-fleet-test' });
+    repo.setRepoAutoMerge('o/r', true);
+
+    const a = loop.startRun({ issueRef: 'o/r#1', repoRef: 'o/r' });
+    const b = loop.startRun({ issueRef: 'o/r#2', repoRef: 'o/r' });
+    await loop.drain(2);
+
+    // A auto-merged its own PR (no human) → GitHub closed its `Closes #1` issue, the §3.5 signal.
+    expect(repo.getRun(a.id)!.status).toBe('done');
+    expect((await github.getPr(repo.getRun(a.id)!.prNumber!)).state).toBe('merged');
+    expect((await github.readIssue('o/r#1')).state).toBe('closed');
+    // B is still parked at the dependency gate (it never saw a human merge).
+    expect(repo.getRun(b.id)!.currentState).toBe('plan');
+
+    // The Scheduler clears B's dependency off the issue-closed signal that auto-merge produced — no
+    // human merge needed. (#1 already closed during drain, so B is satisfied straight from `running`;
+    // it never sits in `blocked`, so we assert the latch — depsSatisfiedAt — not a park→wake count.)
+    await poller.checkOnce();
+    expect(repo.getRun(b.id)!.depsSatisfiedAt).not.toBeNull();
+    await loop.drain(2);
+    expect(repo.getRun(b.id)!.status).toBe('done');
+  });
 });

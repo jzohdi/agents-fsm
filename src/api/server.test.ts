@@ -604,6 +604,22 @@ describe('HTTP API', () => {
     expect(await off.json()).toMatchObject({ watch: false });
   });
 
+  it('toggles auto-merge via POST /repos/auto-merge (agents-fsm#15)', async () => {
+    const { base } = await start();
+    await fetch(`${base}/repos`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web' }) });
+
+    const on = await fetch(`${base}/repos/auto-merge`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web', enabled: true }) });
+    expect(on.status).toBe(200);
+    expect(await on.json()).toMatchObject({ repoRef: 'acme/web', autoMerge: true });
+
+    // Auto-merging an unenrolled repo is a 404; a non-boolean `enabled` is a 400.
+    expect((await fetch(`${base}/repos/auto-merge`, { method: 'POST', body: JSON.stringify({ repoRef: 'no/such', enabled: true }) })).status).toBe(404);
+    expect((await fetch(`${base}/repos/auto-merge`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web', enabled: 'yes' }) })).status).toBe(400);
+
+    const off = await fetch(`${base}/repos/auto-merge`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web', enabled: false }) });
+    expect(await off.json()).toMatchObject({ autoMerge: false });
+  });
+
   it('round-trips the scope filter through POST /repos/watch (issue #11)', async () => {
     const { base } = await start();
     await fetch(`${base}/repos`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web' }) });

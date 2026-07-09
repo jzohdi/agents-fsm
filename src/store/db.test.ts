@@ -223,6 +223,39 @@ describe('migrate', () => {
     db.close();
   });
 
+  it('retrofits a database created before repos.auto_merge existed, backfilling to 0 / off (agents-fsm#15)', () => {
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, flags TEXT NOT NULL DEFAULT '{}', archived_at TEXT)`);
+    // A repos table from before the auto_merge column — the early repos registry (migration 3's shape),
+    // which the later additive migrations (watch, source_mode, conflict_policy, watch filters, in-flight
+    // cap, then auto_merge) retrofit column-by-column.
+    db.exec(
+      `CREATE TABLE repos (
+         id           INTEGER PRIMARY KEY AUTOINCREMENT,
+         repo_ref     TEXT    NOT NULL COLLATE NOCASE UNIQUE,
+         clone_url    TEXT,
+         local_repo   TEXT,
+         working_root TEXT    NOT NULL,
+         base_branch  TEXT    NOT NULL DEFAULT 'main',
+         created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+       )`,
+    );
+    db.prepare("INSERT INTO repos (repo_ref, working_root) VALUES ('acme/web', './w')").run();
+    expect(columnExists(db, 'repos', 'auto_merge')).toBe(false);
+
+    runMigrations(db); // migration 18 adds the NOT NULL column with a constant default on a pre-existing DB
+
+    expect(columnExists(db, 'repos', 'auto_merge')).toBe(true);
+    expect(appliedMigrations(db)).toEqual(ALL_MIGRATION_NAMES);
+    // Off is the unchanged behaviour: a pre-existing repo backfills to 0 (auto-merge disabled).
+    expect(db.prepare("SELECT auto_merge FROM repos WHERE repo_ref = 'acme/web'").get()).toEqual({ auto_merge: 0 });
+    // Drift guard: the retrofitted registry stays schema-identical to a fresh DB's.
+    const fresh = openDb();
+    expect(columns(db, 'repos')).toEqual(columns(fresh, 'repos'));
+    fresh.close();
+    db.close();
+  });
+
   it('retrofits a database created before runs.model_override existed', () => {
     const db = new Database(':memory:');
     db.exec(`CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, flags TEXT NOT NULL DEFAULT '{}', archived_at TEXT)`);
