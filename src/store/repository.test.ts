@@ -123,6 +123,37 @@ describe('runs', () => {
     expect(repo.getRun(run.id)!.modelOverride).toBeNull();
   });
 
+  it('sets and clears a run per-run operator context, normalizing blank to null (agents-fsm#5)', () => {
+    const run = newRun();
+    // Absent by default (Layer 3 = per-run operator context; null = none).
+    expect(repo.getRun(run.id)!.issueContext).toBeNull();
+
+    repo.setRunIssueContext(run.id, 'backend agent: prefer thin controllers');
+    expect(repo.getRun(run.id)!.issueContext).toBe('backend agent: prefer thin controllers');
+
+    // A blank / whitespace-only write is stored as null so "cleared" and "blank" are one state (INV-CLEAR).
+    repo.setRunIssueContext(run.id, '   \n  ');
+    expect(repo.getRun(run.id)!.issueContext).toBeNull();
+
+    repo.setRunIssueContext(run.id, 'again');
+    expect(repo.getRun(run.id)!.issueContext).toBe('again');
+    repo.setRunIssueContext(run.id, null); // explicit clear
+    expect(repo.getRun(run.id)!.issueContext).toBeNull();
+  });
+
+  it('writes only the issue_context column, leaving the run’s other fields intact (agents-fsm#5)', () => {
+    const run = newRun();
+    repo.setRunModelOverride(run.id, 'sonnet');
+    repo.setRunState(run.id, 'backend');
+
+    repo.setRunIssueContext(run.id, 'per-issue guidance');
+    const after = repo.getRun(run.id)!;
+    expect(after.issueContext).toBe('per-issue guidance');
+    expect(after.modelOverride).toBe('sonnet');
+    expect(after.currentState).toBe('backend');
+    expect(after.status).toBe('running');
+  });
+
   it('defaults a run to the claude-code harness, and stamps an explicit one', () => {
     expect(newRun().harness).toBe('claude-code'); // omitted → the shipped default
     const chosen = repo.createRun({ issueRef: 'o/r#9', repoRef: 'o/r', initialState: 'triage', fsmConfigVersion: 'v1', harness: 'cursor' });

@@ -43,11 +43,14 @@ import type { Suggestion } from '../integration/github';
 import type { SuggestionSource } from '../integration/github-account';
 import { catalogHasModel, catalogSupportsEffort, EFFORT_LEVELS, isEffortLevel, modelEfforts, type HarnessCatalog } from '../agent/harness-models';
 import {
+  CONTEXT_GLOBAL_SETTING_KEY,
+  CONTEXT_STAGE_TYPES,
   DEFAULT_EFFORT_SETTING_KEY,
   DEFAULT_HARNESS,
   DEFAULT_HARNESS_SETTING_KEY,
   DEFAULT_MODEL_SETTING_KEY,
   HARNESS_IDS,
+  contextStageKey,
   isHarnessId,
   type HarnessId,
 } from '../agent/harness';
@@ -992,13 +995,73 @@ export class Orchestrator {
     harnesses: readonly HarnessId[];
     defaultModel: string | null;
     defaultEffort: string | null;
+    contextGlobal: string | null;
+    contextStages: Record<string, string>;
   } {
     const catalog = this.catalogFor?.(this.defaultHarness);
     const persistedModel = this.repo.getSetting(DEFAULT_MODEL_SETTING_KEY);
     const defaultModel = persistedModel && catalog && catalogHasModel(catalog, persistedModel) ? persistedModel : null;
     const persistedEffort = this.repo.getSetting(DEFAULT_EFFORT_SETTING_KEY);
     const defaultEffort = persistedEffort && !this.effortError(this.defaultHarness, defaultModel, persistedEffort) ? persistedEffort : null;
-    return { defaultHarness: this.defaultHarness, harnesses: HARNESS_IDS, defaultModel, defaultEffort };
+    return {
+      defaultHarness: this.defaultHarness,
+      harnesses: HARNESS_IDS,
+      defaultModel,
+      defaultEffort,
+      contextGlobal: this.repo.getSetting(CONTEXT_GLOBAL_SETTING_KEY) ?? null,
+      contextStages: this.readStageContexts(),
+    };
+  }
+
+  /** The per-stage operator contexts as a `{ stage: text }` map — only stages with a non-empty value
+   *  (agents-fsm#5, Layer 2). Reads one settings row per {@link CONTEXT_STAGE_TYPES} stage. */
+  private readStageContexts(): Record<string, string> {
+    const stages: Record<string, string> = {};
+    for (const stage of CONTEXT_STAGE_TYPES) {
+      const value = this.repo.getSetting(contextStageKey(stage));
+      if (value !== undefined && value !== null && value.trim() !== '') stages[stage] = value;
+    }
+    return stages;
+  }
+
+  /**
+   * Persist (or clear, with `null` / blank) the global base operator context — Layer 1 of the three-layer
+   * operator-context feature (`PUT /settings/context/global`, agents-fsm#5). Read fresh by the runner at
+   * each stage, so a change takes effect on the next dispatch and survives restarts. `null` clears the key.
+   */
+  setGlobalContext(context: string | null): { contextGlobal: string | null } {
+    const normalized = context !== null && context.trim() !== '' ? context : null;
+    this.repo.setSetting(CONTEXT_GLOBAL_SETTING_KEY, normalized);
+    return { contextGlobal: normalized };
+  }
+
+  /**
+   * Persist (or clear, with `null` / blank) a per-stage operator context — Layer 2
+   * (`PUT /settings/context/stage`, agents-fsm#5). Validates `stage` against {@link CONTEXT_STAGE_TYPES}
+   * (an unknown/typo'd stage is a `400`, nothing persisted, so dead `context_stage:<typo>` rows can't
+   * accumulate). Returns the stage plus the refreshed map of non-empty per-stage contexts.
+   */
+  setStageContext(stage: string, context: string | null): { stage: string; contextStages: Record<string, string> } {
+    if (!CONTEXT_STAGE_TYPES.includes(stage)) {
+      throw new ApiError(400, `unknown stage "${stage}" (expected ${CONTEXT_STAGE_TYPES.join(' | ')})`);
+    }
+    const normalized = context !== null && context.trim() !== '' ? context : null;
+    this.repo.setSetting(contextStageKey(stage), normalized);
+    return { stage, contextStages: this.readStageContexts() };
+  }
+
+  /**
+   * Persist (or clear, with `null` / blank) a run's per-issue operator context — Layer 3
+   * (`POST /runs/:id/context`, agents-fsm#5). Returns the updated {@link Run}, exactly like
+   * {@link setModel}/{@link setEffort} (404 on a missing run). The runner reads it fresh at each stage,
+   * so a change takes effect on the run's next stage. Blank normalizes to `null` in the repository (INV-CLEAR).
+   */
+  setRunContext(runId: number, context: string | null): Run {
+    this.requireRun(runId); // 404
+    this.repo.setRunIssueContext(runId, context);
+    const run = this.requireRun(runId);
+    this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
+    return run;
   }
 
   /**

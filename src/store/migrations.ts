@@ -202,6 +202,14 @@ export const MIGRATIONS: Migration[] = [
          CREATE INDEX IF NOT EXISTS idx_run_advice_run ON run_advice(run_id, id);`,
       ),
   },
+  {
+    version: 15,
+    name: 'add runs.issue_context',
+    // Per-run (Layer 3) operator context prompt (agents-fsm#5). Additive nullable column, so a plain
+    // ALTER ADD COLUMN retrofits a pre-existing DB (backfilling to NULL = "no per-run context") and a
+    // fresh DB already has it from schema.sql. Mirrors schema.sql.
+    apply: (db) => addColumnIfMissing(db, 'runs', 'issue_context', 'TEXT'),
+  },
 ];
 
 // Guard the invariants the runner relies on: versions a gap-free, strictly increasing 1..N sequence

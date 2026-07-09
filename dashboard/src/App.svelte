@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import FileRunBar from './lib/FileRunBar.svelte';
+  import ContextSettings from './lib/ContextSettings.svelte';
   import Home from './lib/Home.svelte';
   import RepoTabs from './lib/RepoTabs.svelte';
   import Pipeline from './lib/Pipeline.svelte';
@@ -49,6 +50,7 @@
 {#if ui.route === 'pipelines'}
   <RepoTabs />
   <FileRunBar />
+  <ContextSettings />
 {/if}
 
 {#if ui.banner}

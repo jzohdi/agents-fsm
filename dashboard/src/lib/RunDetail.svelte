@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { ui, control, revertRun, resolveConflicts, overrideCost, setModel, setEffort, setHarness, loadCatalog, checkPrFeedback, checkReply, requestAdvice } from './store.svelte';
+  import { ui, control, revertRun, resolveConflicts, overrideCost, setModel, setEffort, setHarness, setRunContext, loadCatalog, checkPrFeedback, checkReply, requestAdvice } from './store.svelte';
   import ModelPicker from './ModelPicker.svelte';
   import EffortSelect from './EffortSelect.svelte';
+  import ContextEditor from './ContextEditor.svelte';
   import { telemetryModel, escalationModel, activityLane, costStatusModel, issueUrl, prUrl, branchUrl, isWatchingPrFeedback, fmtRunCost, fmtDuration, fmtTokens, escapeHtml, humanizeState, humanizeHarness, schedulingLabel, adviceCards, type AdviceCard } from './render';
   import StateMachine from './StateMachine.svelte';
   import ScrollArea from './ScrollArea.svelte';
@@ -246,6 +247,19 @@
               <EffortSelect efforts={runEfforts} value={run.effortOverride} onselect={(e) => setEffort(run.id, e)} ariaLabel="run reasoning effort" />
             {/if}
           {/if}
+        </div>
+      {/if}
+      {#if !terminal}
+        <!-- Layer 3 (issue #5): per-run operator context, appended to this run's agents from its next
+             stage. Quiet, next to the agent-config rail — standing guidance for this issue only. -->
+        <div class="af-runctx">
+          <ContextEditor
+            label="Run context"
+            hint="added to this run's agents (next stage on)"
+            value={run.issueContext}
+            placeholder="e.g. the backend agent should add a DB index for issue #42…"
+            onsave={(text) => setRunContext(run.id, text)}
+          />
         </div>
       {/if}
       {#if showCostOverride}
