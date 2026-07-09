@@ -153,8 +153,20 @@ describe('migrate', () => {
   it('retrofits a database created before the repos watch-filter columns existed, backfilling to NULL (issue #11)', () => {
     const db = new Database(':memory:');
     db.exec(`CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, flags TEXT NOT NULL DEFAULT '{}', archived_at TEXT)`);
-    // A repos table from before the scope-filter columns — created by the early repos migration only.
-    db.exec(`CREATE TABLE repos (id INTEGER PRIMARY KEY AUTOINCREMENT, repo_ref TEXT NOT NULL COLLATE NOCASE UNIQUE, working_root TEXT NOT NULL)`);
+    // A repos table from before the scope-filter columns — the early repos registry (migration 3's
+    // shape), which the later additive migrations (watch, source_mode, conflict_policy, then the
+    // watch-filter columns) retrofit column-by-column.
+    db.exec(
+      `CREATE TABLE repos (
+         id           INTEGER PRIMARY KEY AUTOINCREMENT,
+         repo_ref     TEXT    NOT NULL COLLATE NOCASE UNIQUE,
+         clone_url    TEXT,
+         local_repo   TEXT,
+         working_root TEXT    NOT NULL,
+         base_branch  TEXT    NOT NULL DEFAULT 'main',
+         created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+       )`,
+    );
     db.prepare("INSERT INTO repos (repo_ref, working_root) VALUES ('acme/web', './w')").run();
     expect(columnExists(db, 'repos', 'watch_filter_label')).toBe(false);
     expect(columnExists(db, 'repos', 'watch_filter_milestone')).toBe(false);

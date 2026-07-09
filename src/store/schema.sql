@@ -171,7 +171,14 @@ CREATE TABLE IF NOT EXISTS repos (
   -- harness invocation resolve the conflicts (mechanically verified) before escalating. No CHECK — the
   -- valid set is app-validated (like runs.harness) so a fresh DB stays identical to a migrated one.
   -- Appended last so a fresh schema matches a DB retrofitted by the additive migration (db drift guard).
-  conflict_policy TEXT NOT NULL DEFAULT 'manual'   -- 'manual' | 'auto'
+  conflict_policy TEXT NOT NULL DEFAULT 'manual',   -- 'manual' | 'auto'
+  -- Continuous mode scope filter (issue #11): narrow the watched backlog to a subset *before* the guards
+  -- run. Distinct from `watch_label` (the guard-bypass override) — these *scope* which issues are
+  -- considered at all. NULL = that dimension is unconstrained (behaviour unchanged — scan all open
+  -- issues); both set = match all (AND). Appended last so a fresh schema matches a DB retrofitted by the
+  -- additive migration (db drift guard).
+  watch_filter_label     TEXT,   -- scope the watched backlog to this label (NULL = no label filter)
+  watch_filter_milestone TEXT    -- scope the watched backlog to this milestone (NULL = no milestone filter)
 );
 
 -- Per-run operator ↔ agent chat — the run's "general chat" side channel (singular name by convention

@@ -414,7 +414,7 @@ Choosing between the two executors is configuration, not a rewrite — a deploym
 
 Point the orchestrator at a **whole repository** (not a single issue) and have it work the backlog on its own: pick up an open issue, drive it to a merge-ready PR, **wait for a human to merge that PR, then automatically start the next issue** — repeating until the backlog is empty. This is the "set it and let it run" mode the dashboard's new-run box hints at.
 
-**Shipped:** the opt-in per-repo `watch` flag (`repos.watch`, migration 10; toggled from the home-ledger **Watch** button or `POST /repos/watch`), the **Issue Intake Poller** (`src/loop/issue-intake-poller.ts` around the pure `src/loop/issue-intake.ts`) that admits the next eligible issue **sequentially (in-flight cap 1)** each poll tick, and the **safety guards** (owner-filed / unassigned / non-`[WIP]`, with an `agent help wanted` override label) that stop an untrusted issue from becoming an injection or cost vector — operating guide §9.10. Auto-picked issues go through the same `POST /runs` admission (dedup, cost ceiling, enrollment) as manual runs. *Still open:* a configurable cap > 1 (parallel pickup) and a label/milestone filter to pull from a subset of the backlog.
+**Shipped:** the opt-in per-repo `watch` flag (`repos.watch`, migration 10; toggled from the home-ledger **Watch** button or `POST /repos/watch`), the **Issue Intake Poller** (`src/loop/issue-intake-poller.ts` around the pure `src/loop/issue-intake.ts`) that admits the next eligible issue **sequentially (in-flight cap 1)** each poll tick, and the **safety guards** (owner-filed / unassigned / non-`[WIP]`, with an `agent help wanted` override label) that stop an untrusted issue from becoming an injection or cost vector — operating guide §9.10. Auto-picked issues go through the same `POST /runs` admission (dedup, cost ceiling, enrollment) as manual runs. An optional per-repo **scope filter** (`repos.watch_filter_label` / `watch_filter_milestone`, migration 15; issue #11) narrows the watched backlog to issues carrying a given label and/or milestone *before* the guards run — distinct from the `agent help wanted` override, which bypasses the guards rather than scoping the backlog. *Still open:* a configurable cap > 1 (parallel pickup).
 
 It is mostly **composition of pieces already planned**, which is why it is cheap to add once they exist:
 - **Issue ingestion** for a repo: list open issues via the GitHub adapter (`gh issue list` / `gh search`, the same surface `suggestIssues` already uses) and create a run per issue — gated by a configurable in-flight cap (default **1**, i.e. strictly sequential).
@@ -985,6 +985,16 @@ opts in — by adding the **`agent help wanted`** label (configurable per repo v
 same `POST /runs` admission as a manual run — the one-active-run-per-issue guard, the global cost
 ceiling, and enrollment all still apply — so continuous mode is admission control, not a bypass. It
 **never auto-merges**: a human still reviews and merges every PR. Needs the **daemon** (§9.3).
+
+**Scope filter — narrow the backlog (issue #11).** By default the poller considers *every* open issue
+(subject to the guards). To restrict it to a subset, set an optional **label** and/or **milestone**
+filter on the repo's watch control (the filter chip next to **Watch**, or the `filterLabel` /
+`filterMilestone` fields of `POST /repos/watch`). Only issues matching **all** the set fields are
+considered candidates at all; a non-matching issue is excluded *before* the guards run, so it is never
+picked up and never even logged as a skip. This is orthogonal to the `agent help wanted` override
+above: the filter *scopes* which issues are in play, the override *bypasses the guards* for one that
+already is — a filtered-out issue is never pulled back in by carrying the override label. A blank
+filter field clears that dimension (back to "all issues" for it).
 
 ### 9.11 Remote access (reach the dashboard off-localhost)
 

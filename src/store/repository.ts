@@ -189,6 +189,13 @@ export interface Repo {
    *  sync): `'manual'` = park the run `needs_human` for the operator; `'auto'` = a harness invocation
    *  resolves the conflicts (mechanically verified) before any escalation. Default `'manual'`. */
   conflictPolicy: ConflictPolicy;
+  /** Continuous mode scope filter (issue #11): only consider open issues carrying this label.
+   *  `null` = no label filter. Distinct from {@link watchLabel} (the guard-bypass override); this
+   *  *scopes* the backlog rather than bypassing the guards. Only meaningful while {@link watch} is on. */
+  watchFilterLabel: string | null;
+  /** Continuous mode scope filter (issue #11): only consider open issues in this milestone.
+   *  `null` = no milestone filter. Only meaningful while {@link watch} is on. */
+  watchFilterMilestone: string | null;
   createdAt: string;
 }
 
@@ -365,6 +372,8 @@ interface RepoRow {
   watch_label: string | null;
   source_mode: RepoSourceMode | null;
   conflict_policy: ConflictPolicy;
+  watch_filter_label: string | null;
+  watch_filter_milestone: string | null;
   created_at: string;
 }
 
@@ -476,6 +485,8 @@ function mapRepo(r: RepoRow): Repo {
     watchLabel: r.watch_label,
     sourceMode: r.source_mode,
     conflictPolicy: r.conflict_policy,
+    watchFilterLabel: r.watch_filter_label,
+    watchFilterMilestone: r.watch_filter_milestone,
     createdAt: r.created_at,
   };
 }
@@ -556,14 +567,37 @@ export class Repository {
     this.db.prepare('UPDATE repos SET conflict_policy = ? WHERE repo_ref = ? COLLATE NOCASE').run(policy, repoRef);
   }
 
-  setRepoWatch(repoRef: string, watch: boolean, label?: string | null): void {
-    if (label === undefined) {
-      this.db.prepare('UPDATE repos SET watch = ? WHERE repo_ref = ? COLLATE NOCASE').run(watch ? 1 : 0, repoRef);
-    } else {
-      this.db
-        .prepare('UPDATE repos SET watch = ?, watch_label = ? WHERE repo_ref = ? COLLATE NOCASE')
-        .run(watch ? 1 : 0, label, repoRef);
+  /**
+   * Turn continuous mode on/off, and optionally set the override label and/or the scope filter columns
+   * (issue #11), in one write. Each optional column follows the same convention: **key absent → leave
+   * the column as-is; `null` → clear it; a string → set it**. `watch` is always written. The scope
+   * filter (`watch_filter_label`/`watch_filter_milestone`) *narrows* which issues intake considers —
+   * distinct from `watch_label`, the guard-bypass override. The SET-list is built dynamically from which
+   * of the optional columns are present, so a plain toggle (`setRepoWatch(ref, watch)`) never clobbers a
+   * previously-set label or filter. No-op on an unenrolled repo (0 rows updated).
+   */
+  setRepoWatch(
+    repoRef: string,
+    watch: boolean,
+    label?: string | null,
+    filter?: { filterLabel?: string | null; filterMilestone?: string | null },
+  ): void {
+    const sets = ['watch = ?'];
+    const params: Array<string | number | null> = [watch ? 1 : 0];
+    if (label !== undefined) {
+      sets.push('watch_label = ?');
+      params.push(label);
     }
+    if (filter?.filterLabel !== undefined) {
+      sets.push('watch_filter_label = ?');
+      params.push(filter.filterLabel);
+    }
+    if (filter?.filterMilestone !== undefined) {
+      sets.push('watch_filter_milestone = ?');
+      params.push(filter.filterMilestone);
+    }
+    params.push(repoRef);
+    this.db.prepare(`UPDATE repos SET ${sets.join(', ')} WHERE repo_ref = ? COLLATE NOCASE`).run(...params);
   }
 
   // --- settings (a tiny key/value store) ---------------------------------------

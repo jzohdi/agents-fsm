@@ -226,7 +226,9 @@ async function handle(
 
   // --- repo watch (Milestone 11: turn continuous mode on/off for an enrolled repo). Body-carried
   // repoRef (it contains a `/`, awkward in a path segment); `watch` boolean required, `label` optional
-  // (string to set a custom override label, null to reset to the default, absent to leave it). ---
+  // (string to set a custom override label, null to reset to the default, absent to leave it).
+  // `filterLabel`/`filterMilestone` (issue #11) are the optional scope filter — same shape as `label`:
+  // a string to set, null to clear, absent to leave; an empty string normalizes to null server-side. ---
   if (method === 'POST' && path === '/repos/watch') {
     const body = await readJson(req, ctx.maxBodyBytes);
     const watch = body.watch;
@@ -235,7 +237,25 @@ async function handle(
     if (label !== undefined && label !== null && typeof label !== 'string') {
       return sendError(res, new ApiError(400, '"label" must be a string, null, or omitted'));
     }
-    return sendJson(res, 200, orch.setRepoWatch({ repoRef: str(body, 'repoRef'), watch, label: label as string | null | undefined }));
+    const filterLabel = body.filterLabel;
+    if (filterLabel !== undefined && filterLabel !== null && typeof filterLabel !== 'string') {
+      return sendError(res, new ApiError(400, '"filterLabel" must be a string, null, or omitted'));
+    }
+    const filterMilestone = body.filterMilestone;
+    if (filterMilestone !== undefined && filterMilestone !== null && typeof filterMilestone !== 'string') {
+      return sendError(res, new ApiError(400, '"filterMilestone" must be a string, null, or omitted'));
+    }
+    return sendJson(
+      res,
+      200,
+      orch.setRepoWatch({
+        repoRef: str(body, 'repoRef'),
+        watch,
+        label: label as string | null | undefined,
+        filterLabel: filterLabel as string | null | undefined,
+        filterMilestone: filterMilestone as string | null | undefined,
+      }),
+    );
   }
 
   // --- repo merge-conflict policy: what a run does when merging the latest base into its branch

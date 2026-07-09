@@ -618,7 +618,7 @@ describe('HTTP API', () => {
     expect(await set.json()).toMatchObject({ watch: true, watchFilterLabel: 'bug', watchFilterMilestone: 'v2' });
 
     // It is visible on GET /repos too.
-    const repos = await (await fetch(`${base}/repos`)).json();
+    const repos = (await (await fetch(`${base}/repos`)).json()) as Array<{ repoRef: string }>;
     expect(repos.find((r: { repoRef: string }) => r.repoRef === 'acme/web')).toMatchObject({
       watchFilterLabel: 'bug',
       watchFilterMilestone: 'v2',

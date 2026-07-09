@@ -14,8 +14,9 @@
  * "File a new run" uses, so the dedup guard, cost ceiling, and enrollment checks all still apply.
  */
 
+import type { IssueFilter } from '../integration/github';
 import type { RepoResolver } from '../integration/github-resolver';
-import type { Repository, RunStatus } from '../store/repository';
+import type { Repo, Repository, RunStatus } from '../store/repository';
 import { decideIntake, ownerOf, DEFAULT_WATCH_LABEL, type IntakeSkip } from './issue-intake';
 
 /** The one thing the poller needs to admit a run — satisfied by the Orchestrator's `start`. It runs the
@@ -57,7 +58,7 @@ export class IssueIntakePoller {
       if (repo.sourceMode === null) continue;
       pass.reposScanned += 1;
       try {
-        await this.checkRepo(repo.repoRef, repo.watchLabel ?? DEFAULT_WATCH_LABEL, pass, currentSkips);
+        await this.checkRepo(repo, pass, currentSkips);
       } catch (err) {
         // A repo's adapter/read failing isolates to that repo — the next tick retries it.
         this.emit(`${repo.repoRef}: intake pass failed, will retry: ${String(err)}`);
@@ -67,9 +68,15 @@ export class IssueIntakePoller {
     return pass;
   }
 
-  private async checkRepo(repoRef: string, overrideLabel: string, pass: IntakePass, currentSkips: Set<string>): Promise<void> {
+  private async checkRepo(repo: Repo, pass: IntakePass, currentSkips: Set<string>): Promise<void> {
+    const repoRef = repo.repoRef;
+    const overrideLabel = repo.watchLabel ?? DEFAULT_WATCH_LABEL;
     const { github } = this.resolver.for(repoRef);
-    const openIssues = await github.listOpenIssues();
+    // Scope filter (issue #11): applied at fetch time, so the pure decision below still gets an
+    // already-scoped set and the guards run on it unchanged. An all-`null` filter is unconstrained
+    // (== no filter), so an unwatched-scope repo behaves exactly as before.
+    const filter: IssueFilter = { label: repo.watchFilterLabel, milestone: repo.watchFilterMilestone };
+    const openIssues = await github.listOpenIssues(filter);
 
     // Latest run status per issue ref: listRuns is newest-first, so the first row per ref is the latest.
     const statusByRef = new Map<string, RunStatus>();

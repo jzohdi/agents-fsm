@@ -55,6 +55,17 @@ export interface RepoIssue {
 }
 
 /**
+ * Scope filter for {@link GitHub.listOpenIssues} (issue #11 — continuous mode). Each field, when a
+ * non-empty string, restricts the fetched set; fields are AND-combined (match all set fields).
+ * `null`/`undefined`/absent = that dimension is unconstrained. Milestone is resolved inside the
+ * adapter, so {@link RepoIssue} is unchanged.
+ */
+export interface IssueFilter {
+  label?: string | null;
+  milestone?: string | null;
+}
+
+/**
  * A repo or issue the operator might start a run on — what the dashboard's new-run autocomplete shows.
  * Sourced from the logged-in user's own repos + their open issues in the real adapter (the user-scoped
  * `GitHubCliAccount`), and from the fake's seeded issues in tests.
@@ -214,8 +225,13 @@ export interface GitHub {
    * Carries the author/assignees/labels the eligibility guards need. The real adapter maps `gh issue
    * list --state open`; the fake returns its seeded open issues. Returns `[]` when the repo has none.
    * Only the Issue Intake Poller calls this — never a run's hot path.
+   *
+   * An optional {@link IssueFilter} (issue #11) *scopes* the fetched set to a label and/or milestone,
+   * AND-combined — applied here at fetch time so the pure intake decision keeps receiving an
+   * already-scoped set and {@link RepoIssue} stays unchanged (milestone is resolved internally). Called
+   * with no argument (or an all-`null` filter) it behaves exactly as before — every open issue.
    */
-  listOpenIssues(): Promise<RepoIssue[]>;
+  listOpenIssues(filter?: IssueFilter): Promise<RepoIssue[]>;
 
   /**
    * Rewrite an issue's title and/or body. Triage uses this to improve a vague issue into a
