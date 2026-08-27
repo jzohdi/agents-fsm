@@ -15,11 +15,11 @@ import { ADDRESSING_PR_FEEDBACK_FLAG, EventLoop } from './event-loop';
 import { AgentRunner } from '../agent/runner';
 import { loadDefaultConfig } from '../fsm/config';
 import { FakeGitHub } from '../integration/github-fake';
-import type { PrComment } from '../integration/github';
+import type { PrComment, PrReview } from '../integration/github';
 import type { RepoResolver } from '../integration/github-resolver';
 import { openDb } from '../store/db';
 import { Repository, type Run } from '../store/repository';
-import { DEFAULT_FEEDBACK_MARKER, isFeedbackComment, newFeedbackComments, PR_FEEDBACK_CLOSED_FLAG, PrFeedbackPoller } from './pr-feedback-poller';
+import { DEFAULT_FEEDBACK_MARKER, isFeedbackComment, isPrApproved, newFeedbackComments, PR_FEEDBACK_CLOSED_FLAG, PrFeedbackPoller } from './pr-feedback-poller';
 
 const { fsm, agents, version } = loadDefaultConfig();
 const ISSUE_REF = 'o/r#7';
@@ -416,5 +416,237 @@ describe('PrFeedbackPoller — merge-conflict detection on finished runs', () =>
     github.setPrMergeable(repo.getRun(run.id)!.prNumber!, 'unknown');
     const poller = new PrFeedbackPoller(repo, github, loop, { sleep: noopSleep });
     expect(await poller.checkRun(run.id)).toBe('watching');
+  });
+});
+
+describe('isPrApproved', () => {
+  const r = (author: string, state: PrReview['state'], submittedAt = '2026-07-01T12:00:00Z'): PrReview => ({ author, state, submittedAt });
+
+  it('approves on a standing approving review; nothing else counts', () => {
+    expect(isPrApproved([r('alice', 'approved')])).toBe(true);
+    expect(isPrApproved([])).toBe(false);
+    expect(isPrApproved([r('alice', 'commented')])).toBe(false);
+    expect(isPrApproved([r('alice', 'pending')])).toBe(false);
+  });
+
+  it('per reviewer, only the latest verdict counts', () => {
+    // Approved then changes requested → the reviewer is now a blocker.
+    expect(isPrApproved([r('alice', 'approved', '2026-07-01T12:00:00Z'), r('alice', 'changes_requested', '2026-07-01T13:00:00Z')])).toBe(false);
+    // Changes requested then approved → the reviewer signed off.
+    expect(isPrApproved([r('alice', 'changes_requested', '2026-07-01T12:00:00Z'), r('alice', 'approved', '2026-07-01T13:00:00Z')])).toBe(true);
+    // A later neutral comment never displaces a verdict.
+    expect(isPrApproved([r('alice', 'approved', '2026-07-01T12:00:00Z'), r('alice', 'commented', '2026-07-01T13:00:00Z')])).toBe(true);
+  });
+
+  it('orders verdicts by their own submittedAt — callers owe no ordering contract', () => {
+    // Newest-first input: the later approval must still displace the earlier changes-requested.
+    expect(isPrApproved([r('alice', 'approved', '2026-07-01T13:00:00Z'), r('alice', 'changes_requested', '2026-07-01T12:00:00Z')])).toBe(true);
+    expect(isPrApproved([r('alice', 'changes_requested', '2026-07-01T13:00:00Z'), r('alice', 'approved', '2026-07-01T12:00:00Z')])).toBe(false);
+  });
+
+  it('any reviewer with standing requested changes blocks, regardless of other approvals', () => {
+    expect(isPrApproved([r('alice', 'approved'), r('bob', 'changes_requested')])).toBe(false);
+  });
+
+  it('a dismissed review clears that reviewer’s signal entirely', () => {
+    expect(isPrApproved([r('alice', 'dismissed')])).toBe(false);
+    // Alice's dismissal doesn't block Bob's approval (dismissed ≠ changes_requested).
+    expect(isPrApproved([r('alice', 'dismissed'), r('bob', 'approved')])).toBe(true);
+  });
+
+  it('with a boundary, only an approval submitted after it counts (the branch changed up to the boundary)', () => {
+    const boundary = '2026-07-01T12:00:00Z';
+    expect(isPrApproved([r('alice', 'approved', '2026-07-01T11:00:00Z')], boundary)).toBe(false); // stale
+    expect(isPrApproved([r('alice', 'approved', '2026-07-01T13:00:00Z')], boundary)).toBe(true); // fresh
+    // Requested changes block regardless of the boundary (conservative).
+    expect(isPrApproved([r('alice', 'changes_requested', '2026-07-01T11:00:00Z'), r('bob', 'approved', '2026-07-01T13:00:00Z')], boundary)).toBe(false);
+  });
+});
+
+describe('PrFeedbackPoller — merge-on-approve (opt-in per repo)', () => {
+  /** Enroll o/r and opt it into merge-on-approve; the poller reads the flag fresh per check. */
+  function optIn(repo: Repository, enabled = true) {
+    repo.upsertRepo({ repoRef: 'o/r', workingRoot: '/tmp/agent-fleet-test' });
+    repo.setRepoMergeOnApprove('o/r', enabled);
+  }
+
+  /** Seed a review on a run's PR, timed `offsetMs` from when the run finished (like seedFeedback). */
+  function seedReview(repo: Repository, github: FakeGitHub, run: Run, offsetMs: number, state: PrReview['state'] = 'approved', author = 'alice') {
+    github.seedPrReview(repo.getRun(run.id)!.prNumber!, { author, state, submittedAt: finishPlus(repo, run.id, offsetMs) });
+  }
+
+  /** A done run with an open, mergeable PR carrying a human's post-finish approving review. */
+  async function doneWithApprovedPr() {
+    const harness = await runToDone();
+    const prNumber = harness.repo.getRun(harness.run.id)!.prNumber!;
+    harness.github.setPrMergeable(prNumber, 'mergeable');
+    seedReview(harness.repo, harness.github, harness.run, 1000);
+    return { ...harness, prNumber };
+  }
+
+  it('merges a done run’s approved PR: dispatches the ledgered merge and finalizes back to done', async () => {
+    const { repo, github, loop, run, prNumber } = await doneWithApprovedPr();
+    optIn(repo);
+    const poller = new PrFeedbackPoller(repo, github, loop, { sleep: noopSleep });
+
+    expect(await poller.checkRun(run.id)).toBe('merging');
+    // The run enters the auto_merge pseudo-state via the pr_approved control transition…
+    const merging = repo.getRun(run.id)!;
+    expect(merging.currentState).toBe('auto_merge');
+    expect(merging.status).toBe('running');
+
+    // …and draining the queued EVENT_AUTO_MERGE merges the PR and returns the run to done.
+    await loop.runUntilIdle();
+    expect((await github.getPr(prNumber)).state).toBe('merged');
+    const after = repo.getRun(run.id)!;
+    expect(after).toMatchObject({ currentState: 'done', status: 'done' });
+    const tail = repo.listTransitions(run.id).slice(-2).map((t) => [t.fromState, t.trigger, t.toState]);
+    expect(tail).toEqual([
+      ['done', 'pr_approved', 'auto_merge'],
+      ['auto_merge', 'auto_merged', 'done'],
+    ]);
+
+    // The next tick sees the merged PR and runs the normal post-merge cleanup (reclaim + stop watching).
+    expect(await poller.checkOnce()).toBe(0);
+    expect(github.droppedTrees).toContain(run.id);
+    expect(repo.getRun(run.id)!.flags[PR_FEEDBACK_CLOSED_FLAG]).toBe(true);
+  });
+
+  it('a background pass counts a dispatched merge, so the one-shot poll driver drains it', async () => {
+    const { repo, github, loop, run, prNumber } = await doneWithApprovedPr();
+    optIn(repo);
+    const poller = new PrFeedbackPoller(repo, github, loop, { sleep: noopSleep });
+
+    expect(await poller.checkOnce()).toBe(1); // acted on: the merge was dispatched
+    await loop.runUntilIdle();
+    expect((await github.getPr(prNumber)).state).toBe('merged');
+    expect(repo.getRun(run.id)!.status).toBe('done');
+  });
+
+  it('does nothing when the repo has not opted in (off by default)', async () => {
+    const { repo, github, loop, run } = await doneWithApprovedPr();
+    optIn(repo, false);
+    const poller = new PrFeedbackPoller(repo, github, loop, { sleep: noopSleep });
+
+    expect(await poller.checkRun(run.id)).toBe('watching');
+    expect(repo.getRun(run.id)!.status).toBe('done'); // untouched
+  });
+
+  it('does nothing without a standing human approval (requested changes block)', async () => {
+    const { repo, github, loop, run } = await runToDone();
+    optIn(repo);
+    github.setPrMergeable(repo.getRun(run.id)!.prNumber!, 'mergeable');
+    seedReview(repo, github, run, 1000, 'approved', 'alice'); // would merge on its own…
+    seedReview(repo, github, run, 2000, 'changes_requested', 'bob'); // …but bob's standing verdict blocks
+
+    const poller = new PrFeedbackPoller(repo, github, loop, { sleep: noopSleep });
+    expect(await poller.checkRun(run.id)).toBe('watching');
+    expect(repo.getRun(run.id)!.status).toBe('done');
+  });
+
+  it('never merges a needs_human run — it is parked for a person', async () => {
+    const { repo, github, loop, run } = await runToNeedsHumanWithPr();
+    optIn(repo);
+    github.setPrMergeable(repo.getRun(run.id)!.prNumber!, 'mergeable');
+    seedReview(repo, github, run, 1000);
+
+    const poller = new PrFeedbackPoller(repo, github, loop, { sleep: noopSleep });
+    expect(await poller.checkRun(run.id)).toBe('watching');
+    expect(repo.getRun(run.id)!.status).toBe('needs_human'); // untouched
+  });
+
+  it('never attempts a merge while the PR is not cleanly mergeable (unknown = no signal)', async () => {
+    const { repo, github, loop, run } = await runToDone();
+    optIn(repo);
+    const prNumber = repo.getRun(run.id)!.prNumber!;
+    seedReview(repo, github, run, 1000);
+    github.setPrMergeable(prNumber, 'unknown');
+
+    const poller = new PrFeedbackPoller(repo, github, loop, { sleep: noopSleep });
+    expect(await poller.checkRun(run.id)).toBe('watching');
+
+    // A conflicting PR is the conflict machinery's job (manual policy here → left for the human).
+    github.setPrMergeable(prNumber, 'conflicting');
+    expect(await poller.checkRun(run.id)).toBe('watching');
+    expect(repo.getRun(run.id)!.status).toBe('done');
+  });
+
+  it('unaddressed feedback: outranks an approval — the run re-opens instead of merging', async () => {
+    const { repo, github, loop, run } = await doneWithApprovedPr();
+    optIn(repo);
+    seedFeedback(repo, github, run, 1000);
+
+    const poller = new PrFeedbackPoller(repo, github, loop, { sleep: noopSleep });
+    expect(await poller.checkRun(run.id)).toBe('reopened');
+    expect(repo.getRun(run.id)!.currentState).toBe('plan');
+  });
+
+  it('an approval that predates the run’s finish is stale — the branch kept changing until then', async () => {
+    const { repo, github, loop, run } = await runToDone();
+    optIn(repo);
+    github.setPrMergeable(repo.getRun(run.id)!.prNumber!, 'mergeable');
+    const poller = new PrFeedbackPoller(repo, github, loop, { sleep: noopSleep });
+
+    // Approved mid-pipeline: the terminal approval still stripped .agent/ (and stages kept committing)
+    // after this review, so the reviewer never saw the final branch tip → no merge.
+    seedReview(repo, github, run, -1000);
+    expect(await poller.checkRun(run.id)).toBe('watching');
+    expect(repo.getRun(run.id)!.status).toBe('done');
+
+    // A fresh approval of the finished branch merges.
+    seedReview(repo, github, run, 1000);
+    expect(await poller.checkRun(run.id)).toBe('merging');
+  });
+
+  it('a feedback re-entry advances the boundary — the pre-feedback approval no longer merges', async () => {
+    const { repo, github, loop, run } = await runToDone();
+    optIn(repo);
+    const prNumber = repo.getRun(run.id)!.prNumber!;
+    github.setPrMergeable(prNumber, 'mergeable');
+    const poller = new PrFeedbackPoller(repo, github, loop, { sleep: noopSleep });
+
+    // A feedback cycle: re-open, address, re-finish — the run's finish boundary moves forward.
+    // (Offset 1ms: just after the finish, but before the later re-finish — so it fires exactly once.)
+    seedFeedback(repo, github, run, 1);
+    expect(await poller.checkRun(run.id)).toBe('reopened');
+    await loop.runUntilIdle(); // back to done, with a fresh finished-at
+
+    // An approval from before the re-finish reviewed the pre-rework code → stale, no merge.
+    seedReview(repo, github, run, -1);
+    expect(await poller.checkRun(run.id)).toBe('watching');
+    expect(repo.getRun(run.id)!.status).toBe('done');
+
+    // A fresh approval of the reworked branch merges.
+    seedReview(repo, github, run, 1000);
+    expect(await poller.checkRun(run.id)).toBe('merging');
+  });
+
+  it('the loop’s control action rejects a missing run, a non-done run, and a missing reason', async () => {
+    // needs_human is deliberately not mergeable-on-approve (parked for a person), and a control action
+    // without a reason would leave an unexplained transition in the log — both are hard errors, matching
+    // resolveMergeConflict's contract.
+    const { loop, run } = await runToNeedsHumanWithPr();
+    expect(() => loop.mergeApprovedPr(run.id, { kind: 'pr_approved' })).toThrow(/not a finished \(done\) run/);
+    expect(() => loop.mergeApprovedPr(9999, { kind: 'pr_approved' })).toThrow(/not found/);
+
+    const done = await runToDone();
+    expect(() => done.loop.mergeApprovedPr(done.run.id, null)).toThrow(/reason is required/);
+    expect(done.repo.getRun(done.run.id)!.status).toBe('done'); // rejected calls leave the run untouched
+  });
+
+  it('a failed merge escalates the run needs_human with the PR left open — never forced', async () => {
+    const { repo, github, loop, run, prNumber } = await doneWithApprovedPr();
+    optIn(repo);
+    github.mergePr = () => Promise.resolve({ merged: false, reason: 'required checks are failing' });
+
+    const poller = new PrFeedbackPoller(repo, github, loop, { sleep: noopSleep });
+    expect(await poller.checkRun(run.id)).toBe('merging');
+    await loop.runUntilIdle();
+
+    const after = repo.getRun(run.id)!;
+    expect(after.status).toBe('needs_human');
+    expect((await github.getPr(prNumber)).state).toBe('open'); // left for the human
+    const last = repo.listTransitions(run.id).at(-1)!;
+    expect(last.trigger).toBe('auto_merge_failed');
   });
 });

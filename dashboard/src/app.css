@@ -308,8 +308,10 @@ input, textarea, button, select { font: inherit; }
 .af-rig .cell select:focus { outline: none; background: var(--paper2); }
 .af-rig .af-effort { gap: 9px; }
 
-/* --- per-run operator context (issue #5, Layer 3): quiet block under the agent-config rail --- */
-.af-runctx { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--rule); }
+/* --- per-run operator context (issue #5, Layer 3): a quiet disclosure chip under the agent-config
+   rail (RunContext.svelte owns its own look) — width-capped so the strip reads as a control, not a
+   form; right-aligned by the controls column. --- */
+.af-runctx { width: min(480px, 100%); margin-top: 2px; }
 
 /* --- searchable model picker (ModelPicker.svelte): shared by the new-run bar + the run controls --- */
 .af-mp { position: relative; display: inline-flex; }
@@ -828,6 +830,8 @@ input, textarea, button, select { font: inherit; }
   .af-rewind select { grid-area: 1 / 2; }
   .af-rewind button { grid-area: 1 / 3 / 3 / 4; }
   .af-rewind input { grid-area: 2 / 1 / 3 / 3; width: auto; border-left: 0; border-top: 1px solid var(--rule); }
+  /* The run-context chip joins the stacked controls at full width. */
+  .af-runctx { width: 100%; }
   /* Override rows: the tag reads as a heading line, the action buttons share the row beneath. */
   .af-cost-override, .af-prwatch { justify-content: flex-start; }
   .af-cost-override .af-tag, .af-prwatch .af-tag { flex-basis: 100%; }

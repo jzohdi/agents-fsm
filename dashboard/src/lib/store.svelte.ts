@@ -273,6 +273,27 @@ export async function setRepoAutoMerge(repoRef: string, enabled: boolean): Promi
   }
 }
 
+/**
+ * Set an enrolled repo's merge-on-approve flag (`POST /repos/merge-on-approve`): when on, an agent
+ * merges a finished (`done`) run's open PR once a human has approved it on GitHub. Independent of
+ * auto-merge (which merges at pipeline finish with no human involved). Refreshes the ledger so the
+ * control reflects state.
+ */
+export async function setRepoMergeOnApprove(repoRef: string, enabled: boolean): Promise<void> {
+  try {
+    await request<Repo>('POST', '/repos/merge-on-approve', { repoRef, enabled });
+    banner(
+      enabled
+        ? `${repoRef}: PRs you approve on GitHub will be merged for you.`
+        : `${repoRef}: approved PRs will wait for you to merge.`,
+      'ok',
+    );
+    await loadRepos();
+  } catch (err) {
+    banner(`Could not update merge-on-approve: ${(err as Error).message}`, 'err');
+  }
+}
+
 /** Archive a resolved (done/stopped) run server-side so it drops out of the Resolved lane. */
 export async function archiveRun(id: number): Promise<void> {
   try {
@@ -682,7 +703,7 @@ export async function revertRun(toState: string, reason: string): Promise<void> 
  */
 export async function checkPrFeedback(id: number): Promise<void> {
   try {
-    const { run, result } = await request<{ run: Run; result: 'reopened' | 'watching' | 'stopped' | 'not_watching' }>(
+    const { run, result } = await request<{ run: Run; result: 'reopened' | 'merging' | 'watching' | 'stopped' | 'not_watching' }>(
       'POST',
       `/runs/${id}/check-pr-feedback`,
     );
@@ -692,11 +713,13 @@ export async function checkPrFeedback(id: number): Promise<void> {
     const msg =
       result === 'reopened'
         ? `New feedback found — re-opened run ${id} to address it.`
-        : result === 'stopped'
-          ? `${pr} is merged or closed — stopped watching.`
-          : result === 'watching'
-            ? `No new feedback yet — still watching ${pr}.`
-            : `Run ${id} isn't being watched for PR feedback.`;
+        : result === 'merging'
+          ? `${pr} is approved — merging it now (merge-on-approve).`
+          : result === 'stopped'
+            ? `${pr} is merged or closed — stopped watching.`
+            : result === 'watching'
+              ? `No new feedback yet — still watching ${pr}.`
+              : `Run ${id} isn't being watched for PR feedback.`;
     banner(msg, result === 'not_watching' ? 'err' : 'ok');
   } catch (err) {
     banner(`Check failed: ${(err as Error).message}`, 'err');

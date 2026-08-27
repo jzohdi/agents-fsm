@@ -620,6 +620,22 @@ describe('HTTP API', () => {
     expect(await off.json()).toMatchObject({ autoMerge: false });
   });
 
+  it('toggles merge-on-approve via POST /repos/merge-on-approve', async () => {
+    const { base } = await start();
+    await fetch(`${base}/repos`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web' }) });
+
+    const on = await fetch(`${base}/repos/merge-on-approve`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web', enabled: true }) });
+    expect(on.status).toBe(200);
+    expect(await on.json()).toMatchObject({ repoRef: 'acme/web', mergeOnApprove: true, autoMerge: false });
+
+    // An unenrolled repo is a 404; a non-boolean `enabled` is a 400.
+    expect((await fetch(`${base}/repos/merge-on-approve`, { method: 'POST', body: JSON.stringify({ repoRef: 'no/such', enabled: true }) })).status).toBe(404);
+    expect((await fetch(`${base}/repos/merge-on-approve`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web', enabled: 'yes' }) })).status).toBe(400);
+
+    const off = await fetch(`${base}/repos/merge-on-approve`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web', enabled: false }) });
+    expect(await off.json()).toMatchObject({ mergeOnApprove: false });
+  });
+
   it('round-trips the scope filter through POST /repos/watch (issue #11)', async () => {
     const { base } = await start();
     await fetch(`${base}/repos`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/web' }) });

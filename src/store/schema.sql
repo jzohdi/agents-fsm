@@ -190,7 +190,13 @@ CREATE TABLE IF NOT EXISTS repos (
   -- exactly the same approved signal `done` already requires — no new approval bypass. Default 0 (off) so
   -- behaviour is unchanged until a repo opts in. Appended last so a fresh schema matches a DB retrofitted
   -- by the additive migration (db drift guard).
-  auto_merge INTEGER NOT NULL DEFAULT 0   -- 1 = auto-merge approved PRs; 0 = park merge-ready for a human
+  auto_merge INTEGER NOT NULL DEFAULT 0,   -- 1 = auto-merge approved PRs; 0 = park merge-ready for a human
+  -- Opt-in merge-on-approve: when 1, the PR Feedback Poller merges a finished (done) run's open PR once a
+  -- human has approved it on GitHub (an approving review, none requesting changes) — the human reviews,
+  -- an agent does the mechanical merge. Independent of `auto_merge` (which merges at pipeline finish with
+  -- no human involved). Default 0 (off) so behaviour is unchanged until a repo opts in. Appended last so a
+  -- fresh schema matches a DB retrofitted by the additive migration (db drift guard).
+  merge_on_approve INTEGER NOT NULL DEFAULT 0   -- 1 = merge a done run's PR once a human approves it; 0 = wait for a human merge
 );
 
 -- Per-run operator ↔ agent chat — the run's "general chat" side channel (singular name by convention

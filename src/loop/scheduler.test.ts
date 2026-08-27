@@ -90,7 +90,9 @@ describe('compareRuns — the total dispatch order (priority desc → order_key 
     });
     fc.assert(
       fc.property(arbKey, arbKey, (a, b) => {
-        expect(Math.sign(compareRuns(a, b))).toEqual(-Math.sign(compareRuns(b, a)));
+        // `+ 0` normalizes -0 → +0: when the generator produces an equal pair both comparisons are 0,
+        // and Object.is-based equality would otherwise flag `+0` vs `-Math.sign(0)` (which is -0).
+        expect(Math.sign(compareRuns(a, b)) + 0).toEqual(-Math.sign(compareRuns(b, a)) + 0);
       }),
     );
   });

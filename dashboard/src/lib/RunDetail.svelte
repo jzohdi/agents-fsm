@@ -2,7 +2,7 @@
   import { ui, control, revertRun, resolveConflicts, overrideCost, setModel, setEffort, setHarness, setRunContext, loadCatalog, checkPrFeedback, checkReply, requestAdvice } from './store.svelte';
   import ModelPicker from './ModelPicker.svelte';
   import EffortSelect from './EffortSelect.svelte';
-  import ContextEditor from './ContextEditor.svelte';
+  import RunContext from './RunContext.svelte';
   import { telemetryModel, escalationModel, activityLane, costStatusModel, issueUrl, prUrl, branchUrl, isWatchingPrFeedback, fmtRunCost, fmtDuration, fmtTokens, escapeHtml, humanizeState, humanizeHarness, schedulingLabel, adviceCards, type AdviceCard } from './render';
   import StateMachine from './StateMachine.svelte';
   import ScrollArea from './ScrollArea.svelte';
@@ -251,13 +251,12 @@
       {/if}
       {#if !terminal}
         <!-- Layer 3 (issue #5): per-run operator context, appended to this run's agents from its next
-             stage. Quiet, next to the agent-config rail — standing guidance for this issue only. -->
+             stage. A quiet disclosure under the agent-config rail — a glanceable chip (pip + preview
+             when set) that expands in place to edit; standing guidance for this issue only. -->
         <div class="af-runctx">
-          <ContextEditor
-            label="Run context"
-            hint="added to this run's agents (next stage on)"
+          <RunContext
             value={run.issueContext}
-            placeholder="e.g. the backend agent should add a DB index for issue #42…"
+            resetKey={run.id}
             onsave={(text) => setRunContext(run.id, text)}
           />
         </div>

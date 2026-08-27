@@ -21,6 +21,7 @@
  *   POST /runs/:id/check-pr-feedback   POST /runs/:id/check-reply
  *   POST /runs/:id/chat         GET /runs/:id/chat          POST /runs/:id/chat/:chatId/cancel
  *   GET  /repos                 POST /repos                 POST /repos/watch
+ *   POST /repos/conflict-policy POST /repos/auto-merge      POST /repos/merge-on-approve
  *   POST /repos/source          (Milestone 12: bind clone-on-run / a local directory)
  *   GET  /fs/dirs[?q=]          (Milestone 12: path completions for the local-directory picker)
  *   GET  /config                PUT /config
@@ -298,6 +299,17 @@ async function handle(
     const enabled = body.enabled;
     if (typeof enabled !== 'boolean') return sendError(res, new ApiError(400, '"enabled" (boolean) is required'));
     return sendJson(res, 200, orch.setRepoAutoMerge({ repoRef: str(body, 'repoRef'), enabled }));
+  }
+
+  // --- repo merge-on-approve flag: when on, the PR Feedback Poller merges a finished (done) run's open
+  // PR once a human has approved it on GitHub — the human reviews, an agent does the mechanical merge.
+  // Independent of /repos/auto-merge (which merges at pipeline finish with no human involved).
+  // Body-carried repoRef (contains a `/`), like /repos/auto-merge. ---
+  if (method === 'POST' && path === '/repos/merge-on-approve') {
+    const body = await readJson(req, ctx.maxBodyBytes);
+    const enabled = body.enabled;
+    if (typeof enabled !== 'boolean') return sendError(res, new ApiError(400, '"enabled" (boolean) is required'));
+    return sendJson(res, 200, orch.setRepoMergeOnApprove({ repoRef: str(body, 'repoRef'), enabled }));
   }
 
   // --- directory-path completions for the local-checkout picker (Milestone 12 UI). The browser can't

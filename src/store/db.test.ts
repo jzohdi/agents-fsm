@@ -256,6 +256,39 @@ describe('migrate', () => {
     db.close();
   });
 
+  it('retrofits a database created before repos.merge_on_approve existed, backfilling to 0 / off', () => {
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, flags TEXT NOT NULL DEFAULT '{}', archived_at TEXT)`);
+    // A repos table from before the merge_on_approve column — the early repos registry (migration 3's
+    // shape), which the later additive migrations retrofit column-by-column.
+    db.exec(
+      `CREATE TABLE repos (
+         id           INTEGER PRIMARY KEY AUTOINCREMENT,
+         repo_ref     TEXT    NOT NULL COLLATE NOCASE UNIQUE,
+         clone_url    TEXT,
+         local_repo   TEXT,
+         working_root TEXT    NOT NULL,
+         base_branch  TEXT    NOT NULL DEFAULT 'main',
+         created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+       )`,
+    );
+    db.prepare("INSERT INTO repos (repo_ref, working_root) VALUES ('acme/web', './w')").run();
+    expect(columnExists(db, 'repos', 'merge_on_approve')).toBe(false);
+
+    runMigrations(db); // migration 19 adds the NOT NULL column with a constant default on a pre-existing DB
+
+    expect(columnExists(db, 'repos', 'merge_on_approve')).toBe(true);
+    expect(appliedMigrations(db)).toEqual(ALL_MIGRATION_NAMES);
+    // Off is the unchanged behaviour: a pre-existing repo backfills to 0 (a done run's approved PR
+    // still waits for a human merge).
+    expect(db.prepare("SELECT merge_on_approve FROM repos WHERE repo_ref = 'acme/web'").get()).toEqual({ merge_on_approve: 0 });
+    // Drift guard: the retrofitted registry stays schema-identical to a fresh DB's.
+    const fresh = openDb();
+    expect(columns(db, 'repos')).toEqual(columns(fresh, 'repos'));
+    fresh.close();
+    db.close();
+  });
+
   it('retrofits a database created before runs.model_override existed', () => {
     const db = new Database(':memory:');
     db.exec(`CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, flags TEXT NOT NULL DEFAULT '{}', archived_at TEXT)`);

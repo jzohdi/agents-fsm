@@ -1422,6 +1422,28 @@ describe('Orchestrator — repo auto-merge flag (agents-fsm#15)', () => {
   });
 });
 
+describe('Orchestrator — repo merge-on-approve flag', () => {
+  it('setRepoMergeOnApprove validates the ref and the enrollment, then persists the flag', () => {
+    const { orchestrator } = setup();
+    expect(() => orchestrator.setRepoMergeOnApprove({ repoRef: 'o/r', enabled: true })).toThrow(/not enrolled/);
+    expect(() => orchestrator.setRepoMergeOnApprove({ repoRef: 'not a repo', enabled: true })).toThrow(ApiError);
+
+    orchestrator.enrollRepo({ repoRef: 'o/r', workingRoot: './w' });
+    // Default is off (opt-in); the setter flips it — independently of autoMerge — and the updated repo comes back.
+    expect(orchestrator.listRepos()[0]).toMatchObject({ mergeOnApprove: false });
+    expect(orchestrator.setRepoMergeOnApprove({ repoRef: 'o/r', enabled: true })).toMatchObject({ mergeOnApprove: true, autoMerge: false });
+    expect(orchestrator.setRepoMergeOnApprove({ repoRef: 'o/r', enabled: false })).toMatchObject({ mergeOnApprove: false });
+  });
+
+  it('the flag survives a re-enroll (upsert never resets operator choices)', () => {
+    const { orchestrator } = setup();
+    orchestrator.enrollRepo({ repoRef: 'o/r', workingRoot: './w' });
+    orchestrator.setRepoMergeOnApprove({ repoRef: 'o/r', enabled: true });
+    orchestrator.enrollRepo({ repoRef: 'o/r', workingRoot: './w' }); // re-enroll
+    expect(orchestrator.listRepos()[0]).toMatchObject({ mergeOnApprove: true });
+  });
+});
+
 describe('Orchestrator — resolve-conflicts escape hatch', () => {
   async function doneRunWithPr(orchestrator: Orchestrator, repo: Repository) {
     const run = orchestrator.start({ issueRef: 'o/r#1' });

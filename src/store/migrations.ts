@@ -237,6 +237,15 @@ export const MIGRATIONS: Migration[] = [
     // unchanged) and a fresh DB already has it from schema.sql. Mirrors schema.sql.
     apply: (db) => addColumnIfMissing(db, 'repos', 'auto_merge', 'INTEGER NOT NULL DEFAULT 0'),
   },
+  {
+    version: 19,
+    name: 'add repos.merge_on_approve',
+    // Opt-in merge-on-approve: the PR Feedback Poller merges a finished run's open PR once a human has
+    // approved it on GitHub. Additive column with a constant default 0, so a pre-existing DB backfills
+    // to 0 (off — a done run still waits for a human merge, behaviour unchanged) and a fresh DB already
+    // has it from schema.sql. Mirrors schema.sql.
+    apply: (db) => addColumnIfMissing(db, 'repos', 'merge_on_approve', 'INTEGER NOT NULL DEFAULT 0'),
+  },
 ];
 
 // Guard the invariants the runner relies on: versions a gap-free, strictly increasing 1..N sequence

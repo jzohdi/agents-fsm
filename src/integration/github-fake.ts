@@ -26,6 +26,7 @@ import {
   type MergeResult,
   type OpenPrInput,
   type PrComment,
+  type PrReview,
   type PrepareWorkingTreeInput,
   type RepoIssue,
   type Suggestion,
@@ -93,6 +94,8 @@ export class FakeGitHub implements GitHub {
   /** PR comments (newest last), across all PRs; filtered by PR number on read. Carries author +
    *  createdAt so the PR Feedback Poller can distinguish the bot's comments from a human reviewer's. */
   private readonly prComments: PrComment[] = [];
+  /** PR reviews (oldest first), across all PRs; filtered by PR number on read (merge-on-approve). */
+  private readonly prReviews: Array<PrReview & { prNumber: number }> = [];
   /** Issue comments (newest last), across all issues; filtered by issue number on read. */
   private readonly issueComments: IssueComment[] = [];
   /** Commits recorded per working-tree path (newest last). */
@@ -204,6 +207,22 @@ export class FakeGitHub implements GitHub {
     };
     this.prComments.push(created);
     return { ...created };
+  }
+
+  /**
+   * Seed a review on a PR (oldest first). Tests use this to simulate a **human reviewer** approving
+   * (or requesting changes on) a finished run's open PR, which is what merge-on-approve keys off.
+   */
+  seedPrReview(prNumber: number, review: { author: string; state: PrReview['state']; submittedAt?: string }): PrReview {
+    const created = {
+      prNumber,
+      author: review.author,
+      state: review.state,
+      submittedAt: review.submittedAt ?? new Date(this.now()).toISOString(),
+    };
+    this.prReviews.push(created);
+    const { prNumber: _, ...publicReview } = created;
+    return { ...publicReview };
   }
 
   /** Total commits recorded so far (test introspection, e.g. to assert a review stage made none). */
@@ -388,6 +407,12 @@ export class FakeGitHub implements GitHub {
 
   async listPrComments(prNumber: number): Promise<PrComment[]> {
     return this.prComments.filter((c) => c.prNumber === prNumber).map((c) => ({ ...c }));
+  }
+
+  async listPrReviews(prNumber: number): Promise<PrReview[]> {
+    return this.prReviews
+      .filter((r) => r.prNumber === prNumber)
+      .map(({ prNumber: _, ...review }) => ({ ...review }));
   }
 
   // --- working tree + git -----------------------------------------------------

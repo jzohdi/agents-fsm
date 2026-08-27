@@ -206,6 +206,11 @@ export interface Repo {
    *  PR into base via the GitHub adapter instead of parking merge-ready for a human. Gated on exactly
    *  the same approved signal `done` already requires — no new approval bypass. Default `false`. */
   autoMerge: boolean;
+  /** Opt-in merge-on-approve: when true, the PR Feedback Poller merges a finished (`done`) run's open
+   *  PR once a human has approved it on GitHub (an approving review, none requesting changes) — the
+   *  human reviews, an agent does the mechanical merge. Independent of {@link autoMerge}, which merges
+   *  at pipeline finish with no human involved. Default `false`. */
+  mergeOnApprove: boolean;
   createdAt: string;
 }
 
@@ -387,6 +392,7 @@ interface RepoRow {
   watch_filter_milestone: string | null;
   watch_in_flight_cap: number;
   auto_merge: number;
+  merge_on_approve: number;
   created_at: string;
 }
 
@@ -503,6 +509,7 @@ function mapRepo(r: RepoRow): Repo {
     watchFilterMilestone: r.watch_filter_milestone,
     watchInFlightCap: r.watch_in_flight_cap,
     autoMerge: r.auto_merge !== 0,
+    mergeOnApprove: r.merge_on_approve !== 0,
     createdAt: r.created_at,
   };
 }
@@ -587,6 +594,12 @@ export class Repository {
    *  like watch/source/conflict-policy: a re-enroll (`upsertRepo`) never resets the operator's choice. */
   setRepoAutoMerge(repoRef: string, enabled: boolean): void {
     this.db.prepare('UPDATE repos SET auto_merge = ? WHERE repo_ref = ? COLLATE NOCASE').run(enabled ? 1 : 0, repoRef);
+  }
+
+  /** Set a repo's merge-on-approve flag ({@link Repo.mergeOnApprove}). Persisted independently of
+   *  enrollment, like watch/source/conflict-policy: a re-enroll (`upsertRepo`) never resets the operator's choice. */
+  setRepoMergeOnApprove(repoRef: string, enabled: boolean): void {
+    this.db.prepare('UPDATE repos SET merge_on_approve = ? WHERE repo_ref = ? COLLATE NOCASE').run(enabled ? 1 : 0, repoRef);
   }
 
   /**

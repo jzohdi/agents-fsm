@@ -3,7 +3,7 @@
   // the attention queue, the repositories ledger (with inline enrollment), and a recent-activity
   // feed. Everything derives from `ui.runs`/`ui.repos`, which the SSE stream keeps live — this page
   // is pure derivation, no polling of its own.
-  import { ui, configureRepoSource, enrollRepo, fetchDirSuggestions, openRepoBoard, openRun, setRepoAutoMerge, setRepoConflictPolicy, setRepoWatch, setRepoWatchFilter, setRepoWatchInFlightCap } from './store.svelte';
+  import { ui, configureRepoSource, enrollRepo, fetchDirSuggestions, openRepoBoard, openRun, setRepoAutoMerge, setRepoConflictPolicy, setRepoMergeOnApprove, setRepoWatch, setRepoWatchFilter, setRepoWatchInFlightCap } from './store.svelte';
   import {
     attentionModel,
     costStatusModel,
@@ -431,9 +431,25 @@
         >
           <span class="pip"></span>{row.conflictPolicy === 'auto' ? 'Conflicts: auto' : 'Conflicts: manual'}
         </button>
+        <!-- Merge-on-approve toggle: when on, an agent merges a finished run's open PR once a human
+             approves it on GitHub — you review, the fleet does the mechanical merge. Off by default. -->
+        <button
+          type="button"
+          class="af-hwatch af-hmergeapprove"
+          class:on={row.mergeOnApprove}
+          disabled={!row.enrolled}
+          title={!row.enrolled
+            ? 'Re-enroll this repo to configure merge-on-approve'
+            : row.mergeOnApprove
+              ? 'PRs you approve on GitHub are merged for you by an agent — click to merge them yourself'
+              : 'Approved PRs wait for you to merge — click to have an agent merge a PR once you approve it'}
+          onclick={() => setRepoMergeOnApprove(row.repoRef, !row.mergeOnApprove)}
+        >
+          <span class="pip"></span>{row.mergeOnApprove ? 'Merge on approve: on' : 'Merge on approve: off'}
+        </button>
         <!-- Auto-merge toggle (agents-fsm#15): when on, a run reaching the terminal `done` state merges
-             its approved PR into base instead of parking merge-ready for you. Gated on exactly the same
-             approved signal `done` already requires — no new approval bypass. Off by default. -->
+             its PR into base immediately (the pipeline's internal review is the approval — no human
+             review) instead of parking merge-ready for you. Off by default. -->
         <button
           type="button"
           class="af-hwatch af-hautomerge"
@@ -442,11 +458,11 @@
           title={!row.enrolled
             ? 'Re-enroll this repo to configure auto-merge'
             : row.autoMerge
-              ? 'Approved PRs auto-merge into base — click to require a human merge instead'
-              : 'Approved PRs wait for you to merge — click to auto-merge them on approval'}
+              ? 'PRs merge into base the moment a run finishes, with no human review — click to require your review instead'
+              : 'Finished PRs wait for a human — click to merge them the moment a run finishes (no human review)'}
           onclick={() => setRepoAutoMerge(row.repoRef, !row.autoMerge)}
         >
-          <span class="pip"></span>{row.autoMerge ? 'Auto-merge PRs' : 'Merge on approve: off'}
+          <span class="pip"></span>{row.autoMerge ? 'Auto-merge: on' : 'Auto-merge: off'}
         </button>
         </div>
       </div>

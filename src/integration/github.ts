@@ -153,6 +153,19 @@ export interface IssueComment {
   createdAt: string;
 }
 
+/**
+ * A pull-request review (merge-on-approve). `state` is GitHub's review verdict, lowercased to a closed
+ * set; anything the API adds later maps to `'commented'` (neutral — it neither approves nor blocks).
+ * The poller reduces a PR's reviews to "approved by a human" with {@link isPrApproved} in
+ * `pr-feedback-poller.ts` — per reviewer only the latest verdict counts.
+ */
+export interface PrReview {
+  author: string;
+  state: 'approved' | 'changes_requested' | 'commented' | 'dismissed' | 'pending';
+  /** ISO-8601 submission timestamp, as GitHub reports it. */
+  submittedAt: string;
+}
+
 /** The run's checked-out local working tree — where the harness runs (README §3.3 Layer 5). */
 export interface WorkingTree {
   /** Absolute path to the checkout; passed to the Stage Executor as its `workingDir`. */
@@ -411,6 +424,12 @@ export interface GitHub {
    * {@link Comment}) so the bot's own comments are distinguishable from a human's.
    */
   listPrComments(prNumber: number): Promise<PrComment[]>;
+
+  /**
+   * The PR's reviews, oldest first — what the PR Feedback Poller reads (only for repos opted into
+   * merge-on-approve) to detect a human's approving review on a finished run's open PR.
+   */
+  listPrReviews(prNumber: number): Promise<PrReview[]>;
 }
 
 /** Thrown by adapters when a referenced GitHub object does not exist. */

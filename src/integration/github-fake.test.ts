@@ -250,6 +250,20 @@ describe('FakeGitHub — pull requests and comments', () => {
     // Comments are scoped to their PR.
     expect(await gh.listPrComments(999)).toEqual([]);
   });
+
+  it('lists seeded PR reviews with author + verdict + timestamp, scoped to their PR (merge-on-approve)', async () => {
+    const gh = new FakeGitHub();
+    const pr = await gh.openPr({ branch: 'b', base: 'main', title: 't', body: '' });
+    gh.seedPrReview(pr.number, { author: 'alice', state: 'approved', submittedAt: '2026-07-01T00:00:00.000Z' });
+    gh.seedPrReview(pr.number, { author: 'bob', state: 'changes_requested' }); // submittedAt defaults to the fake's clock
+
+    const reviews = await gh.listPrReviews(pr.number);
+    expect(reviews[0]).toEqual({ author: 'alice', state: 'approved', submittedAt: '2026-07-01T00:00:00.000Z' });
+    expect(reviews[1]).toMatchObject({ author: 'bob', state: 'changes_requested' });
+    expect(reviews[1]!.submittedAt).toBeTruthy();
+    // Reviews are scoped to their PR; an unreviewed PR reads back empty.
+    expect(await gh.listPrReviews(999)).toEqual([]);
+  });
 });
 
 describe('FakeGitHub — mergePr (agents-fsm#15 auto-merge)', () => {

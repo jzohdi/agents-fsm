@@ -246,4 +246,8 @@ export interface Repo {
    *  PR into base via the GitHub adapter instead of parking merge-ready for a human. Gated on exactly
    *  the same approved signal `done` already requires — no new approval bypass. Default `false`. */
   autoMerge: boolean;
+  /** Opt-in merge-on-approve: when true, an agent merges a finished (`done`) run's open PR once a human
+   *  has approved it on GitHub. Independent of {@link autoMerge} (which merges at pipeline finish with
+   *  no human involved). Optional on the wire: an older daemon omits it; consumers default it to off. */
+  mergeOnApprove?: boolean;
 }

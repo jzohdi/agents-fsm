@@ -411,6 +411,9 @@ export interface RepoLedgerRow {
   /** Opt-in auto-merge (agents-fsm#15): when true, a run reaching `done` merges its PR into base
    *  instead of parking merge-ready for a human. Only meaningful for an enrolled repo. */
   autoMerge: boolean;
+  /** Opt-in merge-on-approve: when true, an agent merges a finished run's open PR once a human has
+   *  approved it on GitHub. Independent of {@link autoMerge}. Only meaningful for an enrolled repo. */
+  mergeOnApprove: boolean;
   baseBranch: string;
   runs: number;
   active: number;
@@ -434,7 +437,7 @@ export function repoLedgerModel(repos: Repo[] | undefined, runs: Run[] | undefin
   const blank = (repoRef: string): RepoLedgerRow => ({
     repoRef, enrolled: false, watch: false, watchFilterLabel: null, watchFilterMilestone: null,
     watchInFlightCap: 1, sourceMode: null, localRepo: null, configured: false,
-    conflictPolicy: 'manual', autoMerge: false, baseBranch: '', runs: 0, active: 0, awaiting: 0, needsHuman: 0,
+    conflictPolicy: 'manual', autoMerge: false, mergeOnApprove: false, baseBranch: '', runs: 0, active: 0, awaiting: 0, needsHuman: 0,
     resolved: 0, tokens: 0, cost: 0, costLabel: '$0.00', lastActivity: null,
   });
   for (const repo of repos ?? []) {
@@ -447,8 +450,10 @@ export function repoLedgerModel(repos: Repo[] | undefined, runs: Run[] | undefin
       sourceMode: repo.sourceMode, localRepo: repo.localRepo, configured: repo.sourceMode !== null,
       // Older daemons don't send the field; default to the server's own default (manual).
       conflictPolicy: repo.conflictPolicy ?? 'manual',
-      // Older daemons that predate auto-merge don't send it; default to off (matches the server default).
+      // Older daemons that predate auto-merge / merge-on-approve don't send them; default to off
+      // (matches the server default).
       autoMerge: repo.autoMerge ?? false,
+      mergeOnApprove: repo.mergeOnApprove ?? false,
     });
   }
   for (const r of runs ?? []) {

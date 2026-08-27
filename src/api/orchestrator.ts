@@ -467,6 +467,20 @@ export class Orchestrator {
   }
 
   /**
+   * Merge a finished (`done`) run's human-approved PR — merge-on-approve. The PR Feedback Poller calls
+   * this (for a repo opted in via {@link setRepoMergeOnApprove}) when a human's approving review appears
+   * on the run's open, mergeable PR. It moves the run into the auto-merge pseudo-state and kicks the
+   * pump; the loop performs the ledger-guarded merge and returns the run to `done` (or escalates on a
+   * failed merge, PR left open — never forced). Satisfies {@link PrFeedbackReopener}.
+   */
+  mergeApprovedPr(runId: number, reason: unknown): Run {
+    const run = this.conflictOnThrow(() => this.loop.mergeApprovedPr(runId, reason)); // 409 if not done / no PR
+    this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
+    this.kick();
+    return run;
+  }
+
+  /**
    * The operator's "Resolve merge conflicts" escape hatch (`POST /runs/:id/resolve-conflicts`): kick off
    * the dedicated resolver for a finished run whose PR conflicts, regardless of the repo's conflict
    * policy — clicking the button *is* the authorization. 404 for an unknown run; the loop rejects a run
@@ -531,15 +545,18 @@ export class Orchestrator {
   /**
    * Check one run's open PR for feedback **right now** (the dashboard's "Check now" button), rather than
    * waiting for the next background tick. Returns the (possibly re-opened) run plus the outcome so the
-   * caller can tell the operator what happened. A `reopened` result already published its status +
-   * kicked the pump (via {@link reopenForPrFeedback}); for any other outcome we publish a `status` event
-   * so connected dashboards pick up a changed watch flag / high-water mark. 404 for an unknown run.
+   * caller can tell the operator what happened. A `reopened` / `merging` result already published its
+   * status + kicked the pump (via {@link reopenForPrFeedback} / {@link mergeApprovedPr}); for any other
+   * outcome we publish a `status` event so connected dashboards pick up a changed watch flag /
+   * high-water mark. 404 for an unknown run.
    */
   async checkPrFeedback(runId: number): Promise<{ run: Run; result: PrFeedbackCheck }> {
     this.requireRun(runId); // 404 if missing
     const result = await this.prFeedbackPoller.checkRun(runId);
     const run = this.requireRun(runId);
-    if (result !== 'reopened') this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
+    if (result !== 'reopened' && result !== 'merging') {
+      this.broadcaster.publish({ type: 'status', runId: run.id, status: run.status, run });
+    }
     return { run, result };
   }
 
@@ -951,6 +968,27 @@ export class Orchestrator {
     }
     if (!this.repo.getRepo(ref)) throw new ApiError(404, `repo ${ref} is not enrolled — enroll it (POST /repos) first`);
     this.repo.setRepoAutoMerge(ref, input.enabled);
+    return this.repo.getRepo(ref)!;
+  }
+
+  /**
+   * Set an enrolled repo's merge-on-approve flag (`POST /repos/merge-on-approve`). When `enabled`, the
+   * PR Feedback Poller merges a finished (`done`) run's open PR once a human has approved it on GitHub
+   * (an approving review, none requesting changes) — the human reviews, an agent does the mechanical
+   * merge. Independent of {@link setRepoAutoMerge}, which merges at pipeline finish with no human
+   * involved. Default off. `404` for a repo that was never enrolled; a malformed ref is a `400`.
+   * Persisted independently of enrollment, so a later re-enroll never resets it.
+   */
+  setRepoMergeOnApprove(input: { repoRef: string; enabled: boolean }): Repo {
+    if (!input.repoRef) throw new ApiError(400, 'repoRef is required');
+    let ref: string;
+    try {
+      ref = parseRepoRef(input.repoRef);
+    } catch (err) {
+      throw new ApiError(400, err instanceof Error ? err.message : String(err));
+    }
+    if (!this.repo.getRepo(ref)) throw new ApiError(404, `repo ${ref} is not enrolled — enroll it (POST /repos) first`);
+    this.repo.setRepoMergeOnApprove(ref, input.enabled);
     return this.repo.getRepo(ref)!;
   }
 

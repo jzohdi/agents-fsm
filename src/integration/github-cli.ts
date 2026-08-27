@@ -36,6 +36,7 @@ import {
   type MergeResult,
   type OpenPrInput,
   type PrComment,
+  type PrReview,
   type PrepareWorkingTreeInput,
   type PullRequest,
   type ReadDiffInput,
@@ -256,6 +257,18 @@ export class GitHubCli implements GitHub {
     const json = await this.gh(['api', `repos/${this.repo}/issues/${prNumber}/comments?per_page=100`]);
     const parsed = JSON.parse(json) as RawIssueComment[];
     return parsed.map((c) => ({ id: c.id, prNumber, author: c.user?.login ?? 'unknown', body: c.body ?? '', createdAt: c.created_at }));
+  }
+
+  async listPrReviews(prNumber: number): Promise<PrReview[]> {
+    // The REST reviews endpoint (like listPrComments' issue-comments one) rather than `gh pr view
+    // --json reviews`: it reports each review's state + submitter directly and pages predictably.
+    const json = await this.gh(['api', `repos/${this.repo}/pulls/${prNumber}/reviews?per_page=100`]);
+    const parsed = JSON.parse(json) as RawPrReview[];
+    return parsed.map((r) => ({
+      author: r.user?.login ?? 'unknown',
+      state: mapReviewState(r.state),
+      submittedAt: r.submitted_at ?? '',
+    }));
   }
 
   // --- local working tree + git (no network) ----------------------------------
@@ -590,6 +603,24 @@ interface RawIssueComment {
 
 function mapIssueComment(raw: RawIssueComment, issueNumber: number, body: string): IssueComment {
   return { id: raw.id, issueNumber, author: raw.user?.login ?? 'unknown', body, createdAt: raw.created_at };
+}
+
+/** The raw shape of a GitHub PR-review object (`gh api .../pulls/:n/reviews`); extra fields ignored. */
+interface RawPrReview {
+  user: { login: string } | null;
+  /** APPROVED | CHANGES_REQUESTED | COMMENTED | DISMISSED | PENDING */
+  state: string;
+  /** Absent while a review is PENDING (not yet submitted). */
+  submitted_at?: string;
+}
+
+/** Lowercase GitHub's review verdict into the closed {@link PrReview.state} set. Anything unrecognized
+ *  maps to `'commented'` — neutral, so a new API verdict can neither approve nor block a merge. */
+function mapReviewState(raw: string): PrReview['state'] {
+  const state = raw.toLowerCase();
+  return state === 'approved' || state === 'changes_requested' || state === 'dismissed' || state === 'pending'
+    ? state
+    : 'commented';
 }
 
 /** Parse the issue number from a `gh issue create` URL like `https://github.com/o/r/issues/57`. */

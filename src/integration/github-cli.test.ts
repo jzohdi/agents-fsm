@@ -207,6 +207,30 @@ describe('GitHubCli — gh-backed API (injected exec)', () => {
     expect(calls[0]!.args).toEqual(['api', 'repos/o/r/issues/7/comments?per_page=100']);
   });
 
+  it('lists PR reviews via REST, lowercasing the verdict and defaulting the unknowns (merge-on-approve)', async () => {
+    const arr = JSON.stringify([
+      { user: { login: 'alice' }, state: 'APPROVED', submitted_at: '2026-07-01T00:00:00Z' },
+      { user: { login: 'bob' }, state: 'CHANGES_REQUESTED', submitted_at: '2026-07-01T01:00:00Z' },
+      { user: { login: 'carol' }, state: 'COMMENTED', submitted_at: '2026-07-01T02:00:00Z' },
+      // A pending review has no submitted_at yet; an unrecognized verdict maps to neutral `commented`.
+      { user: null, state: 'PENDING' },
+      { user: { login: 'dave' }, state: 'SOME_FUTURE_VERDICT', submitted_at: '2026-07-01T03:00:00Z' },
+    ]);
+    const { exec, calls } = stubExec({ 'gh api': ok(arr) });
+    const gh = new GitHubCli({ repo: 'o/r', workingRoot: '/w', exec });
+
+    const reviews = await gh.listPrReviews(9);
+
+    expect(reviews).toEqual([
+      { author: 'alice', state: 'approved', submittedAt: '2026-07-01T00:00:00Z' },
+      { author: 'bob', state: 'changes_requested', submittedAt: '2026-07-01T01:00:00Z' },
+      { author: 'carol', state: 'commented', submittedAt: '2026-07-01T02:00:00Z' },
+      { author: 'unknown', state: 'pending', submittedAt: '' },
+      { author: 'dave', state: 'commented', submittedAt: '2026-07-01T03:00:00Z' },
+    ]);
+    expect(calls[0]!.args).toEqual(['api', 'repos/o/r/pulls/9/reviews?per_page=100']);
+  });
+
   it('findOpenPrForBranch returns an open PR, or null when none / closed', async () => {
     const openPr = JSON.stringify({
       number: 5, headRefName: 'feature', baseRefName: 'main', title: 't', body: '', state: 'OPEN', url: 'u',

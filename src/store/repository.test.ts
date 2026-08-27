@@ -734,6 +734,32 @@ describe('repos registry (Milestone 8 Phase A)', () => {
     expect(repo.getRepo('Acme/Web')?.autoMerge).toBe(true);
   });
 
+  it('persists the merge-on-approve flag, defaults to off, and never clobbers it on a re-enroll', () => {
+    repo.upsertRepo({ repoRef: 'o/r', workingRoot: './a' });
+
+    // A repo never assigned merge-on-approve reads back false — the flag is opt-in, default off,
+    // and independent of auto_merge (INV-STORE-DEFAULT).
+    expect(repo.getRepo('o/r')).toMatchObject({ mergeOnApprove: false, autoMerge: false });
+
+    // The dedicated setter flips it without touching auto_merge, persisted independently of enrollment.
+    repo.setRepoMergeOnApprove('o/r', true);
+    expect(repo.getRepo('o/r')).toMatchObject({ mergeOnApprove: true, autoMerge: false });
+
+    // A re-enroll (upsert never touches the merge_on_approve column) leaves the operator's choice intact…
+    repo.upsertRepo({ repoRef: 'o/r', workingRoot: './b', baseBranch: 'develop' });
+    expect(repo.getRepo('o/r')).toMatchObject({ workingRoot: './b', mergeOnApprove: true });
+
+    // …and it toggles back off.
+    repo.setRepoMergeOnApprove('o/r', false);
+    expect(repo.getRepo('o/r')?.mergeOnApprove).toBe(false);
+  });
+
+  it('setRepoMergeOnApprove matches the ref case-insensitively', () => {
+    repo.upsertRepo({ repoRef: 'Acme/Web', workingRoot: './a' });
+    repo.setRepoMergeOnApprove('acme/web', true);
+    expect(repo.getRepo('Acme/Web')?.mergeOnApprove).toBe(true);
+  });
+
   it('upsert is idempotent on repo_ref and re-points the adapter config', () => {
     repo.upsertRepo({ repoRef: 'o/r', workingRoot: './a', baseBranch: 'main' });
     const updated = repo.upsertRepo({ repoRef: 'o/r', workingRoot: './b', baseBranch: 'develop', cloneUrl: 'git@host:o/r.git' });

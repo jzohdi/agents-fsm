@@ -77,6 +77,14 @@ export const AUTO_MERGED_TRIGGER = 'auto_merged';
 export const AUTO_MERGE_FAILED_TRIGGER = 'auto_merge_failed';
 
 /**
+ * Trigger recorded on the loop-owned transition that enters {@link AUTO_MERGE_STATE} when a **human's
+ * approving review** on a finished run's open PR starts the merge (merge-on-approve; see
+ * {@link EventLoop.mergeApprovedPr}). Distinct from the FSM's own approving trigger that enters the
+ * pseudo-state on the at-`done` auto-merge path, so the transition log reads which path authorized it.
+ */
+export const PR_APPROVED_TRIGGER = 'pr_approved';
+
+/**
  * Trigger recorded on the self-transition that parks a run awaiting a human reply (triage `clarify`).
  * Its transition `reason` carries the data the Reply Poller anchors on (issue, question comment, bot
  * login), so the poller reads it straight from the log — no separate marker store.
@@ -560,6 +568,51 @@ export class EventLoop {
         type: EVENT_RESOLVE_CONFLICTS,
         payload: { returnState: run.currentState, returnStatus: run.status },
       });
+      return t;
+    });
+    this.emit(transition, runId);
+    return this.requireRun(runId);
+  }
+
+  /**
+   * Merge a **finished (`done`)** run's approved PR — merge-on-approve, the PR Feedback Poller's
+   * dispatch when a repo opted in and a human's approving review appears on the run's open PR. Like
+   * {@link resolveMergeConflict} it is a dedicated, self-contained control action (no FSM change, no
+   * pipeline re-run): it moves the run into the {@link AUTO_MERGE_STATE} pseudo-state (status `running`)
+   * and enqueues an {@link EVENT_AUTO_MERGE} whose payload remembers the run's terminal state, so the
+   * existing `applyAutoMerge` path performs the ledger-guarded merge and returns the run exactly there —
+   * or escalates `needs_human` on a failed merge, PR left open, never forced. Only a `done` run
+   * qualifies: a `needs_human` run is parked *for a person* and must not merge on its own. A `reason`
+   * is required (recorded on the entering transition). Returns the updated run; the caller kicks the pump.
+   */
+  mergeApprovedPr(runId: number, reason: unknown): Run {
+    const run = this.repo.getRun(runId);
+    if (!run) throw new Error(`mergeApprovedPr: run ${runId} not found`);
+    if (run.status !== 'done') {
+      throw new Error(`mergeApprovedPr: run ${runId} is "${run.status}", not a finished (done) run`);
+    }
+    if (run.prNumber === null) throw new Error(`mergeApprovedPr: run ${runId} has no PR to merge`);
+    if (reason === undefined || reason === null || reason === '') {
+      throw new Error('mergeApprovedPr: a reason is required');
+    }
+
+    const transition = this.repo.transaction(() => {
+      // A finished run holds no follow-up event, but discard defensively so the merge is driven by
+      // exactly one fresh event (mirrors resolveMergeConflict).
+      this.repo.discardPendingEvents(runId);
+      const t = this.repo.commitTransition({
+        runId,
+        fromState: run.currentState,
+        toState: AUTO_MERGE_STATE,
+        trigger: PR_APPROVED_TRIGGER,
+        reason,
+        status: 'running',
+        eventId: null, // a control transition, not driven by an event
+      });
+      // Remember where to finalize once merged: the run's terminal `done` state, carried on the event
+      // so it survives a crash/recovery and drives the success transition (like resolveMergeConflict's
+      // returnState).
+      this.repo.enqueueEvent({ runId, type: EVENT_AUTO_MERGE, payload: { doneState: run.currentState } });
       return t;
     });
     this.emit(transition, runId);

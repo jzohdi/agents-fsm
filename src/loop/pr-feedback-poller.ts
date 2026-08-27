@@ -25,11 +25,14 @@
  *    (the terminal, polled merge signal — see agents-fsm#20) the run's worktree is also reclaimed
  *    (`dropWorkingTree`) and the operator's local base fast-forwarded (`syncBaseBranch`), exactly once
  *    and idempotently, so per-run trees don't accumulate on disk.
+ *  - **Merge-on-approve rides the same scan** (like conflict detection): for a repo opted in via
+ *    `Repo.mergeOnApprove`, a human's approving review on a `done` run's open, mergeable PR dispatches
+ *    the loop's ledger-guarded merge (`mergeApprovedPr`) — the human reviews, an agent lands the PR.
  *  - **`checkOnce` is the pure core**; the timed `poll` driver is a thin loop over it with an injected
  *    clock + sleep so tests drive it without real time.
  */
 
-import type { GitHub, PrComment } from '../integration/github';
+import type { GitHub, PrComment, PrReview } from '../integration/github';
 import { isRepoResolver, singleRepoResolver, type RepoResolver } from '../integration/github-resolver';
 import type { Repository, Run } from '../store/repository';
 
@@ -38,6 +41,8 @@ export interface PrFeedbackReopener {
   reopenForPrFeedback(runId: number, reason: unknown): void;
   /** Resolve a finished run's merge conflict in place (dedicated resolver, not a pipeline re-run). */
   resolveMergeConflict(runId: number, reason: unknown): void;
+  /** Merge a finished (`done`) run's human-approved PR in place (merge-on-approve, ledger-guarded). */
+  mergeApprovedPr(runId: number, reason: unknown): void;
 }
 
 /** Default marker a PR comment must start with to be treated as actionable feedback. */
@@ -49,11 +54,12 @@ export const PR_FEEDBACK_CLOSED_FLAG = 'pr_feedback_closed';
 /**
  * What one check of a run's PR produced:
  *  - `reopened`     — new marker feedback (posted after the run finished) was found; the run was re-opened.
+ *  - `merging`      — a human approved the PR and the repo opted into merge-on-approve; the merge was dispatched.
  *  - `watching`     — the PR is open with no new feedback since the run finished (still watched).
  *  - `stopped`      — the PR merged/closed, so the run is now flagged and no longer watched.
  *  - `not_watching` — the run isn't a finished run with an open, still-watched PR (nothing to check).
  */
-export type PrFeedbackCheck = 'reopened' | 'watching' | 'stopped' | 'not_watching';
+export type PrFeedbackCheck = 'reopened' | 'merging' | 'watching' | 'stopped' | 'not_watching';
 
 export interface PrFeedbackPollerOptions {
   /** Delay between ticks, in ms. Default 15s (matches the Reply Poller). */
@@ -88,6 +94,34 @@ export function newFeedbackComments(comments: PrComment[], marker: string, since
   return comments.filter((c) => isFeedbackComment(c.body, marker) && Date.parse(c.createdAt) > since);
 }
 
+/**
+ * Whether a PR's reviews amount to "approved by a human" (merge-on-approve): per reviewer only the
+ * **latest verdict** counts (a reviewer who approved and then requested changes is a blocker, and vice
+ * versa; `commented`/`pending` reviews are neutral and never displace a verdict). The PR is approved
+ * when at least one reviewer's standing verdict is `approved` and no reviewer's is `changes_requested`
+ * — a `dismissed` verdict clears that reviewer's signal entirely, like GitHub does. Verdicts are
+ * ordered by their own `submittedAt` here, so callers owe no ordering contract.
+ *
+ * `approvedAfterIso` is the staleness boundary — the run's finished-at timestamp: an approval only
+ * counts if it was submitted **after** the run last finished. The pipeline pushes commits up to the
+ * moment it finishes (the terminal approval itself strips `.agent/` from the branch tip), and a
+ * feedback/revert re-entry re-finishes later still — so an approval from before the boundary reviewed
+ * code that changed afterwards, and the PR needs a fresh one. `changes_requested` blocks regardless of
+ * time (conservative). Pure and exported so the rule is unit-tested directly.
+ */
+export function isPrApproved(reviews: PrReview[], approvedAfterIso?: string): boolean {
+  const latestVerdict = new Map<string, PrReview>();
+  for (const review of reviews
+    .filter((r) => r.state === 'approved' || r.state === 'changes_requested' || r.state === 'dismissed')
+    .sort((a, b) => Date.parse(a.submittedAt) - Date.parse(b.submittedAt))) {
+    latestVerdict.set(review.author, review);
+  }
+  const verdicts = [...latestVerdict.values()];
+  if (verdicts.some((r) => r.state === 'changes_requested')) return false;
+  const boundary = approvedAfterIso ? Date.parse(approvedAfterIso) : 0;
+  return verdicts.some((r) => r.state === 'approved' && Date.parse(r.submittedAt) > boundary);
+}
+
 export class PrFeedbackPoller {
   private readonly intervalMs: number;
   private readonly marker: string;
@@ -110,21 +144,24 @@ export class PrFeedbackPoller {
 
   /**
    * One pass over every finished run with an open PR: baseline a newly-seen run, re-open a run whose PR
-   * has new marker-matching feedback, and stop watching a run whose PR merged/closed. Returns how many
-   * runs were re-opened. A transient error on one run is logged and skipped, never aborting the pass.
+   * has new marker-matching feedback (or dispatch its merge under merge-on-approve), and stop watching a
+   * run whose PR merged/closed. Returns how many runs were acted on (re-opened or sent to merge) — the
+   * count the `poll` driver drains the loop after, so a dispatched merge always completes. A transient
+   * error on one run is logged and skipped, never aborting the pass.
    */
   async checkOnce(): Promise<number> {
-    let reopened = 0;
+    let acted = 0;
     for (const run of this.watchedRuns()) {
       try {
-        if ((await this.processRun(run)) === 'reopened') reopened += 1;
+        const outcome = await this.processRun(run);
+        if (outcome === 'reopened' || outcome === 'merging') acted += 1;
       } catch (err) {
         // A transient GitHub/read error on one run must not abort polling for the others; the run stays
         // watched and the next tick retries. Recorded so the operator can see it happened.
         this.repo.recordLog({ runId: run.id, level: 'warn', message: `PR feedback poll failed, will retry: ${String(err)}`, data: { kind: 'pr_feedback_poll_error' } });
       }
     }
-    return reopened;
+    return acted;
   }
 
   /**
@@ -237,7 +274,32 @@ export class PrFeedbackPoller {
     const finishedAt = this.repo.listTransitions(run.id).at(-1)?.createdAt;
     const actionable = newFeedbackComments(comments, this.marker, finishedAt);
 
-    if (actionable.length === 0) return 'watching';
+    if (actionable.length === 0) {
+      // Merge-on-approve (rides the same getPr, like conflict detection; checked only with no
+      // unaddressed feedback — a `feedback:` request outranks landing the PR): when the repo opted in,
+      // a human's approving review on a `done` run's open, mergeable PR dispatches the ledger-guarded
+      // merge. Only `done` runs merge — a `needs_human` run is parked *for a person*. `unknown`
+      // mergeability is "no signal" (GitHub still computing): skip, the next tick retries; a
+      // `conflicting` PR is the conflict machinery's job, never a merge attempt. No dedupe bookkeeping
+      // needed: dispatching makes the run non-finished (running) while it merges; success lands the PR
+      // (next tick stops watching), and a failed merge parks it needs_human — none re-trigger.
+      if (run.status === 'done' && pr.mergeable === 'mergeable' && this.repo.getRepo(run.repoRef)?.mergeOnApprove === true) {
+        const reviews = await github.listPrReviews(prNumber);
+        // `finishedAt` is the staleness boundary: only an approval submitted after the run last
+        // finished counts — the branch keeps changing until then, and a feedback/revert re-entry
+        // re-finishes later; see isPrApproved.
+        if (isPrApproved(reviews, finishedAt)) {
+          this.repo.recordLog({
+            runId: run.id,
+            message: `PR #${prNumber} approved by a human reviewer — merging into ${baseBranch} (merge-on-approve)`,
+            data: { kind: 'pr_approved_merge', prNumber },
+          });
+          this.reopener.mergeApprovedPr(run.id, { kind: 'pr_approved', prNumber, base: baseBranch });
+          return 'merging';
+        }
+      }
+      return 'watching';
+    }
 
     this.repo.recordLog({
       runId: run.id,

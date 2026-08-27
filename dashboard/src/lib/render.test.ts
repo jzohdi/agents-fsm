@@ -317,6 +317,15 @@ describe('repoLedgerModel (home repositories ledger)', () => {
     expect(legacy[0]).toMatchObject({ autoMerge: false });
   });
 
+  it('carries the merge-on-approve flag onto the row, defaulting to off', () => {
+    const on = repoLedgerModel([repo({ repoRef: 'acme/web', mergeOnApprove: true })], []);
+    expect(on[0]).toMatchObject({ mergeOnApprove: true });
+
+    // An older daemon that predates the column omits it → the row defaults to off (server default).
+    const legacy = repoLedgerModel([repo({ repoRef: 'acme/idle' })], []);
+    expect(legacy[0]).toMatchObject({ mergeOnApprove: false });
+  });
+
   it('merges enrolled repos with run aggregates and sorts by most recent activity', () => {
     const rows = repoLedgerModel(
       [repo({ repoRef: 'acme/web' }), repo({ repoRef: 'acme/idle', baseBranch: 'develop' })],
