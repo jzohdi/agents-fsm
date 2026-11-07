@@ -112,12 +112,19 @@ describe('checkRequest (auth on)', () => {
 });
 
 describe('isJsonContentType', () => {
-  it('matches application/json with or without parameters, case-insensitively', () => {
+  it('matches application/json alone or with a UTF-8 charset, case-insensitively', () => {
     expect(isJsonContentType('application/json')).toBe(true);
     expect(isJsonContentType('Application/JSON; charset=utf-8')).toBe(true);
+    expect(isJsonContentType('application/json; charset="UTF-8"')).toBe(true);
+    expect(isJsonContentType('application/json; charset=latin1')).toBe(false);
     expect(isJsonContentType('text/plain')).toBe(false);
     expect(isJsonContentType('application/x-www-form-urlencoded')).toBe(false);
     expect(isJsonContentType('application/json-patch+json')).toBe(false);
     expect(isJsonContentType(undefined)).toBe(false);
   });
+
+  it.each(['application/json;,text/plain', 'application/json; x=,text/plain', 'application/json;x=", text/plain"', 'application/json;charset=utf-8, text/plain'])(
+    'refuses the comma trick %j (a browser may send it without a preflight)',
+    (ct) => expect(isJsonContentType(ct)).toBe(false),
+  );
 });

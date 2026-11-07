@@ -98,7 +98,14 @@ export function checkRequest(req: GuardedRequest, policy: RequestPolicy): GuardV
   return httpScheme && origin.host === req.host.trim().toLowerCase() ? ALLOW : ORIGIN_DENIED;
 }
 
-/** True for `application/json` with or without parameters (`; charset=utf-8`). */
+/** Exactly `application/json`, optionally with a UTF-8 charset; case and spaces don't matter. */
+const JSON_CONTENT_TYPE = /^application\/json\s*(;\s*charset\s*=\s*"?utf-8"?\s*)?$/i;
+
+/**
+ * True for a JSON request body type. Strict on purpose: a browser that follows the Fetch spec may send
+ * `application/json;,text/plain` or `application/json, text/plain` without a CORS preflight (it reads
+ * them as text/plain), so a looser "starts with application/json" check would let them through.
+ */
 export function isJsonContentType(contentType: string | undefined): boolean {
-  return (contentType ?? '').split(';')[0]!.trim().toLowerCase() === 'application/json';
+  return JSON_CONTENT_TYPE.test((contentType ?? '').trim());
 }
