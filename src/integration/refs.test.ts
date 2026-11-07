@@ -68,7 +68,15 @@ describe('parseIssueRef', () => {
 });
 
 describe('isRemoteCloneUrl', () => {
-  it.each(['https://github.com/o/r.git', 'ssh://git@github.com/o/r.git', 'git@github.com:o/r.git', 'deploy@git.example.com:team/r'])(
+  it.each([
+    'https://github.com/o/r.git',
+    'https://git.example.com:8443/team/r.git',
+    'https://oauth-user@git.example.com/team/r.git',
+    'ssh://git@github.com/o/r.git',
+    'ssh://git@git.example.com:2222/team/r.git',
+    'git@github.com:o/r.git',
+    'deploy@git.example.com:team/r',
+  ])(
     'accepts the network remote %s',
     (url) => expect(isRemoteCloneUrl(url)).toBe(true),
   );
@@ -84,13 +92,22 @@ describe('isRemoteCloneUrl', () => {
     'ssh://-oProxyCommand=x/r',
     '-oProxyCommand=x@host:r',
     'https://github.com/o/r.git --upload-pack=x',
+    'ssh://git@-oProxyCommand=x/r',
+    'ssh://-u@github.com/o/r',
+    'git@-oProxyCommand=x:r',
+    'git@github.com:-o/r',
+    'https://user:secret@github.com/o/r.git',
+    'ssh://git:secret@github.com/o/r.git',
+    'https://github.com:99999/o/r.git',
+    'https://github.com',
+    'HTTPS://github.com/o/r.git',
   ])('rejects %s', (url) => expect(isRemoteCloneUrl(url)).toBe(false));
 });
 
 describe('isValidBranchName', () => {
   it.each(['main', 'develop', 'release/1.2', 'feature_x-1'])('accepts %s', (name) => expect(isValidBranchName(name)).toBe(true));
 
-  it.each(['--orphan', '-b', 'a..b', 'a//b', 'a/.x', 'x.lock', 'x/', 'x.', 'HEAD@{1}', 'a b', ''])('rejects %s', (name) =>
+  it.each(['--orphan', '-b', 'a..b', 'a//b', 'a/.x', 'x.lock', 'a.lock/b', 'x/', 'x.', 'HEAD@{1}', 'a b', ''])('rejects %s', (name) =>
     expect(isValidBranchName(name)).toBe(false),
   );
 });

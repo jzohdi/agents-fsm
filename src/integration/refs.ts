@@ -39,24 +39,44 @@ export function parseRepoRef(input: string): string {
   return `${owner}/${repo}`;
 }
 
-/** Network Git remotes an API caller may enroll: `https://…`, `ssh://…` and scp-style `user@host:path`.
- *  Local paths, `file://`, `ext::` and anything that could read as a `git` option are not remotes. */
-const REMOTE_URL = [/^https:\/\/\S+$/, /^ssh:\/\/[A-Za-z0-9]\S*$/, /^[A-Za-z0-9][\w.-]*@[A-Za-z0-9][A-Za-z0-9.-]*:\S+$/];
+/** A remote's user or host name: starts with a letter or digit, so it never reads as an ssh option. */
+const REMOTE_NAME = /^[A-Za-z0-9][\w.-]*$/;
+/** scp-style `user@host:path` (git's own short form); the path may not start with `-` either. */
+const SCP_REMOTE = /^[A-Za-z0-9][\w.-]*@[A-Za-z0-9][A-Za-z0-9.-]*:(?!-)\S+$/;
 
-/** True for a clone URL from {@link REMOTE_URL}'s allow-list. */
+/**
+ * True for a network Git remote an API caller may enroll: `https://…`, `ssh://…` or `user@host:path`.
+ * Local paths, `file://`, `ext::` and anything that could read as a `git` or `ssh` option are refused,
+ * and so is a URL with a password: secrets live in the environment, never in the repos table (which
+ * `GET /repos` returns).
+ */
 export function isRemoteCloneUrl(url: string): boolean {
-  return REMOTE_URL.some((re) => re.test(url));
+  if (/\s/.test(url)) return false;
+  if (!url.startsWith('https://') && !url.startsWith('ssh://')) return SCP_REMOTE.test(url);
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false; // e.g. a port above 65535
+  }
+  return (
+    REMOTE_NAME.test(parsed.hostname) &&
+    (parsed.username === '' || REMOTE_NAME.test(parsed.username)) &&
+    parsed.password === '' &&
+    parsed.pathname.length > 1
+  );
 }
 
 /**
  * True for a plausible branch name: starts with a letter or digit, uses only letters, digits, `.`, `_`,
- * `/` and `-`, and avoids the forms `git check-ref-format` rejects (`..`, `//`, a `/.` component, a
- * trailing `/`, `.` or `.lock`). Stricter than git, so it can never be read as an option.
+ * `/` and `-`, and avoids the forms `git check-ref-format` rejects (`..`, `//`, a component starting
+ * with `.` or ending in `.lock`, a trailing `/` or `.`). Stricter than git, so it can never be read as an
+ * option.
  */
 export function isValidBranchName(name: string): boolean {
   return (
     /^[A-Za-z0-9][\w./-]*$/.test(name) &&
-    !/\.\.|\/\/|\/\./.test(name) &&
+    !/\.\.|\/\/|\/\.|\.lock\//.test(name) &&
     !/(\/|\.|\.lock)$/.test(name)
   );
 }

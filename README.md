@@ -757,9 +757,10 @@ the executor already retries rate-limited invocations with backoff (`--max-retri
 only on loopback (`127.0.0.1`) — safe for a local dashboard, but nothing more. Set `FLEET_API_TOKEN`
 (or `--api-token <token>`) to require a shared-secret bearer token on **every** route except `GET
 /health` (liveness probes) and the static dashboard assets (which must load so the SPA can prompt for a
-token). Clients send `Authorization: Bearer <token>`; only the SSE `/stream` also accepts `?token=<token>`,
-because a browser `EventSource` can't set headers (other routes ignore it, so tokens stay out of URLs). A missing token is `401 authentication required`, a
-wrong one `401 invalid token` (constant-time comparison). The token is read from the environment only —
+token). Clients send `Authorization: Bearer <token>`; only the SSE `/stream` also accepts
+`?token=<token>`, because a browser `EventSource` can't set headers (other routes ignore it, so tokens
+stay out of URLs). A missing token is `401 authentication required`, a wrong one `401 invalid token`
+(constant-time comparison). The token is read from the environment only —
 **never** stored in SQLite (§9.1) — and absent/blank keeps auth off (behaviour byte-for-byte unchanged).
 By default the daemon binds loopback (`127.0.0.1`); reaching it from another device is now supported
 (§9.11) and builds on this token layer. The dashboard prompts for the token on a `401`, stores it in
@@ -775,7 +776,9 @@ on top of the per-run token/cost budget in the FSM config (§2), not a replaceme
 
 > **Multiple repos (Milestone 8):** the daemon boot-enrolls its `--repo` as the first repository and
 > accepts more at runtime — the dashboard's repo-tab **+** or `POST /repos` (working root defaults to
-> `--work`). A run is admitted for any *enrolled* repo and serviced by that repo's own adapter; starting
+> `--work`; an optional `cloneUrl` must be an `https://`, `ssh://` or `user@host:path` remote without a
+> password, and an optional `baseBranch` a plain branch name — bind a local checkout with
+> `POST /repos/source` instead). A run is admitted for any *enrolled* repo and serviced by that repo's own adapter; starting
 > an issue in an unenrolled repo is refused with a clear "enroll it (`POST /repos`)" error. The new-run
 > autocomplete searches *all* your GitHub issues, so it can surface issues from repos you haven't enrolled
 > yet. Runs across repos advance in parallel — see the concurrency cap below.
