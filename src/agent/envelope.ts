@@ -149,13 +149,13 @@ const triageOutputSchema = z
   // rejected here rather than silently doing nothing in the runner.
   .superRefine((o, ctx) => {
     if (o.decision === 'clarify' && (!o.questions || o.questions.length === 0)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'decision "clarify" requires a non-empty `questions` array', path: ['questions'] });
+      ctx.addIssue({ code: 'custom', message: 'decision "clarify" requires a non-empty `questions` array', path: ['questions'] });
     }
     if (o.decision === 'split') {
       if (!o.subIssues || o.subIssues.length < 2) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'decision "split" requires at least two `subIssues`', path: ['subIssues'] });
+        ctx.addIssue({ code: 'custom', message: 'decision "split" requires at least two `subIssues`', path: ['subIssues'] });
       } else if (o.handoff !== undefined && o.handoff >= o.subIssues.length) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: '`handoff` must be an index into `subIssues`', path: ['handoff'] });
+        ctx.addIssue({ code: 'custom', message: '`handoff` must be an index into `subIssues`', path: ['handoff'] });
       }
     }
   });
@@ -163,7 +163,7 @@ const triageOutputSchema = z
 /** A validation outcome that callers branch on, rather than a thrown error. */
 export type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
 
-function format(issues: z.ZodIssue[]): string {
+function format(issues: z.core.$ZodIssue[]): string {
   return issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
 }
 
