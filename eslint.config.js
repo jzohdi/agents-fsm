@@ -1,6 +1,8 @@
+import { defineConfig } from 'eslint/config';
 import tseslint from 'typescript-eslint';
 
-export default tseslint.config(
+// ESLint core's `defineConfig` replaces typescript-eslint's deprecated `tseslint.config` helper.
+export default defineConfig(
   {
     // `.agent-work/` holds per-run clones of *target* repos (real runs) — never lint their code.
     // `dashboard/` is the Svelte + Vite SPA: a separate front-end with its own toolchain (Svelte
@@ -8,7 +10,7 @@ export default tseslint.config(
     // apply. Its pure view-model logic (`render.ts`) is unit-tested by the root vitest suite.
     ignores: ['node_modules/', 'dist/', 'coverage/', '.agent-work/', 'dashboard/'],
   },
-  ...tseslint.configs.recommended,
+  tseslint.configs.recommended,
   {
     rules: {
       // Allow leading-underscore escape hatch for intentionally unused vars.
