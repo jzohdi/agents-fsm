@@ -16,6 +16,7 @@ describe('hostnameOf', () => {
     ['[::1]:80', '[::1]'],
     ['[::1]', '[::1]'],
     ['evil.example:4319', 'evil.example'],
+    ['127.0.0.1:80:evil', '127.0.0.1:80:evil'],
   ])('%s → %s', (host, expected) => {
     expect(hostnameOf(host)).toBe(expected);
   });

@@ -18,7 +18,8 @@ const LOOPBACK_HOSTNAMES: ReadonlySet<string> = new Set(['localhost', '127.0.0.1
 const STATE_CHANGING: ReadonlySet<string> = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const WILDCARD_HOSTS: ReadonlySet<string> = new Set(['0.0.0.0', '[::]']);
 
-/** Hostname of a `Host` header value: lowercased, port dropped, an IPv6 literal kept bracketed. */
+/** Hostname of a `Host` header value: lowercased, port dropped, an IPv6 literal kept bracketed. A
+ *  malformed value (two unbracketed colons) comes back whole, so it matches no allowed name. */
 export function hostnameOf(host: string): string {
   const h = host.trim().toLowerCase();
   if (h.startsWith('[')) {
@@ -26,7 +27,7 @@ export function hostnameOf(host: string): string {
     return end > 0 ? h.slice(0, end + 1) : h;
   }
   const colon = h.indexOf(':');
-  return colon >= 0 ? h.slice(0, colon) : h;
+  return colon >= 0 && colon === h.lastIndexOf(':') ? h.slice(0, colon) : h;
 }
 
 /** The `Host` names the daemon answers: loopback, the bound host (unless a wildcard), and the hostname
