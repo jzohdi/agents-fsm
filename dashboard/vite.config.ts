@@ -9,7 +9,8 @@ import { defineConfig } from 'vite';
  * (`npm start -- serve`) so the UI hot-reloads while real data comes from the orchestrator.
  * `changeOrigin` rewrites only `Host`; keep the browser's `Origin` (`http://localhost:5173`) as it is, so
  * the daemon's cross-site guard still sees where a write came from (rewriting it would make this dev
- * server a relay for any page).
+ * server a relay for any page). The daemon trusts writes from this server's default port, 5173, only;
+ * on another port, add its origin to `FLEET_CORS_ORIGINS`.
  */
 const DAEMON = process.env.AF_DAEMON ?? 'http://127.0.0.1:4319';
 const API_ROUTES = ['/runs', '/config', '/health', '/stream', '/suggestions', '/repos', '/cost', '/models', '/settings', '/scheduler'];

@@ -1356,6 +1356,16 @@ describe('HTTP API — cross-site request guard (auth off)', () => {
     expect(await runCount(base)).toBe(0);
   });
 
+  it('refuses a body-less POST from a page on another local port, leaving the run as it was', async () => {
+    const { base } = await start();
+    const created = await fetch(`${base}/runs`, { method: 'POST', headers: json, body: JSON.stringify({ issueRef: 'o/r#1' }) });
+    const run = (await created.json()) as { id: number };
+    const before = await (await fetch(`${base}/runs/${run.id}`)).text();
+    const res = await fetch(`${base}/runs/${run.id}/resolve-conflicts`, { method: 'POST', headers: { Origin: 'http://localhost:3000' } });
+    expect(res.status).toBe(403);
+    expect(await (await fetch(`${base}/runs/${run.id}`)).text()).toBe(before);
+  });
+
   it('refuses body-less cross-site POSTs and a browser POST that only sends Sec-Fetch-Site', async () => {
     const { base } = await start();
     // Refused before routing: an admitted request would 404 on the unknown run.

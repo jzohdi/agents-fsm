@@ -1088,8 +1088,10 @@ write-up of what an off-localhost attacker can and cannot do lives in
   form needs no CORS preflight, so it reaches the daemon and only the reply is hidden), and DNS rebinding
   can make a foreign hostname resolve to `127.0.0.1`. So, while auth is off, every request must name an
   allowed `Host` (loopback names, the `--host` you bound, or a `FLEET_CORS_ORIGINS` entry's hostname), a
-  `POST`/`PUT`/`PATCH`/`DELETE` that carries an `Origin` must come from loopback, the same origin or a
-  `FLEET_CORS_ORIGINS` entry, and a browser's request body must be `application/json` (else `415`).
+  `POST`/`PUT`/`PATCH`/`DELETE` that carries an `Origin` must come from the same origin, the
+  `npm run dev:dashboard` server (`http://localhost:5173` / `http://127.0.0.1:5173`) or a
+  `FLEET_CORS_ORIGINS` entry (a page on any other local port, e.g. a project's own dev server, is
+  refused), and a browser's request body must be `application/json` (else `415`).
   Anything else gets `403`. Clients that send no `Origin` (curl, scripts) are unaffected. With a token
   set, the token is the boundary and these checks step aside.
 - **Error sanitization.** Unexpected internal errors return a generic `500` (no stack trace, raw message,

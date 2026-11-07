@@ -79,12 +79,14 @@ describe('checkRequest (auth off)', () => {
     expect(checkRequest({ method: 'DELETE', host, secFetchSite: 'same-site' }, policy).ok).toBe(false);
   });
 
-  it.each(['http://evil.example', 'null', 'file://', 'chrome-extension://abc', 'not a url'])('refuses a write from Origin %s', (origin) => {
+  it.each(['http://evil.example', 'null', 'file://', 'chrome-extension://abc', 'not a url', 'http://localhost:3000', 'http://[::1]:9', 'https://localhost:5173'])('refuses a write from Origin %s', (origin) => {
     expect(checkRequest({ method: 'POST', host, origin }, policy)).toMatchObject({ ok: false, status: 403 });
   });
 
-  it('accepts writes from a loopback origin, the same origin, or an allow-listed origin', () => {
+  it('accepts writes from the same origin, the dev dashboard (Vite on 5173), or an allow-listed origin', () => {
     expect(checkRequest({ method: 'POST', host, origin: 'http://localhost:5173' }, policy).ok).toBe(true);
+    expect(checkRequest({ method: 'POST', host, origin: 'http://127.0.0.1:5173' }, policy).ok).toBe(true);
+    expect(checkRequest({ method: 'POST', host: 'localhost:8080', origin: 'http://localhost:8080' }, policy).ok).toBe(true); // ssh -L
     expect(checkRequest({ method: 'PUT', host, origin: `http://${host}` }, policy).ok).toBe(true);
     const tunnel = authOff(['https://ops.example']);
     expect(checkRequest({ method: 'POST', host: 'ops.example', origin: 'https://ops.example' }, tunnel).ok).toBe(true);

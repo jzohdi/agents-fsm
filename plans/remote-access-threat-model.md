@@ -63,7 +63,8 @@ Two attacker profiles:
   "simple" `POST` (`text/plain` or a form, no preflight) that starts a run, and DNS rebinding makes a
   foreign hostname same-origin for reads. `src/api/request-guard.ts` closes both while auth is off: an
   allow-listed `Host` on every request (loopback names, the bound host, `FLEET_CORS_ORIGINS` hostnames),
-  an allowed `Origin` (or none, unless `Sec-Fetch-Site` says cross-site/same-site) on every
+  an allowed `Origin` (same origin, the dev dashboard on `:5173` or `FLEET_CORS_ORIGINS`; never just
+  any local port; or none, unless `Sec-Fetch-Site` says cross-site/same-site) on every
   state-changing request, and `application/json` bodies from browsers (`415` otherwise). *(Fixed with
   tests.)*
 - **Learn internal detail from an error.** A non-`ApiError` throw is sanitized to a generic

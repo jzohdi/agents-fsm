@@ -10,13 +10,17 @@
  *
  * So, while no API token is set, every request must name an allowed `Host` (loopback names, the bound
  * host, or an allow-listed origin's hostname), and every state-changing request that carries an
- * `Origin` must come from an allowed origin. With a token configured the bearer token is the boundary
- * and this guard steps aside (a cross-site page can't read or guess the token).
+ * `Origin` must come from the same origin, the dev dashboard or an allow-listed origin. A page on another
+ * local port is not trusted: it may be any project's dev server. With a token configured the bearer
+ * token is the boundary and this guard steps aside (a cross-site page can't read or guess the token).
  */
 
 const LOOPBACK_HOSTNAMES: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '[::1]']);
 const STATE_CHANGING: ReadonlySet<string> = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const WILDCARD_HOSTS: ReadonlySet<string> = new Set(['0.0.0.0', '[::]']);
+/** `npm run dev:dashboard`'s Vite dev server (its default port): the proxy forwards the page's Origin.
+ *  Other local ports are not trusted — a page there may be any project's dev server. */
+const DEV_DASHBOARD_ORIGINS: readonly string[] = ['http://localhost:5173', 'http://127.0.0.1:5173'];
 
 /** `name[:port]` or `[ipv6][:port]`, the only shapes a browser puts in `Host`. */
 const HOST_HEADER = /^(\[[0-9a-f:.]+\]|[^:[\]]+)(?::\d*)?$/;
@@ -82,18 +86,16 @@ export function checkRequest(req: GuardedRequest, policy: RequestPolicy): GuardV
     // that somehow omits Origin still says where the request came from in Sec-Fetch-Site.
     return req.secFetchSite === 'cross-site' || req.secFetchSite === 'same-site' ? ORIGIN_DENIED : ALLOW;
   }
-  if (policy.allowedOrigins.includes(req.origin)) return ALLOW;
+  if (policy.allowedOrigins.includes(req.origin) || DEV_DASHBOARD_ORIGINS.includes(req.origin)) return ALLOW;
+  // Same origin: the dashboard itself, including through `ssh -L` on another port (Host matches).
   let origin: URL;
   try {
     origin = new URL(req.origin); // the opaque origin "null" (sandboxed frames, file://) throws here
   } catch {
     return ORIGIN_DENIED;
   }
-  if (origin.protocol !== 'http:' && origin.protocol !== 'https:') return ORIGIN_DENIED;
-  // A page on this machine (the Vite dev server, an `ssh -L` port) or the dashboard itself.
-  if (LOOPBACK_HOSTNAMES.has(origin.hostname)) return ALLOW;
-  if (origin.host === req.host.trim().toLowerCase()) return ALLOW;
-  return ORIGIN_DENIED;
+  const httpScheme = origin.protocol === 'http:' || origin.protocol === 'https:';
+  return httpScheme && origin.host === req.host.trim().toLowerCase() ? ALLOW : ORIGIN_DENIED;
 }
 
 /** True for `application/json` with or without parameters (`; charset=utf-8`). */
