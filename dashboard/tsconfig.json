@@ -4,7 +4,7 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "lib": ["ESNext", "DOM", "DOM.Iterable"],
-    "types": ["svelte"],
+    "types": ["svelte", "vite/client"],
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "skipLibCheck": true,

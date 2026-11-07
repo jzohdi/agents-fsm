@@ -701,8 +701,8 @@ A practical guide: from zero to a running, recoverable fleet. The daemon is head
 loopback; the dashboard is a pure client of its API (§3.3 Layer 7).
 
 ### 9.1 Prerequisites
-- **Node ≥ 20** and a working **`gh`** (GitHub CLI), authenticated (`gh auth login`) — the real
-  Git/GitHub adapter shells out to it.
+- **Node 24** (`.nvmrc`) and a working **`gh`** (GitHub CLI), authenticated (`gh auth login`) — the
+  real Git/GitHub adapter shells out to it.
 - **Secrets** live in the environment, never in SQLite. Copy `.env.example` → `.env` and fill in
   `GITHUB_TOKEN` (issues / PRs / branches / comments) and, for the default Claude Code harness,
   `ANTHROPIC_API_KEY` (see the harness bullet). Optionally set `FLEET_API_TOKEN` to require a bearer
@@ -713,7 +713,8 @@ loopback; the dashboard is a pure client of its API (§3.3 Layer 7).
     `ANTHROPIC_API_KEY`.
   - **Cursor (optional):** the `cursor-agent` CLI on `PATH`, authenticated via `cursor-agent login` or
     `CURSOR_API_KEY`. Not needed unless you select the Cursor harness.
-- `npm install` once. The SQLite schema is created/migrated automatically on first open — no manual
+- `npm ci` once. No dependency install script runs (`allowScripts` in `package.json`); better-sqlite3
+  ships its prebuilt binary. The SQLite schema is created/migrated automatically on first open — no manual
   migration step, and an existing daemon DB upgrades in place on the next `serve`.
 
 ### 9.2 Run a single issue (one-shot CLI)
