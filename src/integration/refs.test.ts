@@ -101,13 +101,17 @@ describe('isRemoteCloneUrl', () => {
     'https://github.com:99999/o/r.git',
     'https://github.com',
     'HTTPS://github.com/o/r.git',
+    'ssh://git@github.com/o/r\u0000',
+    'ssh://git@git\u0001hub.com/o/r',
+    'https://github.com/o/r\u007f',
+    'git@github.com:o/r\u0000',
   ])('rejects %s', (url) => expect(isRemoteCloneUrl(url)).toBe(false));
 });
 
 describe('isValidBranchName', () => {
-  it.each(['main', 'develop', 'release/1.2', 'feature_x-1'])('accepts %s', (name) => expect(isValidBranchName(name)).toBe(true));
+  it.each(['main', 'develop', 'release/1.2', 'feature_x-1', 'HEADS-UP', 'head', 'feature/HEAD-x'])('accepts %s', (name) => expect(isValidBranchName(name)).toBe(true));
 
-  it.each(['--orphan', '-b', 'a..b', 'a//b', 'a/.x', 'x.lock', 'a.lock/b', 'x/', 'x.', 'HEAD@{1}', 'a b', ''])('rejects %s', (name) =>
+  it.each(['--orphan', '-b', 'a..b', 'a//b', 'a/.x', 'x.lock', 'a.lock/b', 'x/', 'x.', 'HEAD@{1}', 'a b', '', 'HEAD', 'FETCH_HEAD', 'ORIG_HEAD', 'refs/heads/main', 'refs/remotes/origin/x'])('rejects %s', (name) =>
     expect(isValidBranchName(name)).toBe(false),
   );
 });

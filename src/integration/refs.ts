@@ -51,7 +51,7 @@ const SCP_REMOTE = /^[A-Za-z0-9][\w.-]*@[A-Za-z0-9][A-Za-z0-9.-]*:(?!-)\S+$/;
  * `GET /repos` returns).
  */
 export function isRemoteCloneUrl(url: string): boolean {
-  if (/\s/.test(url)) return false;
+  if (/[\s\x00-\x1f\x7f]/.test(url)) return false; // whitespace or control characters
   if (!url.startsWith('https://') && !url.startsWith('ssh://')) return SCP_REMOTE.test(url);
   let parsed: URL;
   try {
@@ -70,14 +70,16 @@ export function isRemoteCloneUrl(url: string): boolean {
 /**
  * True for a plausible branch name: starts with a letter or digit, uses only letters, digits, `.`, `_`,
  * `/` and `-`, and avoids the forms `git check-ref-format` rejects (`..`, `//`, a component starting
- * with `.` or ending in `.lock`, a trailing `/` or `.`). Stricter than git, so it can never be read as an
- * option.
+ * with `.` or ending in `.lock`, a trailing `/` or `.`). It also refuses names git resolves to something
+ * other than a branch: `HEAD`, `FETCH_HEAD`-style names and full `refs/…` paths. Stricter than git, so
+ * it can never be read as an option.
  */
 export function isValidBranchName(name: string): boolean {
   return (
     /^[A-Za-z0-9][\w./-]*$/.test(name) &&
     !/\.\.|\/\/|\/\.|\.lock\//.test(name) &&
-    !/(\/|\.|\.lock)$/.test(name)
+    !/(\/|\.|\.lock)$/.test(name) &&
+    !/^(\w*_)?HEAD$|^refs\//.test(name)
   );
 }
 
