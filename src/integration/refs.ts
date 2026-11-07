@@ -9,8 +9,9 @@
  * so the rest of the system only ever sees `owner/repo` and `owner/repo#N`.
  */
 
-/** A GitHub login / repo-name segment: letters, digits, `.`, `_`, `-`. */
-const NAME = /^[\w.-]+$/;
+/** A GitHub login / repo-name segment: letters, digits, `.`, `_`, `-` — but never `.` or `..`, which
+ *  would turn `repos/<owner>/<repo>/…` API paths into traversals (`.github` is a valid name). */
+const NAME = /^(?!\.\.?$)[\w.-]+$/;
 
 /** Strip scheme, host, and `git@github.com:` / `.git` decoration, leaving the `owner/repo/...` path. */
 function stripHost(input: string): string {
@@ -31,7 +32,8 @@ export function parseRepoRef(input: string): string {
   const parts = stripHost(input).split('/');
   const owner = (parts[0] ?? '').split(/[#?]/)[0]!;
   const repo = (parts[1] ?? '').split(/[#?]/)[0]!.replace(/\.git$/i, '');
-  if (!NAME.test(owner) || !NAME.test(repo)) {
+  // A GitHub login never starts with `-`; refusing it keeps an owner from ever reading as an option.
+  if (!NAME.test(owner) || !NAME.test(repo) || owner.startsWith('-')) {
     throw new Error(`cannot parse an "owner/repo" from ${JSON.stringify(input)}`);
   }
   return `${owner}/${repo}`;

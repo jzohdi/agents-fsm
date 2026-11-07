@@ -20,6 +20,15 @@ describe('parseRepoRef', () => {
     expect(parseRepoRef('jzohdi/tmux-speedrun#31')).toBe('jzohdi/tmux-speedrun');
   });
 
+  it('throws on `.`/`..` segments and an owner starting with "-", but keeps names like .github', () => {
+    for (const ref of ['../../etc', './x', 'a/..', 'a/.', '-x/y', '..']) {
+      expect(() => parseRepoRef(ref), ref).toThrow(/owner\/repo/);
+    }
+    expect(parseRepoRef('a/.github')).toBe('a/.github');
+    expect(parseRepoRef('o/r')).toBe('o/r');
+    expect(parseRepoRef('o/-r')).toBe('o/-r');
+  });
+
   it('throws on input with no owner/repo', () => {
     expect(() => parseRepoRef('not-a-repo')).toThrow(/owner\/repo/);
     expect(() => parseRepoRef('https://github.com/jzohdi')).toThrow(/owner\/repo/);

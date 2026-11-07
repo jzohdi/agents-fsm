@@ -543,7 +543,10 @@ describe('HTTP API', () => {
     expect(await enroll.json()).toMatchObject({ repoRef: 'acme/web', baseBranch: 'develop' });
     // A malformed ref is a 400, not a row.
     expect((await fetch(`${base}/repos`, { method: 'POST', body: JSON.stringify({ repoRef: 'not a repo' }) })).status).toBe(400);
-    // So are a clone URL git could read as an option or a local transport, and a hostile base branch.
+    // So are a traversal-shaped ref, a clone URL git could read as an option or a local transport, and a
+    // hostile base branch.
+    expect((await fetch(`${base}/repos`, { method: 'POST', body: JSON.stringify({ repoRef: '../../etc' }) })).status).toBe(400);
+    expect((await fetch(`${base}/runs`, { method: 'POST', body: JSON.stringify({ issueRef: '../../etc#1' }) })).status).toBe(400);
     for (const body of [{ cloneUrl: '--upload-pack=touch /tmp/x' }, { cloneUrl: 'file:///tmp/x' }, { baseBranch: '--orphan' }]) {
       const res = await fetch(`${base}/repos`, { method: 'POST', body: JSON.stringify({ repoRef: 'acme/api', ...body }) });
       expect(res.status, JSON.stringify(body)).toBe(400);
