@@ -776,12 +776,12 @@ on top of the per-run token/cost budget in the FSM config (§2), not a replaceme
 
 > **Multiple repos (Milestone 8):** the daemon boot-enrolls its `--repo` as the first repository and
 > accepts more at runtime — the dashboard's repo-tab **+** or `POST /repos` (working root defaults to
-> `--work`; an optional `cloneUrl` must be an `https://`, `ssh://` or `user@host:path` remote without a
-> password, and an optional `baseBranch` a plain branch name — bind a local checkout with
-> `POST /repos/source` instead). A run is admitted for any *enrolled* repo and serviced by that repo's own adapter; starting
-> an issue in an unenrolled repo is refused with a clear "enroll it (`POST /repos`)" error. The new-run
-> autocomplete searches *all* your GitHub issues, so it can surface issues from repos you haven't enrolled
-> yet. Runs across repos advance in parallel — see the concurrency cap below.
+> `--work`; an optional `cloneUrl` must be an `https://`, `ssh://` or `user@host:path` remote with no
+> credentials in it, and an optional `baseBranch` a plain branch name — bind a local checkout with
+> `POST /repos/source` instead). A run is admitted for any *enrolled* repo and serviced by that repo's
+> own adapter; starting an issue in an unenrolled repo is refused with a clear "enroll it
+> (`POST /repos`)" error. The new-run autocomplete searches *all* your GitHub issues, so it can surface
+> issues from repos you haven't enrolled yet. Runs across repos advance in parallel — see the concurrency cap below.
 
 ### 9.4 Configure the FSM
 The pipeline (states, transitions, back-edges, guard limits, budget) is one config object. Edit it

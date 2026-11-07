@@ -71,7 +71,6 @@ describe('isRemoteCloneUrl', () => {
   it.each([
     'https://github.com/o/r.git',
     'https://git.example.com:8443/team/r.git',
-    'https://oauth-user@git.example.com/team/r.git',
     'ssh://git@github.com/o/r.git',
     'ssh://git@git.example.com:2222/team/r.git',
     'git@github.com:o/r.git',
@@ -97,6 +96,8 @@ describe('isRemoteCloneUrl', () => {
     'git@-oProxyCommand=x:r',
     'git@github.com:-o/r',
     'https://user:secret@github.com/o/r.git',
+    'https://ghp_0123456789abcdef@github.com/o/r.git',
+    'https://oauth-user@git.example.com/team/r.git',
     'ssh://git:secret@github.com/o/r.git',
     'https://github.com:99999/o/r.git',
     'https://github.com',

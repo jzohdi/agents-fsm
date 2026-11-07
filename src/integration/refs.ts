@@ -47,8 +47,9 @@ const SCP_REMOTE = /^[A-Za-z0-9][\w.-]*@[A-Za-z0-9][A-Za-z0-9.-]*:(?!-)\S+$/;
 /**
  * True for a network Git remote an API caller may enroll: `https://…`, `ssh://…` or `user@host:path`.
  * Local paths, `file://`, `ext::` and anything that could read as a `git` or `ssh` option are refused,
- * and so is a URL with a password: secrets live in the environment, never in the repos table (which
- * `GET /repos` returns).
+ * and so are credentials in the URL — an ssh password, or any `https://` user part, which is how a token
+ * rides (`https://<token>@github.com/…`): secrets live in the environment, never in the repos table
+ * (which `GET /repos` returns). An `ssh://` user name (`git@`) is fine.
  */
 export function isRemoteCloneUrl(url: string): boolean {
   if (/[\s\x00-\x1f\x7f]/.test(url)) return false; // whitespace or control characters
@@ -61,7 +62,7 @@ export function isRemoteCloneUrl(url: string): boolean {
   }
   return (
     REMOTE_NAME.test(parsed.hostname) &&
-    (parsed.username === '' || REMOTE_NAME.test(parsed.username)) &&
+    (parsed.username === '' || (parsed.protocol === 'ssh:' && REMOTE_NAME.test(parsed.username))) &&
     parsed.password === '' &&
     parsed.pathname.length > 1
   );
