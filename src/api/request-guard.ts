@@ -18,16 +18,15 @@ const LOOPBACK_HOSTNAMES: ReadonlySet<string> = new Set(['localhost', '127.0.0.1
 const STATE_CHANGING: ReadonlySet<string> = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const WILDCARD_HOSTS: ReadonlySet<string> = new Set(['0.0.0.0', '[::]']);
 
+/** `name[:port]` or `[ipv6][:port]`, the only shapes a browser puts in `Host`. */
+const HOST_HEADER = /^(\[[0-9a-f:.]+\]|[^:[\]]+)(?::\d*)?$/;
+
 /** Hostname of a `Host` header value: lowercased, port dropped, an IPv6 literal kept bracketed. A
- *  malformed value (two unbracketed colons) comes back whole, so it matches no allowed name. */
+ *  malformed value (`[::1]evil`, `a:1:2`, `localhost:abc`) comes back whole, so it matches no allowed
+ *  name. A trailing dot (`localhost.`) is kept, so it doesn't match either. */
 export function hostnameOf(host: string): string {
   const h = host.trim().toLowerCase();
-  if (h.startsWith('[')) {
-    const end = h.indexOf(']');
-    return end > 0 ? h.slice(0, end + 1) : h;
-  }
-  const colon = h.indexOf(':');
-  return colon >= 0 && colon === h.lastIndexOf(':') ? h.slice(0, colon) : h;
+  return HOST_HEADER.exec(h)?.[1] ?? h;
 }
 
 /** The `Host` names the daemon answers: loopback, the bound host (unless a wildcard), and the hostname
@@ -78,8 +77,9 @@ export function checkRequest(req: GuardedRequest, policy: RequestPolicy): GuardV
   if (!STATE_CHANGING.has(req.method)) return ALLOW;
 
   if (req.origin === undefined) {
-    // Non-browser clients (curl, scripts, tests) send no Origin. A browser that omits it still says
-    // where the request came from in Sec-Fetch-Site.
+    // Non-browser clients (curl, scripts, tests) send no Origin. Browsers send Origin on every
+    // POST/PUT/PATCH/DELETE ("null" when the referrer is hidden), so Referer adds nothing; a browser
+    // that somehow omits Origin still says where the request came from in Sec-Fetch-Site.
     return req.secFetchSite === 'cross-site' || req.secFetchSite === 'same-site' ? ORIGIN_DENIED : ALLOW;
   }
   if (policy.allowedOrigins.includes(req.origin)) return ALLOW;

@@ -16,7 +16,13 @@ describe('hostnameOf', () => {
     ['[::1]:80', '[::1]'],
     ['[::1]', '[::1]'],
     ['evil.example:4319', 'evil.example'],
+    ['127.0.0.1:', '127.0.0.1'],
+    ['localhost.:4319', 'localhost.'],
+    // malformed values come back whole, so they match no allowed name
     ['127.0.0.1:80:evil', '127.0.0.1:80:evil'],
+    ['[::1]evil.example', '[::1]evil.example'],
+    ['[::1]:80:x', '[::1]:80:x'],
+    ['localhost:abc', 'localhost:abc'],
   ])('%s → %s', (host, expected) => {
     expect(hostnameOf(host)).toBe(expected);
   });
@@ -55,10 +61,16 @@ describe('checkRequest (auth off)', () => {
     expect(checkRequest({ method: 'GET' }, policy).ok).toBe(false);
   });
 
-  it('accepts loopback Host names on any port (ssh -L, another port)', () => {
+  it('accepts loopback Host names on any port (ssh -L, another port), in any case', () => {
     expect(checkRequest({ method: 'GET', host: 'localhost:9999' }, policy).ok).toBe(true);
+    expect(checkRequest({ method: 'GET', host: 'LOCALHOST:4319' }, policy).ok).toBe(true);
     expect(checkRequest({ method: 'GET', host: '[::1]:4319' }, policy).ok).toBe(true);
   });
+
+  it.each(['', 'localhost.:4319', '[::1]evil.example', '[::ffff:127.0.0.1]:4319', '127.0.0.2:4319', 'localhost:abc'])(
+    'refuses the near-miss Host %j',
+    (host) => expect(checkRequest({ method: 'GET', host }, policy).ok).toBe(false),
+  );
 
   it('accepts a write with no Origin (curl, scripts) unless Sec-Fetch-Site says it is cross-site', () => {
     expect(checkRequest({ method: 'POST', host }, policy).ok).toBe(true);
@@ -103,6 +115,7 @@ describe('isJsonContentType', () => {
     expect(isJsonContentType('Application/JSON; charset=utf-8')).toBe(true);
     expect(isJsonContentType('text/plain')).toBe(false);
     expect(isJsonContentType('application/x-www-form-urlencoded')).toBe(false);
+    expect(isJsonContentType('application/json-patch+json')).toBe(false);
     expect(isJsonContentType(undefined)).toBe(false);
   });
 });

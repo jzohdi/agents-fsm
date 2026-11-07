@@ -1399,6 +1399,15 @@ describe('HTTP API — cross-site request guard (auth off)', () => {
     expect(browser.status).toBe(415);
     expect(((await browser.json()) as { error: string }).error).toBe('Content-Type must be application/json');
     expect((await fetch(`${base}/runs`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body })).status).toBe(201);
+    // Parameters and case don't matter, and a chunked body is read like any other.
+    const chunked = new Blob([JSON.stringify({ issueRef: 'o/r#2' })]).stream();
+    const res = await fetch(`${base}/runs`, {
+      method: 'POST',
+      headers: { Origin: base, 'Content-Type': 'Application/JSON; charset=utf-8' },
+      body: chunked,
+      duplex: 'half',
+    } as RequestInit);
+    expect(res.status).toBe(201);
   });
 
   it('trusts FLEET_CORS_ORIGINS entries as write origins and their hostnames as Host', async () => {
