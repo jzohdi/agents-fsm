@@ -38,6 +38,7 @@ import { fileURLToPath } from 'node:url';
 
 import { ApiError, type Orchestrator } from './orchestrator';
 import { extractToken, requiresAuth, tokenMatches } from './auth';
+import { buildAllowedHosts, checkRequest, isJsonContentType, type RequestPolicy } from './request-guard';
 import { createRateLimiter, type RateLimiter } from './rate-limit';
 import { corsHeaders, securityHeaders } from './security-headers';
 import { suggestDirs } from './dir-suggest';
@@ -83,8 +84,12 @@ export interface ApiServerOptions {
   rateLimit?: { capacity: number; refillPerSec: number };
   /** Max request-body bytes before `413`. Omit ⇒ default 1 MiB (1_048_576). */
   maxBodyBytes?: number;
-  /** Exact-match CORS allow-list. Omit/empty ⇒ deny all cross-origin (the default). */
+  /** Exact-match CORS allow-list. Omit/empty ⇒ deny all cross-origin (the default). Each origin is
+   *  also trusted for writes, and its hostname accepted as `Host`, by the cross-site request guard. */
   allowedOrigins?: string[];
+  /** The host the daemon is bound to (`--host`). The request guard accepts it as a `Host` name, unless
+   *  it's a wildcard (`0.0.0.0`, `::`). Loopback names are always accepted. */
+  bindHost?: string;
   /** Injectable clock (epoch ms) for the rate limiter, for deterministic tests. Omit ⇒ `Date.now`. */
   now?: () => number;
 }
@@ -101,6 +106,8 @@ interface HardeningContext {
   limiter: RateLimiter;
   maxBodyBytes: number;
   allowedOrigins: readonly string[];
+  /** Cross-site request guard policy (see `request-guard.ts`). */
+  requestPolicy: RequestPolicy;
   now: () => number;
 }
 
@@ -108,12 +115,18 @@ interface HardeningContext {
 export function createApiServer(orchestrator: Orchestrator, options: ApiServerOptions = {}): Server {
   // Assemble the hardening context once — the rate limiter especially must be a single per-process
   // instance so a client's token bucket persists across its requests (per-source-key state).
+  const allowedOrigins = options.allowedOrigins ?? [];
   const ctx: HardeningContext = {
     publicDir: options.publicDir ?? DEFAULT_PUBLIC_DIR,
     ...(options.apiToken ? { apiToken: options.apiToken } : {}),
     limiter: createRateLimiter(options.rateLimit ?? DEFAULT_RATE_LIMIT),
     maxBodyBytes: options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES,
-    allowedOrigins: options.allowedOrigins ?? [],
+    allowedOrigins,
+    requestPolicy: {
+      authOn: Boolean(options.apiToken),
+      allowedHosts: buildAllowedHosts(options.bindHost, allowedOrigins),
+      allowedOrigins,
+    },
     now: options.now ?? Date.now,
   };
   const listener = (req: IncomingMessage, res: ServerResponse): void => {
@@ -140,6 +153,16 @@ async function handle(
   const method = req.method ?? 'GET';
   const url = new URL(req.url ?? '/', 'http://localhost');
   const path = url.pathname.replace(/\/+$/, '') || '/';
+
+  // --- cross-site request guard: first, before CORS, OPTIONS, auth, rate limit, the stream and static
+  // files, so nothing (not even a body-less POST) runs for a foreign Host or a cross-site write. Active
+  // only while auth is off; with a token the auth gate below is the boundary. See `request-guard.ts`. ---
+  const secFetchSite = req.headers['sec-fetch-site'];
+  const verdict = checkRequest(
+    { method, host: req.headers.host, origin: req.headers.origin, secFetchSite: typeof secFetchSite === 'string' ? secFetchSite : undefined },
+    ctx.requestPolicy,
+  );
+  if (!verdict.ok) throw new ApiError(verdict.status, verdict.reason);
 
   // --- CORS / cross-origin (issue #27): default posture is same-origin only (the dashboard is served
   // by this same daemon, so it needs no CORS grant). `corsHeaders` returns an ACAO **only** for an exact
@@ -600,6 +623,12 @@ async function readJson(req: IncomingMessage, maxBytes: number): Promise<Record<
   }
   const raw = Buffer.concat(chunks).toString('utf8').trim();
   if (raw === '') return {};
+  // A browser (it sends Origin) can post a non-JSON body cross-site without a CORS preflight; JSON
+  // needs one, which the CORS deny-list refuses. Scoped to Origin-carrying requests so curl and
+  // scripts that post JSON without a Content-Type keep working.
+  if (req.headers.origin !== undefined && !isJsonContentType(req.headers['content-type'])) {
+    throw new ApiError(415, 'Content-Type must be application/json');
+  }
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {

@@ -6,7 +6,7 @@
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
-import type { Server } from 'node:http';
+import { request as httpRequest, type IncomingHttpHeaders, type Server } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -45,6 +45,8 @@ interface StartOpts {
   allowedOrigins?: string[];
   /** Injected clock (epoch ms) so the rate limiter is deterministic in tests. */
   now?: () => number;
+  /** The `--host` the daemon is bound to (the request guard accepts it as a Host name). */
+  bindHost?: string;
   /** Override the autocomplete suggestion source — used to force a non-`ApiError` internal throw. */
   suggestionSource?: SuggestionSource;
 }
@@ -81,6 +83,7 @@ async function start(opts: StartOpts = {}): Promise<{ base: string; orchestrator
     ...(opts.maxBodyBytes !== undefined ? { maxBodyBytes: opts.maxBodyBytes } : {}),
     ...(opts.allowedOrigins ? { allowedOrigins: opts.allowedOrigins } : {}),
     ...(opts.now ? { now: opts.now } : {}),
+    ...(opts.bindHost ? { bindHost: opts.bindHost } : {}),
   });
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -1293,5 +1296,109 @@ describe('HTTP API — operator context routes (agents-fsm#5)', () => {
     expect(badBody.status).toBe(400);
     const missing = await fetch(`${base}/runs/99999/context`, { method: 'POST', body: JSON.stringify({ context: 'x' }) });
     expect(missing.status).toBe(404);
+  });
+});
+
+/** A raw `node:http` request, for headers `fetch` won't let a caller set (Host). Reads the whole reply. */
+function rawRequest(
+  base: string,
+  method: string,
+  path: string,
+  headers: Record<string, string> = {},
+  body?: string,
+): Promise<{ status: number; headers: IncomingHttpHeaders; body: string }> {
+  const { hostname, port } = new URL(base);
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ hostname, port, method, path, headers }, (res) => {
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', (c: string) => (data += c));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: data }));
+    });
+    req.on('error', reject);
+    req.end(body);
+  });
+}
+
+describe('HTTP API — cross-site request guard (auth off)', () => {
+  const json = { 'Content-Type': 'application/json' };
+  const runCount = async (base: string): Promise<number> => ((await (await fetch(`${base}/runs`)).json()) as unknown[]).length;
+
+  it('refuses a cross-site simple POST (text/plain, foreign Origin) with 403 and starts no run', async () => {
+    const { base } = await start();
+    const res = await fetch(`${base}/runs`, {
+      method: 'POST',
+      headers: { Origin: 'http://evil.example', 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ issueRef: 'o/r#1' }),
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toMatch(/cross-origin request refused/);
+    expect(await runCount(base)).toBe(0);
+  });
+
+  it('refuses body-less cross-site POSTs and a browser POST that only sends Sec-Fetch-Site', async () => {
+    const { base } = await start();
+    // Refused before routing: an admitted request would 404 on the unknown run.
+    expect((await fetch(`${base}/runs/999999/pause`, { method: 'POST', headers: { Origin: 'https://evil.example' } })).status).toBe(403);
+    expect((await fetch(`${base}/scheduler/check`, { method: 'POST', headers: { Origin: 'null' } })).status).toBe(403);
+    expect((await fetch(`${base}/runs/999999/pause`, { method: 'POST', headers: { 'Sec-Fetch-Site': 'cross-site' } })).status).toBe(403);
+  });
+
+  it('refuses every route for a foreign Host (DNS rebinding), including the stream and static files', async () => {
+    const { base } = await start({ publicDir: fixturePublicDir() });
+    const evil = { Host: 'evil.example:4319' };
+    for (const path of ['/runs', `/fs/dirs?q=${encodeURIComponent(`${tmpdir()}/`)}`, '/health', '/', '/app.js']) {
+      expect((await rawRequest(base, 'GET', path, evil)).status, path).toBe(403);
+    }
+    const stream = await rawRequest(base, 'GET', '/stream', evil);
+    expect(stream.status).toBe(403);
+    expect(stream.headers['content-type']).not.toBe('text/event-stream');
+    expect((await rawRequest(base, 'PUT', '/config', { ...evil, ...json }, '{}')).status).toBe(403);
+    expect((await rawRequest(base, 'OPTIONS', '/runs', evil)).status).toBe(403);
+    expect(await runCount(base)).toBe(0);
+  });
+
+  it('still admits the dashboard, the Vite dev server, ssh -L and non-browser clients', async () => {
+    const { base } = await start();
+    const post = (n: number, headers: Record<string, string>) =>
+      fetch(`${base}/runs`, { method: 'POST', headers: { ...json, ...headers }, body: JSON.stringify({ issueRef: `o/r#${n}` }) });
+    expect((await post(1, { Origin: base })).status).toBe(201); // same origin
+    expect((await post(2, { Origin: 'http://localhost:5173' })).status).toBe(201); // vite dev proxy
+    expect((await post(3, {})).status).toBe(201); // curl / scripts
+    const port = new URL(base).port;
+    const tunnel = await rawRequest(base, 'POST', '/runs', { ...json, Host: 'localhost:8080', Origin: 'http://localhost:8080' }, JSON.stringify({ issueRef: 'o/r#4' }));
+    expect(tunnel.status).toBe(201); // ssh -L 8080:127.0.0.1:<port>
+    expect((await rawRequest(base, 'GET', '/runs', { Host: `[::1]:${port}` })).status).toBe(200);
+    expect(await runCount(base)).toBe(4);
+  });
+
+  it('wants application/json from a browser (415), but not from a client that sends no Origin', async () => {
+    const { base } = await start();
+    const body = JSON.stringify({ issueRef: 'o/r#1' });
+    const browser = await fetch(`${base}/runs`, { method: 'POST', headers: { Origin: base, 'Content-Type': 'text/plain' }, body });
+    expect(browser.status).toBe(415);
+    expect(((await browser.json()) as { error: string }).error).toBe('Content-Type must be application/json');
+    expect((await fetch(`${base}/runs`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body })).status).toBe(201);
+  });
+
+  it('trusts FLEET_CORS_ORIGINS entries as write origins and their hostnames as Host', async () => {
+    const { base } = await start({ allowedOrigins: ['https://ops.example'] });
+    const res = await fetch(`${base}/runs`, { method: 'POST', headers: { ...json, Origin: 'https://ops.example' }, body: JSON.stringify({ issueRef: 'o/r#1' }) });
+    expect(res.status).toBe(201);
+    expect((await rawRequest(base, 'GET', '/runs', { Host: 'ops.example' })).status).toBe(200);
+    expect((await rawRequest(base, 'GET', '/runs', { Host: 'other.example' })).status).toBe(403);
+  });
+
+  it('accepts the bound host as Host', async () => {
+    const { base } = await start({ bindHost: '100.64.0.5' });
+    expect((await rawRequest(base, 'GET', '/runs', { Host: `100.64.0.5:${new URL(base).port}` })).status).toBe(200);
+  });
+
+  it('steps aside when a token is set: the token gate decides (Bearer → 200, none → 401)', async () => {
+    const TOKEN = 'guard-test-token';
+    const { base } = await start({ apiToken: TOKEN });
+    expect((await rawRequest(base, 'GET', '/runs', { Host: 'evil.example', Authorization: `Bearer ${TOKEN}` })).status).toBe(200);
+    const res = await fetch(`${base}/runs`, { method: 'POST', headers: { ...json, Origin: 'http://evil.example' }, body: JSON.stringify({ issueRef: 'o/r#1' }) });
+    expect(res.status).toBe(401);
   });
 });

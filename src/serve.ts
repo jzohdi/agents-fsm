@@ -74,6 +74,7 @@ export async function serve(args: CliArgs): Promise<void> {
     rateLimit,
     maxBodyBytes,
     ...(allowedOrigins.length > 0 ? { allowedOrigins } : {}),
+    bindHost: host,
   });
   await listen(server, args.port, host);
   const config = orchestrator.getConfig();

@@ -56,10 +56,16 @@ Two attacker profiles:
 - **Clickjack / frame the SPA.** `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'`.
 - **Read cross-origin API responses.** No permissive `Access-Control-Allow-Origin` is ever emitted; the
   default is deny-all, and even an allow-list is exact-match (never `*`). *(Fixed with a test.)*
-- **Ride an ambient credential (classic CSRF).** Auth is a bearer token in the `Authorization` header
-  (or `?token=` for SSE) — **never a cookie**. There is no ambient credential a cross-site page can force
-  the browser to attach, so classic CSRF does not apply. A locked-down ACAO + no-cookie auth means a
-  malicious page can neither read responses nor ride a credential.
+- **Ride an ambient credential (CSRF).** With a token set, auth is a bearer token in the
+  `Authorization` header (or `?token=` for SSE) — **never a cookie**, so a cross-site page has no
+  credential to ride. **With auth off (the loopback default) the ambient "credential" is network
+  position:** a page in the operator's browser can send a cross-site
+  "simple" `POST` (`text/plain` or a form, no preflight) that starts a run, and DNS rebinding makes a
+  foreign hostname same-origin for reads. `src/api/request-guard.ts` closes both while auth is off: an
+  allow-listed `Host` on every request (loopback names, the bound host, `FLEET_CORS_ORIGINS` hostnames),
+  an allowed `Origin` (or none, unless `Sec-Fetch-Site` says cross-site/same-site) on every
+  state-changing request, and `application/json` bodies from browsers (`415` otherwise). *(Fixed with
+  tests.)*
 - **Learn internal detail from an error.** A non-`ApiError` throw is sanitized to a generic
   `500 { error: 'internal server error' }`; the real error is logged server-side only. No stack trace,
   raw message, or filesystem path reaches a remote caller. *(Fixed with a test.)*
@@ -70,7 +76,7 @@ Two attacker profiles:
 |------------------------|-------------|
 | Rate limiting / abuse on mutating routes | **Fixed + test** — per-source token bucket (`src/api/rate-limit.ts`); `429` + `Retry-After`; `GET`/SSE/`/health` never throttled. |
 | Request-body size cap | **Fixed + test** — `readJson` caps bytes → `413` (default 1 MiB, configurable). |
-| CSRF / cross-origin | **Fixed + test** — deny-all CORS by default, exact-match allow-list, never `*`; bearer-token (non-cookie) auth ⇒ classic CSRF N/A. |
+| CSRF / cross-origin | **Fixed + test** — deny-all CORS by default, exact-match allow-list, never `*`; bearer-token (non-cookie) auth when a token is set; with auth off, the Host/Origin/Content-Type request guard (`request-guard.ts`) refuses cross-site writes and DNS-rebound requests. |
 | Input validation / path params | **Confirmed + test** — path params are integer-guarded (`/^\/runs\/(\d+)\/…$/`); malformed JSON → `400`; oversized → `413`. |
 | Static path-traversal guard | **Confirmed + regression tests** — `resolveStaticPath` holds under the trickier remote vectors. |
 | Security headers | **Fixed + test** — `nosniff` / `X-Frame-Options: DENY` / `Referrer-Policy: no-referrer` on every response; CSP on the SPA document. |

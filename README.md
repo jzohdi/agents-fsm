@@ -1034,7 +1034,10 @@ no cert to manage:
   `http://127.0.0.1:4319` on the local device. The daemon can stay on its loopback default.
 
 Set `FLEET_API_TOKEN` regardless — a tunnel controls who can reach the socket, the token controls who
-can drive the API.
+can drive the API. Without a token the daemon answers only requests addressed to `127.0.0.1`,
+`localhost` or `[::1]` (any port, so `ssh -L` works), so a tunnel that arrives under its own hostname
+(Cloudflare Tunnel) gets `403` until you set the token (recommended) or list the tunnel's origin in
+`FLEET_CORS_ORIGINS`.
 
 **Option B — direct TLS.** If you'd rather terminate TLS in the daemon itself, pass a cert/key pair and
 bind a routable host:
@@ -1076,7 +1079,16 @@ write-up of what an off-localhost attacker can and cannot do lives in
   unbounded payload can exhaust memory.
 - **Cross-origin: deny-all by default.** No `Access-Control-Allow-Origin` is emitted unless you opt in
   with an exact allow-list (`--cors-origin`, repeatable or comma-separated, or `FLEET_CORS_ORIGINS`); a
-  wildcard is never sent. Auth is a bearer token (never a cookie), so classic CSRF does not apply.
+  wildcard is never sent.
+- **Cross-site requests and DNS rebinding (auth off).** A bearer token is no defence when no token is
+  set: any page in your browser can send a "simple" cross-site `POST` (a `text/plain` fetch or an HTML
+  form needs no CORS preflight, so it reaches the daemon and only the reply is hidden), and DNS rebinding
+  can make a foreign hostname resolve to `127.0.0.1`. So, while auth is off, every request must name an
+  allowed `Host` (loopback names, the `--host` you bound, or a `FLEET_CORS_ORIGINS` entry's hostname), a
+  `POST`/`PUT`/`PATCH`/`DELETE` that carries an `Origin` must come from loopback, the same origin or a
+  `FLEET_CORS_ORIGINS` entry, and a browser's request body must be `application/json` (else `415`).
+  Anything else gets `403`. Clients that send no `Origin` (curl, scripts) are unaffected. With a token
+  set, the token is the boundary and these checks step aside.
 - **Error sanitization.** Unexpected internal errors return a generic `500` (no stack trace, raw message,
   or filesystem path); only deliberate client-facing `ApiError` messages are surfaced.
 
