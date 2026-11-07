@@ -57,9 +57,9 @@ Two attacker profiles:
 - **Read cross-origin API responses.** No permissive `Access-Control-Allow-Origin` is ever emitted; the
   default is deny-all, and even an allow-list is exact-match (never `*`). *(Fixed with a test.)*
 - **Ride an ambient credential (CSRF).** With a token set, auth is a bearer token in the
-  `Authorization` header (or `?token=` for SSE) — **never a cookie**, so a cross-site page has no
-  credential to ride. **With auth off (the loopback default) the ambient "credential" is network
-  position:** a page in the operator's browser can send a cross-site
+  `Authorization` header (or `?token=`, on `/stream` only) — **never a cookie**, so a cross-site page
+  has no credential to ride. **With auth off (the loopback default) the ambient "credential" is
+  network position:** a page in the operator's browser can send a cross-site
   "simple" `POST` (`text/plain` or a form, no preflight) that starts a run, and DNS rebinding makes a
   foreign hostname same-origin for reads. `src/api/request-guard.ts` closes both while auth is off: an
   allow-listed `Host` on every request (loopback names, the bound host, `FLEET_CORS_ORIGINS` hostnames),

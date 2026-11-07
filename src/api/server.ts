@@ -184,7 +184,7 @@ async function handle(
   // `/stream` branch below runs after this, so SSE is covered by the same check (a tokenless stream
   // gets a plain 401 JSON, never a text/event-stream upgrade). ---
   if (apiToken && requiresAuth(path)) {
-    const provided = extractToken(req.headers, url);
+    const provided = extractToken(req.headers, path === '/stream' ? url : undefined); // ?token= is for SSE only
     if (!tokenMatches(provided, apiToken)) {
       throw new ApiError(401, provided === undefined ? 'authentication required' : 'invalid token');
     }

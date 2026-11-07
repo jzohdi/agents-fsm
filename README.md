@@ -757,8 +757,8 @@ the executor already retries rate-limited invocations with backoff (`--max-retri
 only on loopback (`127.0.0.1`) — safe for a local dashboard, but nothing more. Set `FLEET_API_TOKEN`
 (or `--api-token <token>`) to require a shared-secret bearer token on **every** route except `GET
 /health` (liveness probes) and the static dashboard assets (which must load so the SPA can prompt for a
-token). Clients send `Authorization: Bearer <token>`; the SSE `/stream` also accepts `?token=<token>`
-because a browser `EventSource` can't set headers. A missing token is `401 authentication required`, a
+token). Clients send `Authorization: Bearer <token>`; only the SSE `/stream` also accepts `?token=<token>`,
+because a browser `EventSource` can't set headers (other routes ignore it, so tokens stay out of URLs). A missing token is `401 authentication required`, a
 wrong one `401 invalid token` (constant-time comparison). The token is read from the environment only —
 **never** stored in SQLite (§9.1) — and absent/blank keeps auth off (behaviour byte-for-byte unchanged).
 By default the daemon binds loopback (`127.0.0.1`); reaching it from another device is now supported

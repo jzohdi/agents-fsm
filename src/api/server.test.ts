@@ -818,6 +818,18 @@ describe('HTTP API — auth (issue #25)', () => {
     controller.abort();
   });
 
+  it('auth-on reads ?token= only on /stream: other routes answer 401 to a query-string token', async () => {
+    const { base } = await start({ apiToken: TOKEN });
+    const q = `token=${encodeURIComponent(TOKEN)}`;
+    expect((await fetch(`${base}/runs?${q}`)).status).toBe(401);
+    expect((await fetch(`${base}/runs/1/pause?${q}`, { method: 'POST' })).status).toBe(401);
+    expect((await fetch(`${base}/runs`, { headers: { Authorization: `Bearer ${TOKEN}` } })).status).toBe(200);
+    const controller = new AbortController();
+    const stream = await fetch(`${base}/stream?${q}`, { signal: controller.signal });
+    expect(stream.status).toBe(200);
+    controller.abort();
+  });
+
   it('auth-on leaves /health open (liveness probes) even with no token supplied', async () => {
     const { base } = await start({ apiToken: TOKEN });
     expect((await fetch(`${base}/health`)).status).toBe(200);

@@ -57,6 +57,11 @@ describe('extractToken (Bearer header + ?token= fallback)', () => {
     expect(extractToken({}, urlOf('/runs'))).toBeUndefined();
   });
 
+  it('ignores the query param when no URL is passed (every route but /stream)', () => {
+    expect(extractToken({}, undefined)).toBeUndefined();
+    expect(extractToken({ authorization: 'Bearer abc123' })).toBe('abc123');
+  });
+
   it('returns undefined for a malformed / non-Bearer header', () => {
     expect(extractToken({ authorization: 'Basic abc123' }, urlOf('/runs'))).toBeUndefined();
     expect(extractToken({ authorization: 'abc123' }, urlOf('/runs'))).toBeUndefined();
