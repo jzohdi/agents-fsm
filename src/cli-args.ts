@@ -94,7 +94,8 @@ export interface CliArgs {
   /**
    * Exact-match CORS allow-list for the `serve` daemon (issue #27) — `--cors-origin` (repeatable or
    * comma-separated). Env `FLEET_CORS_ORIGINS` (comma-separated). Undefined/blank → empty (deny all
-   * cross-origin, the default). Each entry is an exact origin (`https://host[:port]`).
+   * cross-origin, the default). Each entry is an exact origin (`https://host[:port]`). With auth off, the
+   * request guard also trusts these origins for writes and their hostnames as `Host` (request-guard.ts).
    */
   allowedOrigins?: string[];
 }

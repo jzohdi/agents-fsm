@@ -879,7 +879,7 @@ export class Orchestrator {
     }
     // `cloneUrl` reaches `git clone`: only network remotes (a local checkout is bound via /repos/source).
     if (input.cloneUrl && !isRemoteCloneUrl(input.cloneUrl)) {
-      throw new ApiError(400, 'cloneUrl must be an https://, ssh:// or user@host:path Git remote');
+      throw new ApiError(400, 'cloneUrl must be an https://, ssh:// or user@host:path Git remote with no credentials');
     }
     if (input.baseBranch && !isValidBranchName(input.baseBranch)) {
       throw new ApiError(400, `baseBranch ${JSON.stringify(input.baseBranch)} is not a valid branch name`);

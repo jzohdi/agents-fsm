@@ -1409,10 +1409,8 @@ describe('HTTP API — cross-site request guard (auth off)', () => {
     expect(browser.status).toBe(415);
     expect(((await browser.json()) as { error: string }).error).toBe('Content-Type must be application/json');
     expect((await fetch(`${base}/runs`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body })).status).toBe(201);
-    // Comma tricks that a browser may send without a preflight are not JSON.
-    for (const ct of ['application/json;,text/plain', 'application/json; x=,text/plain', 'application/json;x=", text/plain"', 'application/json;charset=utf-8, text/plain']) {
-      expect((await fetch(`${base}/runs`, { method: 'POST', headers: { Origin: base, 'Content-Type': ct }, body })).status, ct).toBe(415);
-    }
+    // A comma trick a browser may send without a preflight is not JSON (the full list: request-guard.test).
+    expect((await fetch(`${base}/runs`, { method: 'POST', headers: { Origin: base, 'Content-Type': 'application/json;,text/plain' }, body })).status).toBe(415);
     // Case and a UTF-8 charset don't matter, and a chunked body is read like any other.
     const chunked = new Blob([JSON.stringify({ issueRef: 'o/r#2' })]).stream();
     const res = await fetch(`${base}/runs`, {

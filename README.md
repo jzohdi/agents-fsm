@@ -714,8 +714,8 @@ loopback; the dashboard is a pure client of its API (§3.3 Layer 7).
   - **Cursor (optional):** the `cursor-agent` CLI on `PATH`, authenticated via `cursor-agent login` or
     `CURSOR_API_KEY`. Not needed unless you select the Cursor harness.
 - `npm ci` once. No dependency install script runs (`allowScripts` in `package.json`); better-sqlite3
-  ships its prebuilt binary. The SQLite schema is created/migrated automatically on first open — no manual
-  migration step, and an existing daemon DB upgrades in place on the next `serve`.
+  ships its prebuilt binary. The SQLite schema is created/migrated automatically on first open — no
+  manual migration step, and an existing daemon DB upgrades in place on the next `serve`.
 
 ### 9.2 Run a single issue (one-shot CLI)
 ```
@@ -781,7 +781,8 @@ on top of the per-run token/cost budget in the FSM config (§2), not a replaceme
 > `POST /repos/source` instead). A run is admitted for any *enrolled* repo and serviced by that repo's
 > own adapter; starting an issue in an unenrolled repo is refused with a clear "enroll it
 > (`POST /repos`)" error. The new-run autocomplete searches *all* your GitHub issues, so it can surface
-> issues from repos you haven't enrolled yet. Runs across repos advance in parallel — see the concurrency cap below.
+> issues from repos you haven't enrolled yet. Runs across repos advance in parallel — see the
+> concurrency cap below.
 
 ### 9.4 Configure the FSM
 The pipeline (states, transitions, back-edges, guard limits, budget) is one config object. Edit it
@@ -1091,9 +1092,9 @@ write-up of what an off-localhost attacker can and cannot do lives in
   `POST`/`PUT`/`PATCH`/`DELETE` that carries an `Origin` must come from the same origin, the
   `npm run dev:dashboard` server (`http://localhost:5173` / `http://127.0.0.1:5173`) or a
   `FLEET_CORS_ORIGINS` entry (a page on any other local port, e.g. a project's own dev server, is
-  refused), and a browser's request body must be `application/json` (else `415`).
-  Anything else gets `403`. Clients that send no `Origin` (curl, scripts) are unaffected. With a token
-  set, the token is the boundary and these checks step aside.
+  refused), and a browser's request body must be `application/json` (optionally `; charset=utf-8`;
+  else `415`). Anything else gets `403`. Clients that send no `Origin` (curl, scripts) are unaffected.
+  With a token set, the token is the boundary and these checks step aside.
 - **Error sanitization.** Unexpected internal errors return a generic `500` (no stack trace, raw message,
   or filesystem path); only deliberate client-facing `ApiError` messages are surfaced.
 
