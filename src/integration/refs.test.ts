@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseIssueRef, parseRepoRef } from './refs';
+import { isRemoteCloneUrl, isValidBranchName, parseIssueRef, parseRepoRef } from './refs';
 
 describe('parseRepoRef', () => {
   it('passes through the canonical owner/repo form', () => {
@@ -56,4 +56,32 @@ describe('parseIssueRef', () => {
   it('throws when there is no repo', () => {
     expect(() => parseIssueRef('#31')).toThrow(/owner\/repo/);
   });
+});
+
+describe('isRemoteCloneUrl', () => {
+  it.each(['https://github.com/o/r.git', 'ssh://git@github.com/o/r.git', 'git@github.com:o/r.git', 'deploy@git.example.com:team/r'])(
+    'accepts the network remote %s',
+    (url) => expect(isRemoteCloneUrl(url)).toBe(true),
+  );
+
+  it.each([
+    '--upload-pack=touch /tmp/x',
+    '-u touch /tmp/x',
+    'file:///tmp/x',
+    'ext::sh -c touch% /tmp/x',
+    '/tmp/x',
+    './x',
+    'http://github.com/o/r.git',
+    'ssh://-oProxyCommand=x/r',
+    '-oProxyCommand=x@host:r',
+    'https://github.com/o/r.git --upload-pack=x',
+  ])('rejects %s', (url) => expect(isRemoteCloneUrl(url)).toBe(false));
+});
+
+describe('isValidBranchName', () => {
+  it.each(['main', 'develop', 'release/1.2', 'feature_x-1'])('accepts %s', (name) => expect(isValidBranchName(name)).toBe(true));
+
+  it.each(['--orphan', '-b', 'a..b', 'a//b', 'a/.x', 'x.lock', 'x/', 'x.', 'HEAD@{1}', 'a b', ''])('rejects %s', (name) =>
+    expect(isValidBranchName(name)).toBe(false),
+  );
 });

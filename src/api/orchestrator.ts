@@ -55,7 +55,7 @@ import {
   type HarnessId,
 } from '../agent/harness';
 import type { RepoResolver } from '../integration/github-resolver';
-import { parseIssueRef, parseRepoRef, type ParsedIssueRef } from '../integration/refs';
+import { isRemoteCloneUrl, isValidBranchName, parseIssueRef, parseRepoRef, type ParsedIssueRef } from '../integration/refs';
 import { Broadcaster, type StreamListener } from './stream';
 
 /** A failure with a client-facing HTTP status. The server maps `status` straight onto the response. */
@@ -876,6 +876,13 @@ export class Orchestrator {
       ref = parseRepoRef(input.repoRef);
     } catch (err) {
       throw new ApiError(400, err instanceof Error ? err.message : String(err));
+    }
+    // `cloneUrl` reaches `git clone`: only network remotes (a local checkout is bound via /repos/source).
+    if (input.cloneUrl && !isRemoteCloneUrl(input.cloneUrl)) {
+      throw new ApiError(400, 'cloneUrl must be an https://, ssh:// or user@host:path Git remote');
+    }
+    if (input.baseBranch && !isValidBranchName(input.baseBranch)) {
+      throw new ApiError(400, `baseBranch ${JSON.stringify(input.baseBranch)} is not a valid branch name`);
     }
     const workingRoot = input.workingRoot ?? this.defaultWorkingRoot;
     if (!workingRoot) throw new ApiError(400, 'workingRoot is required (the daemon has no default --work configured)');

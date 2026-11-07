@@ -37,6 +37,28 @@ export function parseRepoRef(input: string): string {
   return `${owner}/${repo}`;
 }
 
+/** Network Git remotes an API caller may enroll: `https://…`, `ssh://…` and scp-style `user@host:path`.
+ *  Local paths, `file://`, `ext::` and anything that could read as a `git` option are not remotes. */
+const REMOTE_URL = [/^https:\/\/\S+$/, /^ssh:\/\/[A-Za-z0-9]\S*$/, /^[A-Za-z0-9][\w.-]*@[A-Za-z0-9][A-Za-z0-9.-]*:\S+$/];
+
+/** True for a clone URL from {@link REMOTE_URL}'s allow-list. */
+export function isRemoteCloneUrl(url: string): boolean {
+  return REMOTE_URL.some((re) => re.test(url));
+}
+
+/**
+ * True for a plausible branch name: starts with a letter or digit, uses only letters, digits, `.`, `_`,
+ * `/` and `-`, and avoids the forms `git check-ref-format` rejects (`..`, `//`, a `/.` component, a
+ * trailing `/`, `.` or `.lock`). Stricter than git, so it can never be read as an option.
+ */
+export function isValidBranchName(name: string): boolean {
+  return (
+    /^[A-Za-z0-9][\w./-]*$/.test(name) &&
+    !/\.\.|\/\/|\/\./.test(name) &&
+    !/(\/|\.|\.lock)$/.test(name)
+  );
+}
+
 export interface ParsedIssueRef {
   /** Canonical `owner/repo`. */
   repo: string;
