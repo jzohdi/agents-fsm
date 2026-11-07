@@ -49,11 +49,12 @@ export function tokenMatches(provided: string | undefined, expected: string): bo
 
 /**
  * Extract the bearer credential from a request: `Authorization: Bearer <token>` (case-insensitive
- * scheme) first, then the `?token=` query param (needed for SSE — `EventSource` can't set headers).
- * Returns `undefined` when neither is present, the header is malformed/non-string, or the resolved
- * value is empty.
+ * scheme) first, then the `?token=` query param of `url` — pass `url` only for `/stream`, the one route
+ * that needs it (`EventSource` can't set headers); elsewhere a token in the URL would end up in logs
+ * and history, so it isn't read. Returns `undefined` when there's no credential, the header is
+ * malformed/non-string, or the resolved value is empty.
  */
-export function extractToken(headers: IncomingHttpHeaders, url: URL): string | undefined {
+export function extractToken(headers: IncomingHttpHeaders, url?: URL): string | undefined {
   const auth = headers.authorization;
   if (typeof auth === 'string') {
     const space = auth.indexOf(' ');
@@ -62,7 +63,7 @@ export function extractToken(headers: IncomingHttpHeaders, url: URL): string | u
       if (token !== '') return token;
     }
   }
-  return url.searchParams.get('token') || undefined; // empty '' → undefined
+  return url?.searchParams.get('token') || undefined; // empty '' → undefined
 }
 
 /**

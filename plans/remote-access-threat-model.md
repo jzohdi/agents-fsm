@@ -5,9 +5,10 @@ surface is actually reachable by something other than a local process. This docu
 review that issue #27 asked for: the trust boundary, what an off-localhost attacker can and cannot do,
 and the per-gap disposition (fixed-with-test or deferred-with-rationale).
 
-It is deliberately scoped to the threats that **only matter once the surface is exposed**. The
-loopback-only default is unchanged, and everything here is either universal-and-cheap or defaulted so a
-normal local session is byte-for-byte unaffected.
+It is deliberately scoped to the threats that **only matter once the surface is exposed**, plus one
+that applies to the loopback default too: web pages in the operator's own browser (profile 3). Everything
+here is either universal-and-cheap or defaulted so a normal local session (the dashboard, the CLI,
+curl) is unaffected.
 
 ## Trust boundary
 
@@ -20,11 +21,15 @@ The **trust boundary** is the network socket. Inside it: the operator's machine,
 `ANTHROPIC_API_KEY` in the process environment, the SQLite state, and the working trees. Outside it,
 once bound off-localhost: anyone who can reach the socket — with or without the shared API token.
 
-Two attacker profiles:
+Three attacker profiles:
 
 1. **Unauthenticated off-localhost attacker** — can reach the socket but does not hold the token.
 2. **Token-bearing client** — holds the shared bearer token (e.g. the operator's phone, or a leaked
    token). By design there is one shared token; multi-user/RBAC is out of scope (README §1).
+3. **A web page in the operator's browser** — any site, or a project's dev server on another local
+   port, while the daemon runs with auth off on loopback. It can make the browser send requests, and
+   with DNS rebinding read replies; the request guard refuses both (see "Ride an ambient credential"
+   below).
 
 ## What an off-localhost attacker **can** do
 
@@ -56,10 +61,19 @@ Two attacker profiles:
 - **Clickjack / frame the SPA.** `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'`.
 - **Read cross-origin API responses.** No permissive `Access-Control-Allow-Origin` is ever emitted; the
   default is deny-all, and even an allow-list is exact-match (never `*`). *(Fixed with a test.)*
-- **Ride an ambient credential (classic CSRF).** Auth is a bearer token in the `Authorization` header
-  (or `?token=` for SSE) — **never a cookie**. There is no ambient credential a cross-site page can force
-  the browser to attach, so classic CSRF does not apply. A locked-down ACAO + no-cookie auth means a
-  malicious page can neither read responses nor ride a credential.
+- **Ride an ambient credential (CSRF).** With a token set, auth is a bearer token in the
+  `Authorization` header (or `?token=`, on `/stream` only) — **never a cookie**, so a cross-site page
+  has no credential to ride. **With auth off (the loopback default) the ambient "credential" is
+  network position:** a page in the operator's browser can send a cross-site "simple" `POST`
+  (`text/plain` or a form, no preflight) that starts a run, and DNS rebinding makes a foreign hostname
+  same-origin for reads. `src/api/request-guard.ts` closes both while auth is off *(fixed with tests)*:
+  - every request must name an allowed `Host`: loopback names, the bound host, or a
+    `FLEET_CORS_ORIGINS` hostname;
+  - a state-changing request's `Origin` must be the same origin, the dev dashboard
+    (`http://localhost:5173`, `http://127.0.0.1:5173`) or a `FLEET_CORS_ORIGINS` entry; a page on any
+    other local port is refused. A request with no `Origin` (curl, scripts) passes unless
+    `Sec-Fetch-Site` says `cross-site` or `same-site`;
+  - a browser's body must be `application/json` (optionally `; charset=utf-8`), else `415`.
 - **Learn internal detail from an error.** A non-`ApiError` throw is sanitized to a generic
   `500 { error: 'internal server error' }`; the real error is logged server-side only. No stack trace,
   raw message, or filesystem path reaches a remote caller. *(Fixed with a test.)*
@@ -70,7 +84,7 @@ Two attacker profiles:
 |------------------------|-------------|
 | Rate limiting / abuse on mutating routes | **Fixed + test** — per-source token bucket (`src/api/rate-limit.ts`); `429` + `Retry-After`; `GET`/SSE/`/health` never throttled. |
 | Request-body size cap | **Fixed + test** — `readJson` caps bytes → `413` (default 1 MiB, configurable). |
-| CSRF / cross-origin | **Fixed + test** — deny-all CORS by default, exact-match allow-list, never `*`; bearer-token (non-cookie) auth ⇒ classic CSRF N/A. |
+| CSRF / cross-origin | **Fixed + test** — deny-all CORS by default, exact-match allow-list, never `*`; bearer-token (non-cookie) auth when a token is set; with auth off, the Host/Origin/Content-Type request guard (`request-guard.ts`) refuses cross-site writes and DNS-rebound requests. |
 | Input validation / path params | **Confirmed + test** — path params are integer-guarded (`/^\/runs\/(\d+)\/…$/`); malformed JSON → `400`; oversized → `413`. |
 | Static path-traversal guard | **Confirmed + regression tests** — `resolveStaticPath` holds under the trickier remote vectors. |
 | Security headers | **Fixed + test** — `nosniff` / `X-Frame-Options: DENY` / `Referrer-Policy: no-referrer` on every response; CSP on the SPA document. |

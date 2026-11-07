@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseIssueRef, parseRepoRef } from './refs';
+import { isRemoteCloneUrl, isValidBranchName, parseIssueRef, parseRepoRef } from './refs';
 
 describe('parseRepoRef', () => {
   it('passes through the canonical owner/repo form', () => {
@@ -18,6 +18,15 @@ describe('parseRepoRef', () => {
     expect(parseRepoRef('https://github.com/jzohdi/tmux-speedrun.git')).toBe('jzohdi/tmux-speedrun');
     expect(parseRepoRef('git@github.com:jzohdi/tmux-speedrun.git')).toBe('jzohdi/tmux-speedrun');
     expect(parseRepoRef('jzohdi/tmux-speedrun#31')).toBe('jzohdi/tmux-speedrun');
+  });
+
+  it('throws on `.`/`..` segments and an owner starting with "-", but keeps names like .github', () => {
+    for (const ref of ['../../etc', './x', 'a/..', 'a/.', '-x/y', '..']) {
+      expect(() => parseRepoRef(ref), ref).toThrow(/owner\/repo/);
+    }
+    expect(parseRepoRef('a/.github')).toBe('a/.github');
+    expect(parseRepoRef('o/r')).toBe('o/r');
+    expect(parseRepoRef('o/-r')).toBe('o/-r');
   });
 
   it('throws on input with no owner/repo', () => {
@@ -56,4 +65,54 @@ describe('parseIssueRef', () => {
   it('throws when there is no repo', () => {
     expect(() => parseIssueRef('#31')).toThrow(/owner\/repo/);
   });
+});
+
+describe('isRemoteCloneUrl', () => {
+  it.each([
+    'https://github.com/o/r.git',
+    'https://git.example.com:8443/team/r.git',
+    'ssh://git@github.com/o/r.git',
+    'ssh://git@git.example.com:2222/team/r.git',
+    'git@github.com:o/r.git',
+    'deploy@git.example.com:team/r',
+  ])(
+    'accepts the network remote %s',
+    (url) => expect(isRemoteCloneUrl(url)).toBe(true),
+  );
+
+  it.each([
+    '--upload-pack=touch /tmp/x',
+    '-u touch /tmp/x',
+    'file:///tmp/x',
+    'ext::sh -c touch% /tmp/x',
+    '/tmp/x',
+    './x',
+    'http://github.com/o/r.git',
+    'ssh://-oProxyCommand=x/r',
+    '-oProxyCommand=x@host:r',
+    'https://github.com/o/r.git --upload-pack=x',
+    'ssh://git@-oProxyCommand=x/r',
+    'ssh://-u@github.com/o/r',
+    'git@-oProxyCommand=x:r',
+    'git@github.com:-o/r',
+    'https://user:secret@github.com/o/r.git',
+    'https://ghp_0123456789abcdef@github.com/o/r.git',
+    'https://oauth-user@git.example.com/team/r.git',
+    'ssh://git:secret@github.com/o/r.git',
+    'https://github.com:99999/o/r.git',
+    'https://github.com',
+    'HTTPS://github.com/o/r.git',
+    'ssh://git@github.com/o/r\u0000',
+    'ssh://git@git\u0001hub.com/o/r',
+    'https://github.com/o/r\u007f',
+    'git@github.com:o/r\u0000',
+  ])('rejects %s', (url) => expect(isRemoteCloneUrl(url)).toBe(false));
+});
+
+describe('isValidBranchName', () => {
+  it.each(['main', 'develop', 'release/1.2', 'feature_x-1', 'HEADS-UP', 'head', 'feature/HEAD-x'])('accepts %s', (name) => expect(isValidBranchName(name)).toBe(true));
+
+  it.each(['--orphan', '-b', 'a..b', 'a//b', 'a/.x', 'x.lock', 'a.lock/b', 'x/', 'x.', 'HEAD@{1}', 'a b', '', 'HEAD', 'FETCH_HEAD', 'ORIG_HEAD', 'refs/heads/main', 'refs/remotes/origin/x'])('rejects %s', (name) =>
+    expect(isValidBranchName(name)).toBe(false),
+  );
 });

@@ -110,6 +110,9 @@ export class GitHubCli implements GitHub {
     this.repo = parseRepoRef(options.repo);
     this.workingRoot = options.workingRoot;
     this.cloneUrl = options.cloneUrl ?? `https://github.com/${this.repo}.git`;
+    // A value git could read as an option must never reach `git clone`, even from an old DB row. Local
+    // paths stay allowed here (operator flags, tests); the API only enrolls network remotes.
+    if (this.cloneUrl.startsWith('-')) throw new Error(`refusing a clone URL that starts with "-": ${JSON.stringify(this.cloneUrl)}`);
     this.localRepo = options.localRepo;
     this.ghCommand = options.ghCommand ?? 'gh';
     this.gitCommand = options.gitCommand ?? 'git';
@@ -298,7 +301,7 @@ export class GitHubCli implements GitHub {
   /** Clone-on-run source mode: a full `git clone` from the GitHub remote into the per-run tree. */
   private async prepareClone(path: string, input: PrepareWorkingTreeInput): Promise<WorkingTree> {
     if (!existsSync(join(path, '.git'))) {
-      await this.git(['clone', this.cloneUrl, path]);
+      await this.git(['clone', '--', this.cloneUrl, path]); // `--`: the URL is never an option
     }
     await this.git(['fetch', 'origin'], path);
     await this.checkoutRunBranch(path, path, input);

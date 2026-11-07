@@ -701,8 +701,8 @@ A practical guide: from zero to a running, recoverable fleet. The daemon is head
 loopback; the dashboard is a pure client of its API (§3.3 Layer 7).
 
 ### 9.1 Prerequisites
-- **Node ≥ 20** and a working **`gh`** (GitHub CLI), authenticated (`gh auth login`) — the real
-  Git/GitHub adapter shells out to it.
+- **Node 24** (`.nvmrc`) and a working **`gh`** (GitHub CLI), authenticated (`gh auth login`) — the
+  real Git/GitHub adapter shells out to it.
 - **Secrets** live in the environment, never in SQLite. Copy `.env.example` → `.env` and fill in
   `GITHUB_TOKEN` (issues / PRs / branches / comments) and, for the default Claude Code harness,
   `ANTHROPIC_API_KEY` (see the harness bullet). Optionally set `FLEET_API_TOKEN` to require a bearer
@@ -713,8 +713,9 @@ loopback; the dashboard is a pure client of its API (§3.3 Layer 7).
     `ANTHROPIC_API_KEY`.
   - **Cursor (optional):** the `cursor-agent` CLI on `PATH`, authenticated via `cursor-agent login` or
     `CURSOR_API_KEY`. Not needed unless you select the Cursor harness.
-- `npm install` once. The SQLite schema is created/migrated automatically on first open — no manual
-  migration step, and an existing daemon DB upgrades in place on the next `serve`.
+- `npm ci` once. No dependency install script runs (`allowScripts` in `package.json`); better-sqlite3
+  ships its prebuilt binary. The SQLite schema is created/migrated automatically on first open — no
+  manual migration step, and an existing daemon DB upgrades in place on the next `serve`.
 
 ### 9.2 Run a single issue (one-shot CLI)
 ```
@@ -756,9 +757,10 @@ the executor already retries rate-limited invocations with backoff (`--max-retri
 only on loopback (`127.0.0.1`) — safe for a local dashboard, but nothing more. Set `FLEET_API_TOKEN`
 (or `--api-token <token>`) to require a shared-secret bearer token on **every** route except `GET
 /health` (liveness probes) and the static dashboard assets (which must load so the SPA can prompt for a
-token). Clients send `Authorization: Bearer <token>`; the SSE `/stream` also accepts `?token=<token>`
-because a browser `EventSource` can't set headers. A missing token is `401 authentication required`, a
-wrong one `401 invalid token` (constant-time comparison). The token is read from the environment only —
+token). Clients send `Authorization: Bearer <token>`; only the SSE `/stream` also accepts
+`?token=<token>`, because a browser `EventSource` can't set headers (other routes ignore it, so tokens
+stay out of URLs). A missing token is `401 authentication required`, a wrong one `401 invalid token`
+(constant-time comparison). The token is read from the environment only —
 **never** stored in SQLite (§9.1) — and absent/blank keeps auth off (behaviour byte-for-byte unchanged).
 By default the daemon binds loopback (`127.0.0.1`); reaching it from another device is now supported
 (§9.11) and builds on this token layer. The dashboard prompts for the token on a `401`, stores it in
@@ -774,10 +776,13 @@ on top of the per-run token/cost budget in the FSM config (§2), not a replaceme
 
 > **Multiple repos (Milestone 8):** the daemon boot-enrolls its `--repo` as the first repository and
 > accepts more at runtime — the dashboard's repo-tab **+** or `POST /repos` (working root defaults to
-> `--work`). A run is admitted for any *enrolled* repo and serviced by that repo's own adapter; starting
-> an issue in an unenrolled repo is refused with a clear "enroll it (`POST /repos`)" error. The new-run
-> autocomplete searches *all* your GitHub issues, so it can surface issues from repos you haven't enrolled
-> yet. Runs across repos advance in parallel — see the concurrency cap below.
+> `--work`; an optional `cloneUrl` must be an `https://`, `ssh://` or `user@host:path` remote with no
+> credentials in it, and an optional `baseBranch` a plain branch name — bind a local checkout with
+> `POST /repos/source` instead). A run is admitted for any *enrolled* repo and serviced by that repo's
+> own adapter; starting an issue in an unenrolled repo is refused with a clear "enroll it
+> (`POST /repos`)" error. The new-run autocomplete searches *all* your GitHub issues, so it can surface
+> issues from repos you haven't enrolled yet. Runs across repos advance in parallel — see the
+> concurrency cap below.
 
 ### 9.4 Configure the FSM
 The pipeline (states, transitions, back-edges, guard limits, budget) is one config object. Edit it
@@ -1033,7 +1038,10 @@ no cert to manage:
   `http://127.0.0.1:4319` on the local device. The daemon can stay on its loopback default.
 
 Set `FLEET_API_TOKEN` regardless — a tunnel controls who can reach the socket, the token controls who
-can drive the API.
+can drive the API. Without a token the daemon answers only requests addressed to `127.0.0.1`,
+`localhost` or `[::1]` (any port, so `ssh -L` works), so a tunnel that arrives under its own hostname
+(Cloudflare Tunnel) gets `403` until you set the token (recommended) or list the tunnel's origin in
+`FLEET_CORS_ORIGINS`.
 
 **Option B — direct TLS.** If you'd rather terminate TLS in the daemon itself, pass a cert/key pair and
 bind a routable host:
@@ -1075,7 +1083,18 @@ write-up of what an off-localhost attacker can and cannot do lives in
   unbounded payload can exhaust memory.
 - **Cross-origin: deny-all by default.** No `Access-Control-Allow-Origin` is emitted unless you opt in
   with an exact allow-list (`--cors-origin`, repeatable or comma-separated, or `FLEET_CORS_ORIGINS`); a
-  wildcard is never sent. Auth is a bearer token (never a cookie), so classic CSRF does not apply.
+  wildcard is never sent.
+- **Cross-site requests and DNS rebinding (auth off).** A bearer token is no defence when no token is
+  set: any page in your browser can send a "simple" cross-site `POST` (a `text/plain` fetch or an HTML
+  form needs no CORS preflight, so it reaches the daemon and only the reply is hidden), and DNS rebinding
+  can make a foreign hostname resolve to `127.0.0.1`. So, while auth is off, every request must name an
+  allowed `Host` (loopback names, the `--host` you bound, or a `FLEET_CORS_ORIGINS` entry's hostname), a
+  `POST`/`PUT`/`PATCH`/`DELETE` that carries an `Origin` must come from the same origin, the
+  `npm run dev:dashboard` server (`http://localhost:5173` / `http://127.0.0.1:5173`) or a
+  `FLEET_CORS_ORIGINS` entry (a page on any other local port, e.g. a project's own dev server, is
+  refused), and a browser's request body must be `application/json` (optionally `; charset=utf-8`;
+  else `415`). Anything else gets `403`. Clients that send no `Origin` (curl, scripts) are unaffected.
+  With a token set, the token is the boundary and these checks step aside.
 - **Error sanitization.** Unexpected internal errors return a generic `500` (no stack trace, raw message,
   or filesystem path); only deliberate client-facing `ApiError` messages are surfaced.
 

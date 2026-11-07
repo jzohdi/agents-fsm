@@ -192,6 +192,20 @@ describe('Orchestrator — repos (Milestone 8 Phase A)', () => {
     expect(orchestrator.listRepos().map((r) => r.repoRef)).toEqual(['acme/web']);
   });
 
+  it('enrolls only network clone URLs and valid base branches (400 otherwise)', () => {
+    const { orchestrator } = setup({ defaultWorkingRoot: './work' });
+    for (const cloneUrl of ['--upload-pack=touch /tmp/x', '-u x', 'file:///tmp/x', 'ext::sh', '/tmp/x']) {
+      expect(() => orchestrator.enrollRepo({ repoRef: 'acme/web', cloneUrl }), cloneUrl).toThrow(/cloneUrl must be/);
+    }
+    for (const baseBranch of ['--orphan', 'a..b', 'x.lock']) {
+      expect(() => orchestrator.enrollRepo({ repoRef: 'acme/web', baseBranch }), baseBranch).toThrow(/not a valid branch name/);
+    }
+    expect(orchestrator.listRepos()).toEqual([]);
+    for (const cloneUrl of ['https://github.com/acme/web.git', 'ssh://git@github.com/acme/web.git', 'git@github.com:acme/web.git']) {
+      expect(orchestrator.enrollRepo({ repoRef: 'acme/web', cloneUrl, baseBranch: 'release/1.2' })).toMatchObject({ cloneUrl, baseBranch: 'release/1.2' });
+    }
+  });
+
   it('rejects a malformed repoRef (400) and a missing working root with no daemon default (400)', () => {
     const { orchestrator } = setup(); // no defaultWorkingRoot
     expect(() => orchestrator.enrollRepo({ repoRef: 'not a repo' })).toThrow(ApiError);

@@ -287,6 +287,20 @@ function makeRemote(): string {
   return remote;
 }
 
+describe('GitHubCli — clone URL safety', () => {
+  it('ends git clone options with `--`, so the URL is never read as an option', async () => {
+    const { exec, calls } = stubExec({ 'git clone': ok('') }); // the follow-up fetch fails; only the clone matters
+    const workingRoot = mkdtempSync(join(tmpdir(), 'agent-fleet-work-'));
+    const gh = new GitHubCli({ repo: 'o/r', workingRoot, cloneUrl: 'https://github.com/o/r.git', exec });
+    await expect(gh.prepareWorkingTree({ runId: 1, branch: 'agent/run-1', base: 'main' })).rejects.toThrow();
+    expect(calls[0]!.args).toEqual(['clone', '--', 'https://github.com/o/r.git', join(workingRoot, 'run-1')]);
+  });
+
+  it('refuses a clone URL that starts with "-" at construction', () => {
+    expect(() => new GitHubCli({ repo: 'o/r', workingRoot: '/tmp/w', cloneUrl: '--upload-pack=touch /tmp/x' })).toThrow(/starts with "-"/);
+  });
+});
+
 describe('GitHubCli — local git (real temp repo)', () => {
   it('prepares a working tree, commits + pushes, and reads the branch diff', async () => {
     const remote = makeRemote();
